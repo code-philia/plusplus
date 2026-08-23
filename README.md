@@ -28,7 +28,7 @@
 
 ## Replication Benchmark (ARC-Bench)
 
-The performance of ARC can be validated on [ARC-Bench](https://github.com/code-philia/arc-bench).
+The performance of ARC can be validated on [ARC-Bench](https://github.com/code-philia/arc-bench), which consists of a number of applications, their requirements, corresponding validation tests, and reference behavior (via web domain address).
 
 
 ## Why ARC
