@@ -1,136 +1,154 @@
-# Small Train Ticket Booking System
-A small web-based ticket booking system covering user authentication, train search and result display, and basic booking capabilities.
+# Train Ticket Booking Demo
 
-## REQ-1 Public Homepage and User Authentication
-Defines the public homepage, shared navigation, authentication entry points, and session-related public APIs. This node can guide generation of the shared header, route entry points, login/register entry styling, and shared logic for session loading. Optional visual reference: ![image](./reference/homepage.png)
+A small website where visitors can register or sign in, search published trains, select a journey, and create a booking. Accounts, sessions, and confirmed bookings persist. Payment, cancellation, refunds, seat inventory, order history, and timetable administration are outside scope.
+
+## REQ-1 Public home page and account access
+
+The public header provides Register and Login when signed out, and the username and Sign out when signed in. Registration creates an account and session; login restores a session for an existing account.
 
 **Type:** FOLDER
 **Dependencies:** None
 
-### REQ-1.1 User Registration
-An unauthenticated visitor can open the registration page, fill in username, email, password, and confirm password, and submit the registration form. The system must validate the input, create and persist a user account, establish a login session, and move the UI into an authenticated state after success. Invalid input or duplicate accounts must return explicit errors and must not create a new user record. Optional visual reference: ![image](./reference/register.png)
+### REQ-1.1 Register a traveler account
+
+Function: Register displays Nationality, Name, Passport number, Passport expiration date, Date of birth, Gender, Username, Email address, Password, Confirm password, a Terms of service/Privacy policy checkbox, and Next step. All fields are required. Name must contain 2–100 non-whitespace characters; passport number must contain 6–30 ASCII letters, digits, or hyphens; birth date must be in the past and passport expiration in the future. Username must be 3–32 ASCII letters, digits, hyphens, or underscores. Email must be valid and at most 254 characters. Password must be 12–128 characters and include uppercase, lowercase, digit, and special characters; confirmation must match. Username and email are unique, with email compared case-insensitively. A valid submission saves the account, signs the user in, and returns home. Invalid or duplicate input shows an error and creates no account or session.
+
+Required system data: The system must allow creation of independent accounts with username `tb-user-<timestamp>-<random>`, an email generated from that username using a valid domain, password `Valid-password-123!`, name `Ticket User <timestamp>-<random>`, nationality `Vietnam`, passport number `P<timestamp-digits>`, passport expiration date `2035-12-31`, date of birth `1995-06-15`, and gender `Male`. Duplicate-account examples reuse the same username or email. Invalid examples include username `bad username!`, email `not-an-email`, password `short`, a mismatched confirmation, a missing passport number, and unchecked terms.
+
+Optional visual reference: ![image](./reference/register.png)
 
 **Type:** ATOMIC
 **Dependencies:** None
 
 **Scenarios:**
-- Successfully register a new user
-  - **GIVEN:** The visitor is on a public page and is currently not logged in.
-  - **WHEN:** The user opens the registration page, enters a unique username, a valid email, matching passwords, and submits the form.
-  - **THEN:** The system creates and persists the new user, establishes a login session, and moves the UI into an authenticated state.
-- Reject duplicate accounts or invalid input
-  - **GIVEN:** The visitor is on the registration page, and the username or email already exists, or required fields are incomplete, or the two passwords do not match.
-  - **WHEN:** The user submits the registration form.
-  - **THEN:** The system returns explicit validation or conflict feedback and does not create a new user record or login session.
 
-### REQ-1.2 User Login
-A visitor with an existing account can open the login page and sign in using a username or email plus password. The system must validate credentials, load the persisted user, establish a login session, and move the UI into an authenticated state after success. Invalid credentials must not create a session. Optional visual reference: ![image](./reference/login.png)
+- Register a valid traveler
+  - **GIVEN:** A signed-out visitor has unique valid account and traveler details.
+  - **WHEN:** The visitor completes Register, accepts the terms, and clicks Next step.
+  - **THEN:** The home page shows the username and Sign out, including after reload.
+- Reject invalid or duplicate details
+  - **GIVEN:** Registration contains missing, malformed, mismatched, or already-used values.
+  - **WHEN:** The visitor clicks Next step.
+  - **THEN:** Register shows the relevant error and no signed-in session is created.
+
+### REQ-1.2 Sign in with an existing account
+
+Function: Login provides Username or email, Password, and Login controls. The identifier is trimmed; email matching is case-insensitive and the password must match exactly. Valid credentials create a reload-persistent session and return home. Empty, unknown, or incorrect credentials show one generic error and leave the visitor signed out.
+
+Required system data: The system must contain an account created through REQ-1.1 with username `tb-user-<timestamp>-<random>`, an email generated from that username using a valid domain, and password `Valid-password-123!`. Valid login examples use that username or email, including values with leading and trailing spaces. Invalid examples use password `incorrect-password` or an email that does not belong to any account.
+
+Optional visual reference: ![image](./reference/login.png)
 
 **Type:** ATOMIC
 **Dependencies:** REQ-1.1
 
 **Scenarios:**
-- Log in with a valid account
-  - **GIVEN:** The visitor is on a public page and already has a valid persisted account.
-  - **WHEN:** The user opens the login page, enters the correct username or email and password, and submits the form.
-  - **THEN:** The system validates the credentials, establishes a session, and moves the UI into an authenticated state.
-- Reject invalid login credentials
-  - **GIVEN:** The visitor is on the login page but enters a wrong password, wrong account, or incomplete credentials.
-  - **WHEN:** The user submits the login form.
-  - **THEN:** The system returns authentication failure feedback and does not create a logged-in session.
 
-## REQ-2 Search and Result Display
-Defines the homepage search form, result-page list layout, public search query APIs, and the shared data boundary from search criteria to the result page. This node can guide generation of shared UI such as the search bar, result list skeleton, pagination, or result summary areas. Visual reference: ![image](./reference/search-form.png) ![image](./reference/search-results.png)
+- Sign in with username or email
+  - **GIVEN:** A saved account exists and the visitor is signed out.
+  - **WHEN:** The visitor submits its username or email, optionally surrounded by spaces, and the correct password.
+  - **THEN:** The home page shows the saved username and Sign out, including after reload.
+- Reject invalid credentials
+  - **GIVEN:** The identifier or password is missing or incorrect.
+  - **WHEN:** The visitor clicks Login.
+  - **THEN:** Login shows a generic error without revealing whether the account exists.
+
+## REQ-2 Search trains and select a journey
+
+Any visitor can search the timetable by origin, destination, and date. Results show matching trains and allow one journey to be opened for booking. Searching does not create an account or booking.
 
 **Type:** FOLDER
 **Dependencies:** None
 
-### REQ-2.1 Submit Search Criteria and Display Train Results
-The user can enter departure city, destination city, and departure date on the homepage to start a search. The system must validate the input, execute the train query, return runtime results, and display the submitted search criteria, result count, and matching train list on the result page. Result data must come from the system's own runtime data rather than hardcoded sample content. Optional visual reference: ![image](./reference/search-form.png) ![image](./reference/search-results.png)
+### REQ-2.1 Search valid criteria and show matching trains
+
+Function: The home page provides required From, To, Date, and Search controls. Values are trimmed; From and To must differ case-insensitively, and Date must use a published date value. A valid search opens results showing the normalized criteria, result count, and matching train cards with train number, route, times, and Book. Each Book action has an accessible name identifying its train number. Invalid input stays on the home page with an error.
+
+Required system data: The system must contain a bookable train `G532` from `Shanghai` to `Beijing` on `Sun, May 31`, with Shanghai/ShanghaiHongqiao as its displayed departure location and Beijing/BeijingNan as its displayed arrival location. It must also contain a bookable train `G561` from `Beijing` to `Tianjin` on the same date. Both records must have stable displayed departure and arrival times. Invalid search examples omit From, To, or Date, or use `Shanghai` and ` shanghai ` as the same-city pair.
+
+Optional visual reference: ![image](./reference/search-form.png) ![image](./reference/search-results.png)
 
 **Type:** ATOMIC
 **Dependencies:** None
 
 **Scenarios:**
-- Search with valid criteria and display results
-  - **GIVEN:** The user is on the homepage and has entered a departure city, destination city, and departure date.
-  - **WHEN:** The user triggers the search action.
-  - **THEN:** The system completes the search and opens the result page, showing the search criteria, result count, and matching train list.
-- Block incomplete search input
-  - **GIVEN:** The user is on the homepage and at least one required search field is empty.
-  - **WHEN:** The user triggers the search action.
-  - **THEN:** The system shows explicit validation feedback and does not perform a valid search or navigate to the result page.
 
-### REQ-2.2 Display an Empty Result State
-When a valid search matches no trains, the result page must still preserve the user's original search criteria and show a clear empty-result state. The system must not replace the real empty-result feedback with an error, a blank page, or fabricated result rows.
+- Show matching trains
+  - **GIVEN:** The timetable contains a train matching the entered route and date.
+  - **WHEN:** The visitor searches with valid criteria, optionally surrounded by spaces.
+  - **THEN:** Results show normalized criteria and only the matching train cards.
+- Reject invalid criteria
+  - **GIVEN:** A field is missing, the cities are equal, or the date is invalid.
+  - **WHEN:** The visitor clicks Search.
+  - **THEN:** The home page shows an error and no result list.
 
-**Type:** ATOMIC
-**Dependencies:** REQ-2.1
+### REQ-2.2 Select a train and open its booking entry
 
-**Scenarios:**
-- A valid search returns no results
-  - **GIVEN:** The user submits a valid search, but there are no matching trains in the current database.
-  - **WHEN:** The result page is opened.
-  - **THEN:** The system preserves the original search criteria and shows a clear empty-result state instead of fabricated result data.
+Function: Clicking the Book action identified by a train number opens the booking entry for that exact train and searched date, showing its train number, route, and times. The system must not substitute another result.
 
-### REQ-2.3 Load the Selected Train from the Result List and Enter the Booking Page
-The user can choose a specific train from the search result list and enter the booking page. The system must load the full details of the selected train by its identifier and use it as the current context for the downstream booking flow. Optional visual reference: ![image](./reference/search-results.png) ![image](./reference/booking-page.png)
+Required system data: The system must provide the two bookable records defined in REQ-2.1: `G532` for `Shanghai` to `Beijing` and `G561` for `Beijing` to `Tianjin`, both on `Sun, May 31`.
+
+Optional visual reference: ![image](./reference/search-results.png) ![image](./reference/booking-page.png)
 
 **Type:** ATOMIC
 **Dependencies:** REQ-2.1
 
 **Scenarios:**
-- Select a specific train from the results and enter the booking page
-  - **GIVEN:** The user is viewing the search result list and at least one train is available for booking.
-  - **WHEN:** The user clicks the booking entry on a specific train.
-  - **THEN:** The system loads the full details of that train and opens the booking page, making it the current booking context.
-- Block entry to a booking page for a non-existent train
-  - **GIVEN:** The user triggers a booking entry that points to a non-existent or expired train.
-  - **WHEN:** The system attempts to load that train's details.
-  - **THEN:** The system returns explicit not-bookable feedback rather than opening a booking page with missing context.
 
-## REQ-3 Booking Functionality
-Defines the protected booking page, passenger information form, booking submission API, and the confirmation result boundary after a successful booking. This node can guide generation of shared UI such as the booking form skeleton, selected-train summary area, and booking-success message area. Optional visual reference: ![image](./reference/booking-page.png) ![image](./reference/booking-success.png)
+- Open the selected train
+  - **GIVEN:** Search results contain a bookable train.
+  - **WHEN:** The visitor clicks that train's Book button.
+  - **THEN:** The booking entry shows the same train, route, times, and date.
+
+## REQ-3 Create and view a booking
+
+A signed-in user can review the selected train, enter passenger and ticket details, and confirm one persistent booking. Invalid or unauthorized actions create no booking.
 
 **Type:** FOLDER
 **Dependencies:** REQ-1, REQ-2
 
-### REQ-3.1 Load the Booking Page and Display the Selected Train Summary
-After a logged-in user enters the booking page, the system must load and display the summary information of the currently selected train. The page must display the train identifier, departure city, destination city, date, and the basic context needed for booking. Optional visual reference: ![image](./reference/booking-page.png)
+### REQ-3.1 Display a selected train on the protected booking page
+
+Function: For a signed-in user, the Booking page shows the selected train number, route, times, and date above Passenger information and the booking form. Opening the page is read-only. A signed-out visitor must sign in and cannot submit; missing or unavailable train context shows the REQ-2.2 error instead of the form.
+
+Required system data: The system must allow creation of a unique REQ-1.1 account and provide the bookable `G532` (`Shanghai` to `Beijing`) and `G561` (`Beijing` to `Tianjin`) journeys on `Sun, May 31`. The selected train summary must display the corresponding train number, cities or stations, times, and date. The signed-out case uses the same valid selected journey after the account signs out.
 
 **Type:** ATOMIC
-**Dependencies:** REQ-1.2, REQ-2.3
+**Dependencies:** REQ-1.2, REQ-2.2
 
 **Scenarios:**
-- A logged-in user opens the booking page and sees the train summary
-  - **GIVEN:** The logged-in user has already selected a specific train from the search results.
-  - **WHEN:** The booking page is opened.
-  - **THEN:** The system loads the current train context and displays the full train summary so the user can continue filling in booking information.
 
-### REQ-3.2 Submit Passenger Information and Create a Booking Record
-A logged-in user can fill in passenger name, ID number, and seat type on the booking page and submit the booking. The system must validate the passenger information, create and persist a booking record that belongs to the current user and is bound to the current train, and return a success result. Invalid input must not create a booking record. Optional visual reference: ![image](./reference/booking-page.png)
+- Show the selected journey
+  - **GIVEN:** A signed-in traveler selected a published train.
+  - **WHEN:** The Booking page opens.
+  - **THEN:** It shows the selected train summary and Passenger information without creating a booking.
+- Block a signed-out visitor
+  - **GIVEN:** A visitor has a valid selected journey but no session.
+  - **WHEN:** The visitor opens its booking page.
+  - **THEN:** The page requests sign-in and provides no working submission action.
+
+### REQ-3.2 Confirm passenger details and create one booking record
+
+Function: The booking form requires Passenger name, ID number, Nationality, Ticket class, Ticket type, and Terms of service acceptance. Trimmed name and nationality must contain 2–100 and 2–60 visible characters; ID number must contain 6–30 ASCII letters, digits, or hyphens. Place order opens a summary; Confirm creates exactly one booking and shows its booking number and submitted details. Invalid fields create no booking, and repeated confirmation or reload must keep the same record.
+
+Required system data: Each booking example uses a unique REQ-1.1 account and an independent selected journey. The system must provide `G532` from `Shanghai` to `Beijing` and `G561` from `Beijing` to `Tianjin` on `Sun, May 31`. Valid booking data is (1) passenger `Nguyen Duc Minh`, ID `C612345677`, nationality `Vietnam`, class `standing ticket`, type `Adult`; and (2) passenger `Chen Li`, ID `D712345678`, nationality `Vietnam`, class `Business Class`, type `Adult`. Invalid examples use name `A`, ID `12345`, an empty nationality, or unchecked terms. Ticket class and type are selected explicitly rather than relying on defaults. Confirmation state and booking IDs must remain independent between accounts.
+
+Optional visual reference: ![image](./reference/booking-page.png)
 
 **Type:** ATOMIC
 **Dependencies:** REQ-3.1
 
 **Scenarios:**
-- Submit valid booking information and create a booking record
-  - **GIVEN:** A logged-in user is viewing the booking page for a selected train.
-  - **WHEN:** The user enters a valid passenger name, ID number, and seat type, and submits the booking form.
-  - **THEN:** The system creates and persists a new booking record and returns a booking-success result to the UI.
-- Reject invalid passenger information
-  - **GIVEN:** A logged-in user is viewing the booking page, but the passenger name, ID number, or seat type is invalid or missing.
-  - **WHEN:** The user submits the booking form.
-  - **THEN:** The system returns explicit validation feedback and does not create a new booking record.
 
-### REQ-3.3 Display the Booking Success Result
-After a booking record has been created successfully, the system must load the newly created booking record and display a success page or success panel. The page must display the booking number, train summary, passenger summary, and success status rather than only a static success message. Visual reference: ![image](./reference/booking-success.png)
-
-**Type:** ATOMIC
-**Dependencies:** REQ-3.2
-
-**Scenarios:**
-- Load the newly created booking record and display the success result
-  - **GIVEN:** The current user has just completed a successful booking, and the system has already created the corresponding booking record.
-  - **WHEN:** The booking success page or success panel is opened.
-  - **THEN:** The system loads and displays the key information of that booking record, including the booking number, train summary, passenger summary, and success status.
+- Create one valid booking
+  - **GIVEN:** A signed-in traveler has an isolated account and selected journey.
+  - **WHEN:** The traveler enters valid details, accepts the terms, reviews the summary, and confirms.
+  - **THEN:** One booking number and the submitted journey, passenger, and ticket details are shown and persist after reload.
+- Reject invalid passenger details
+  - **GIVEN:** A required field is missing or invalid, or terms are not accepted.
+  - **WHEN:** The traveler clicks Place order.
+  - **THEN:** The form shows an error and opens neither the confirmation summary nor a booking.
+- Prevent duplicate confirmation
+  - **GIVEN:** A valid confirmation has already succeeded.
+  - **WHEN:** The traveler repeats Confirm or reloads the completed page.
+  - **THEN:** The original booking number remains and no second booking is created.
