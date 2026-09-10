@@ -1,0 +1,66 @@
+# ARC 编译与交互命令
+
+ARC 统一使用 `arc compile`。首次编译不需要 `--resume`；所有交互操作都在已生成的工作区上执行，因此必须使用 `--resume`。
+
+## 完整编译与恢复
+
+```powershell
+arc compile requirements.yaml -o workspace/demo --type web
+arc compile requirements.yaml -o workspace/demo --resume
+```
+
+`--clean` 会重建输出目录，不能与 `--resume` 同用。
+
+## 重试节点
+
+```powershell
+arc compile requirements.yaml -o workspace/demo --resume --retry REQ-2.1
+arc compile requirements.yaml -o workspace/demo --resume --retry-failed
+```
+
+DESIGN 失败会重跑该节点的 DESIGN 与 IMPLEMENT；仅 IMPLEMENT 失败时保留已有接口与测试清单。
+
+## 选中测试重新执行 TDD
+
+```powershell
+arc compile requirements.yaml -o workspace/demo --resume `
+  --rerun-tdd REQ-2.1 --test TEST-2.1-search --test TEST-2.1-empty
+```
+
+测试必须归属于该节点。ARC 只执行所选测试，并按 `Unit -> Integration -> E2E` 分层运行；不会改写节点最后一次完整编译的状态。
+
+## 追加测试
+
+```powershell
+arc compile requirements.yaml -o workspace/demo --resume `
+  --add-tests REQ-2.1 --intent "日期非法时禁止提交"
+```
+
+`--intent` 是本次 TestGenerator 调用的测试目标。该命令只生成并登记新测试，不运行 TDD，也不重新设计接口。
+
+## 按 test ID 修改测试
+
+```powershell
+arc compile requirements.yaml -o workspace/demo --resume `
+  --regenerate-tests REQ-2.1 --test TEST-2.1-invalid-date `
+  --intent "日期非法时禁止提交"
+```
+
+该命令修改指定的已登记 test ID。`--intent` 只提供本次修改的测试目标，不写入 Traceability，也不作为替换匹配键。生成结果必须只返回该 test ID，并保持其原测试文件路径；同一文件内的其他测试必须保留。
+
+## 新增或修改需求后的增量编译
+
+先编辑原始需求文件，再运行：
+
+```powershell
+arc compile requirements.yaml -o workspace/demo --resume --sync-requirements
+```
+
+ARC 会追加新增/变更节点、其祖先及显式反向依赖节点的标准 DESIGN 和 IMPLEMENT 任务。删除节点、移动节点、更改父节点或更改节点 ID 暂不支持增量处理，应使用完整编译。
+
+## 规则
+
+- 每次调用只能使用一种交互动作。
+- `--test` 仅用于 `--rerun-tdd` 或 `--regenerate-tests`；后者要求恰好一个 test ID。
+- `--intent` 仅用于 `--add-tests` 或 `--regenerate-tests`。
+- 不要手动编辑 `.arc` 下的队列、Traceability 或节点会话文件。
