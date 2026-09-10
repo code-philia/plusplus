@@ -86,8 +86,28 @@ def get_user_prompt(
     requirement_data: dict[str, Any],
     dynamic_context: str,
     interface_contract: str = "",
+    test_intent: str = "",
+    replace_intent: bool = False,
+    existing_test_ids: list[str] | None = None,
 ) -> str:
     sections = []
+    if test_intent.strip():
+        operation = "Replace" if replace_intent else "Generate"
+        replacement_rules = (
+            "Edit the existing intent-owned test files in place. Preserve unrelated tests in those files and return the replacement manifest. "
+            f"Existing intent-owned test ids are: {', '.join(existing_test_ids or []) or 'none'}."
+            if replace_intent
+            else "Do not replace unrelated current-node tests; return only tests that serve this requested intent."
+        )
+        sections.append(
+            section(
+                "Requested Test Intent",
+                [
+                    f"{operation} coverage specifically for this intent: {test_intent.strip()}",
+                    replacement_rules,
+                ],
+            )
+        )
     if interface_contract.strip():
         sections.append(f"### Current Interface Contract\n{interface_contract.strip()}")
     sections.append(

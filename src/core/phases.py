@@ -240,6 +240,133 @@ class WorkflowPhaseRunner:
         )
         return True
 
+    async def run_test_generation_phase(
+        self,
+        node_id: str,
+        requirement_data: dict[str, Any],
+        *,
+        intent: str,
+        replace_intent: bool,
+    ) -> bool:
+        normalized_intent = str(intent or "").strip()
+        if not normalized_intent:
+            await self._log("TestGenerator", "A test intent is required.", status="error", node_id=node_id)
+            return False
+        if requirement_data.get("children_ids"):
+            await self._log(
+                "TestGenerator",
+                "Intent-based test generation is only available for leaf requirement nodes.",
+                status="error",
+                node_id=node_id,
+            )
+            return False
+
+        await self._log(
+            "TestGenerator",
+            f"{'Replacing' if replace_intent else 'Adding'} tests for intent: {normalized_intent}",
+            node_id=node_id,
+        )
+        existing_tests = self.traceability.list_tests(req_id=node_id)
+        intent_tests = [
+            test
+            for test in existing_tests
+            if str(test.get("intent", "") or "").strip() == normalized_intent
+        ]
+        if replace_intent and not intent_tests:
+            await self._log(
+                "TestGenerator",
+                f"No existing tests own intent: {normalized_intent}",
+                status="error",
+                node_id=node_id,
+            )
+            return False
+        intent_test_ids = {
+            str(test.get("test_id", "") or "").strip()
+            for test in intent_tests
+            if str(test.get("test_id", "") or "").strip()
+        }
+        intent_file_paths = {
+            str(test.get("file_path", "") or "").strip()
+            for test in intent_tests
+            if str(test.get("file_path", "") or "").strip()
+        }
+        shared_file_paths = {
+            str(test.get("file_path", "") or "").strip()
+            for test in existing_tests
+            if str(test.get("file_path", "") or "").strip() in intent_file_paths
+            and str(test.get("test_id", "") or "").strip() not in intent_test_ids
+        }
+        if replace_intent and shared_file_paths:
+            await self._log(
+                "TestGenerator",
+                (
+                    "Intent replacement requires intent-owned test files; these files are shared with other tests: "
+                    + ", ".join(sorted(shared_file_paths))
+                ),
+                status="error",
+                node_id=node_id,
+            )
+            return False
+        tests, _ = await self.test_generator.run(
+            node_id=node_id,
+            requirement_data=requirement_data,
+            test_intent=normalized_intent,
+            replace_intent=replace_intent,
+            existing_test_ids=sorted(intent_test_ids),
+        )
+        if tests is None:
+            await self._log("TestGenerator", "Test generation did not return a valid manifest.", status="error", node_id=node_id)
+            return False
+        try:
+            prepared_tests = self._prepare_tests(node_id=node_id, tests=tests, intent=normalized_intent)
+        except ValueError as exc:
+            await self._log("TestGenerator", str(exc), status="error", node_id=node_id)
+            return False
+
+        existing_ids = {str(test.get("test_id", "") or "").strip() for test in existing_tests}
+        duplicate_ids = sorted(
+            test_id
+            for test_id in (str(test.get("test_id", "") or "").strip() for test in prepared_tests)
+            if test_id in existing_ids and test_id not in intent_test_ids
+        )
+        if duplicate_ids:
+            await self._log(
+                "TestGenerator",
+                f"Intent-based generation would overwrite test id(s) owned by another intent: {', '.join(duplicate_ids)}",
+                status="error",
+                node_id=node_id,
+            )
+            return False
+
+        prepared_paths = {
+            str(test.get("file_path", "") or "").strip()
+            for test in prepared_tests
+            if str(test.get("file_path", "") or "").strip()
+        }
+        if replace_intent and not intent_file_paths.issubset(prepared_paths):
+            missing_paths = sorted(intent_file_paths - prepared_paths)
+            await self._log(
+                "TestGenerator",
+                "Intent replacement must update every existing intent-owned test file: " + ", ".join(missing_paths),
+                status="error",
+                node_id=node_id,
+            )
+            return False
+
+        if replace_intent:
+            for test_id in intent_test_ids:
+                self.traceability.delete_test(test_id)
+
+        self._store_prepared_tests(prepared_tests)
+        context_pipeline.cache.invalidate_file_layers(node_id)
+        context_pipeline.cache.invalidate_db_layers(node_id)
+        await self._log(
+            "TestGenerator",
+            f"Stored {len(prepared_tests)} test mapping item(s) for intent: {normalized_intent}",
+            node_id=node_id,
+        )
+        return True
+
     async def run_implement_phase(
         self,
         node_id: str,
@@ -656,6 +783,7 @@ class WorkflowPhaseRunner:
         *,
         node_id: str,
         tests: list[dict[str, Any]],
+        intent: str = "",
     ) -> list[dict[str, Any]]:
         stored: list[dict[str, Any]] = []
         generated_ids: set[str] = set()
@@ -685,6 +813,7 @@ class WorkflowPhaseRunner:
                 "file_path": file_path,
                 "interface_ids": normalize_string_list(test.get("interface_ids")),
                 "first_line": str(test.get("first_line", "")).strip(),
+                "intent": str(intent or test.get("intent", "")).strip(),
             }
             stored.append(stored_item)
         return stored
@@ -699,6 +828,7 @@ class WorkflowPhaseRunner:
                 file_path=str(test.get("file_path", "") or "").strip() or None,
                 first_line=str(test.get("first_line", "") or "").strip() or None,
                 passed=None,
+                intent=str(test.get("intent", "") or "").strip() or None,
             )
 
     def _register_interface_edges(self, node_id: str, interface_id: str, interface: dict[str, Any]) -> None:

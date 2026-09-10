@@ -182,12 +182,19 @@ class ARCWorkflowManager:
         retry_node_ids: list[str] | None = None,
         rerun_tdd_node_id: str | None = None,
         selected_test_ids: list[str] | None = None,
+        add_tests_node_id: str | None = None,
+        regenerate_tests_node_id: str | None = None,
+        test_intent: str | None = None,
     ) -> dict[str, Any]:
         await self._log("Compiler", "ARC compilation started.")
         if rerun_tdd_node_id and not resume_from_queue:
             raise ValueError("Selected-test TDD requires resuming an existing ARC compilation workspace.")
         if rerun_tdd_node_id and (retry_failed or retry_node_ids):
             raise ValueError("Selected-test TDD cannot be combined with node retry operations.")
+        if (add_tests_node_id or regenerate_tests_node_id) and not resume_from_queue:
+            raise ValueError("Intent-based test generation requires resuming an existing ARC compilation workspace.")
+        if add_tests_node_id and regenerate_tests_node_id:
+            raise ValueError("Only one intent-based test generation operation may be requested at a time.")
         if clear_all:
             cleaned = await self.cleanup_workspace()
             if not cleaned:
@@ -213,6 +220,9 @@ class ARCWorkflowManager:
             retry_node_ids=retry_node_ids,
             rerun_tdd_node_id=rerun_tdd_node_id,
             selected_test_ids=selected_test_ids,
+            add_tests_node_id=add_tests_node_id,
+            regenerate_tests_node_id=regenerate_tests_node_id,
+            test_intent=test_intent,
         )
         if result.get("ok"):
             self.runtime.events.mark_run_completed("ARC compilation completed.")
@@ -235,6 +245,9 @@ class ARCWorkflowManager:
         retry_node_ids: list[str] | None = None,
         rerun_tdd_node_id: str | None = None,
         selected_test_ids: list[str] | None = None,
+        add_tests_node_id: str | None = None,
+        regenerate_tests_node_id: str | None = None,
+        test_intent: str | None = None,
     ) -> dict[str, Any]:
         root_id = str(requirement_tree.get("id") or "").strip()
         if not root_id:
@@ -258,6 +271,12 @@ class ARCWorkflowManager:
             queue_state,
             node_id=rerun_tdd_node_id,
             test_ids=selected_test_ids,
+        )
+        test_generation_operation = self._append_test_generation_task(
+            queue_state,
+            node_id=regenerate_tests_node_id or add_tests_node_id,
+            intent=test_intent,
+            replace_intent=bool(regenerate_tests_node_id),
         )
         self._save_processing_queue(queue_state)
         for recovered in recovered_tasks:
@@ -287,6 +306,16 @@ class ARCWorkflowManager:
                 ),
                 node_id=selected_tdd_operation["node_id"],
             )
+        if test_generation_operation:
+            await self._log(
+                "Compiler",
+                (
+                    f"Queued test-generation operation {test_generation_operation['operation_id']} "
+                    f"for node {test_generation_operation['node_id']} and intent: "
+                    f"{test_generation_operation['intent']}"
+                ),
+                node_id=test_generation_operation["node_id"],
+            )
         await self._log(
             "Compiler",
             f"Loaded processing queue with {len(queue_state['tasks'])} task(s) for root node {root_id}.",
@@ -300,10 +329,10 @@ class ARCWorkflowManager:
             node_id = task["node_id"]
             phase = task["phase"]
             requirement_data = self.runtime.traceability.get_requirement(node_id) or {}
-            is_selected_tdd = task.get("mode") == "selected_tests"
+            is_interactive_task = bool(task.get("operation_id"))
 
             task["status"] = TASK_RUNNING
-            if is_selected_tdd:
+            if is_interactive_task:
                 self._set_operation_status(queue_state, task, TASK_RUNNING)
             else:
                 self._mark_task_running(queue_state["node_states"], node_id, phase)
@@ -315,16 +344,17 @@ class ARCWorkflowManager:
 
             if task_ok:
                 task["status"] = TASK_COMPLETED
-                if is_selected_tdd:
+                if is_interactive_task:
                     self._set_operation_status(queue_state, task, TASK_COMPLETED)
                 else:
                     sessions.merge_node_session(node_id, {"resume_context": {}})
                     new_state = self._resolve_completed_node_state(node_id, phase)
                     self._set_node_state(queue_state["node_states"], node_id, new_state)
                 self._save_processing_queue(queue_state)
-                if is_selected_tdd:
-                    await self._commit_phase_checkpoint(node_id, "IMPLEMENT-SELECTED-TESTS", requirement_data)
-                    await self._log("Compiler", f"Selected-test TDD completed for node {node_id}.", node_id=node_id)
+                if is_interactive_task:
+                    operation_label = str(task.get("mode") or phase).upper().replace("_", "-")
+                    await self._commit_phase_checkpoint(node_id, f"{phase}-{operation_label}", requirement_data)
+                    await self._log("Compiler", f"Interactive task completed for node {node_id}.", node_id=node_id)
                     continue
                 if phase == PHASE_DESIGN:
                     self.runtime.events.mark_design_done(node_id)
@@ -336,17 +366,18 @@ class ARCWorkflowManager:
                 continue
 
             task["status"] = TASK_FAILED
-            if is_selected_tdd:
+            if is_interactive_task:
                 self._set_operation_status(queue_state, task, TASK_FAILED)
             else:
                 self._set_node_state(queue_state["node_states"], node_id, NODE_FAILED)
                 self._mark_remaining_node_tasks_failed(queue_state, node_id)
             self._save_processing_queue(queue_state)
-            if is_selected_tdd:
-                await self._commit_phase_checkpoint(node_id, "IMPLEMENT-SELECTED-TESTS-FAILED", requirement_data)
+            if is_interactive_task:
+                operation_label = str(task.get("mode") or phase).upper().replace("_", "-")
+                await self._commit_phase_checkpoint(node_id, f"{phase}-{operation_label}-FAILED", requirement_data)
                 await self._log(
                     "Compiler",
-                    f"Selected-test TDD failed for node {node_id}; preserving its prior compile state.",
+                    f"Interactive task failed for node {node_id}; preserving its prior compile state.",
                     "error",
                     node_id,
                 )
@@ -422,6 +453,54 @@ class ARCWorkflowManager:
         operation = queue_state.get("operations", {}).get(operation_id)
         if isinstance(operation, dict):
             operation["status"] = status
+
+    def _append_test_generation_task(
+        self,
+        queue_state: dict[str, Any],
+        *,
+        node_id: str | None,
+        intent: str | None,
+        replace_intent: bool,
+    ) -> dict[str, Any] | None:
+        normalized_node_id = str(node_id or "").strip()
+        normalized_intent = str(intent or "").strip()
+        if not normalized_node_id and not normalized_intent:
+            return None
+        if not normalized_node_id or not normalized_intent:
+            raise ValueError("Intent-based test generation requires both a node id and a non-empty intent.")
+        requirement = self.runtime.traceability.get_requirement(normalized_node_id)
+        if not requirement:
+            raise ValueError(f"Intent-based test generation requested for unknown node {normalized_node_id}.")
+        if requirement.get("children_ids"):
+            raise ValueError("Intent-based test generation is only available for leaf requirement nodes.")
+
+        operations = queue_state.setdefault("operations", {})
+        if not isinstance(operations, dict):
+            raise ValueError("Processing queue operations must be an object.")
+        operation_id = f"op-{len(operations) + 1:04d}"
+        while operation_id in operations:
+            operation_id = f"op-{int(operation_id.split('-')[-1]) + 1:04d}"
+        mode = "tests_only_replace" if replace_intent else "tests_only_append"
+        order = max((int(task.get("order", -1)) for task in queue_state.get("tasks", [])), default=-1) + 1
+        task = {
+            "task_id": f"{operation_id}:{normalized_node_id}:{PHASE_DESIGN}",
+            "operation_id": operation_id,
+            "node_id": normalized_node_id,
+            "phase": PHASE_DESIGN,
+            "mode": mode,
+            "intent": normalized_intent,
+            "order": order,
+            "status": TASK_PENDING,
+        }
+        queue_state.setdefault("tasks", []).append(task)
+        operations[operation_id] = {
+            "kind": "regenerate_tests" if replace_intent else "add_tests",
+            "node_id": normalized_node_id,
+            "intent": normalized_intent,
+            "status": TASK_PENDING,
+        }
+        queue_state["last_operation_id"] = operation_id
+        return task
 
     def _load_or_create_processing_queue(
         self,
@@ -741,6 +820,13 @@ class ARCWorkflowManager:
             await self._log("System", f"Requirement node {node_id} not found in database.", "error", node_id)
             return False
         if task["phase"] == PHASE_DESIGN:
+            if task.get("mode") in {"tests_only_append", "tests_only_replace"}:
+                return await self.phase_runner.run_test_generation_phase(
+                    node_id,
+                    requirement_data,
+                    intent=str(task.get("intent") or "").strip(),
+                    replace_intent=task.get("mode") == "tests_only_replace",
+                )
             return await self.phase_runner.run_design_phase(node_id, requirement_data)
         if task.get("mode") == "selected_tests":
             return await self.phase_runner.run_implement_phase(

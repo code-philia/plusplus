@@ -105,6 +105,7 @@ class TestRecord:
     interface_ids: list[str] | None = None
     passed: bool | None = None
     scenario_id: str | None = None
+    intent: str | None = None
 
 
 class TraceabilityStore:
@@ -481,6 +482,7 @@ class TraceabilityStore:
         interface_ids: list[str] | None = None,
         passed: bool | None = None,
         scenario_id: str | None = None,
+        intent: str | None = None,
         emit_event: bool = True,
     ) -> None:
         normalized_test_id = str(test_id or "").strip()
@@ -505,6 +507,7 @@ class TraceabilityStore:
                 "passed": _as_bool_or_none(passed),
                 "first_line": _as_optional_str(first_line),
                 "scenario_id": _as_optional_str(scenario_id),
+                "intent": _as_optional_str(intent),
             },
         )
         if emit_event:
@@ -535,6 +538,7 @@ class TraceabilityStore:
             interface_ids=_as_str_list(merged.get("interface_ids")),
             passed=_as_bool_or_none(merged.get("passed")),
             scenario_id=merged.get("scenario_id"),
+            intent=merged.get("intent"),
         )
 
     def set_test_pass_status(self, test_id: str, passed: bool | None) -> None:
