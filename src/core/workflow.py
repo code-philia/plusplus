@@ -184,6 +184,7 @@ class ARCWorkflowManager:
         selected_test_ids: list[str] | None = None,
         add_tests_node_id: str | None = None,
         regenerate_tests_node_id: str | None = None,
+        regenerate_test_id: str | None = None,
         test_intent: str | None = None,
         sync_requirements: bool = False,
     ) -> dict[str, Any]:
@@ -225,6 +226,7 @@ class ARCWorkflowManager:
             selected_test_ids=selected_test_ids,
             add_tests_node_id=add_tests_node_id,
             regenerate_tests_node_id=regenerate_tests_node_id,
+            regenerate_test_id=regenerate_test_id,
             test_intent=test_intent,
             sync_requirements=sync_requirements,
         )
@@ -251,6 +253,7 @@ class ARCWorkflowManager:
         selected_test_ids: list[str] | None = None,
         add_tests_node_id: str | None = None,
         regenerate_tests_node_id: str | None = None,
+        regenerate_test_id: str | None = None,
         test_intent: str | None = None,
         sync_requirements: bool = False,
     ) -> dict[str, Any]:
@@ -285,6 +288,7 @@ class ARCWorkflowManager:
             node_id=regenerate_tests_node_id or add_tests_node_id,
             intent=test_intent,
             replace_intent=bool(regenerate_tests_node_id),
+            replace_test_id=regenerate_test_id,
         )
         incremental_tasks = self._append_incremental_requirement_tasks(
             queue_state,
@@ -324,7 +328,8 @@ class ARCWorkflowManager:
                 "Compiler",
                 (
                     f"Queued test-generation operation {test_generation_operation['operation_id']} "
-                    f"for node {test_generation_operation['node_id']} and intent: "
+                    f"for node {test_generation_operation['node_id']}, test "
+                    f"{test_generation_operation.get('test_id') or 'new tests'}, and intent: "
                     f"{test_generation_operation['intent']}"
                 ),
                 node_id=test_generation_operation["node_id"],
@@ -634,6 +639,7 @@ class ARCWorkflowManager:
         node_id: str | None,
         intent: str | None,
         replace_intent: bool,
+        replace_test_id: str | None = None,
     ) -> dict[str, Any] | None:
         normalized_node_id = str(node_id or "").strip()
         normalized_intent = str(intent or "").strip()
@@ -646,6 +652,20 @@ class ARCWorkflowManager:
             raise ValueError(f"Intent-based test generation requested for unknown node {normalized_node_id}.")
         if requirement.get("children_ids"):
             raise ValueError("Intent-based test generation is only available for leaf requirement nodes.")
+        normalized_replace_test_id = str(replace_test_id or "").strip()
+        if replace_intent:
+            if not normalized_replace_test_id:
+                raise ValueError("Regenerating a test requires a test id.")
+            registered_tests = {
+                str(test.get("test_id") or "").strip()
+                for test in self.runtime.traceability.list_tests(req_id=normalized_node_id)
+                if isinstance(test, dict)
+            }
+            if normalized_replace_test_id not in registered_tests:
+                raise ValueError(
+                    f"Test regeneration requested unregistered test id {normalized_replace_test_id} "
+                    f"for node {normalized_node_id}."
+                )
 
         operations = queue_state.setdefault("operations", {})
         if not isinstance(operations, dict):
@@ -665,6 +685,8 @@ class ARCWorkflowManager:
             "order": order,
             "status": TASK_PENDING,
         }
+        if normalized_replace_test_id:
+            task["test_id"] = normalized_replace_test_id
         queue_state.setdefault("tasks", []).append(task)
         operations[operation_id] = {
             "kind": "regenerate_tests" if replace_intent else "add_tests",
@@ -672,6 +694,8 @@ class ARCWorkflowManager:
             "intent": normalized_intent,
             "status": TASK_PENDING,
         }
+        if normalized_replace_test_id:
+            operations[operation_id]["test_id"] = normalized_replace_test_id
         queue_state["last_operation_id"] = operation_id
         return task
 
@@ -1003,7 +1027,7 @@ class ARCWorkflowManager:
                     node_id,
                     requirement_data,
                     intent=str(task.get("intent") or "").strip(),
-                    replace_intent=task.get("mode") == "tests_only_replace",
+                    replace_test_id=str(task.get("test_id") or "").strip() or None,
                 )
             return await self.phase_runner.run_design_phase(node_id, requirement_data)
         if task.get("mode") == "selected_tests":

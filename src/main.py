@@ -37,6 +37,7 @@ class CompilationConfig:
     selected_test_ids: list[str] | None = None
     add_tests_node_id: str | None = None
     regenerate_tests_node_id: str | None = None
+    regenerate_test_id: str | None = None
     test_intent: str | None = None
     sync_requirements: bool = False
     model_api_mode: str | None = None
@@ -161,7 +162,7 @@ def build_compile_parser(subparsers) -> None:
     parser.add_argument(
         "--regenerate-tests",
         metavar="NODE_ID",
-        help="Replace tests for an intent on one leaf node (requires --resume)",
+        help="Regenerate one registered test on a leaf node (requires --resume and --test)",
     )
     parser.add_argument(
         "--intent",
@@ -195,8 +196,11 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     if args.rerun_tdd and not args.selected_test_ids:
         print("Error: --rerun-tdd requires at least one --test TEST_ID")
         return 2
-    if args.selected_test_ids and not args.rerun_tdd:
-        print("Error: --test may only be used with --rerun-tdd")
+    if args.regenerate_tests and len(args.selected_test_ids or []) != 1:
+        print("Error: --regenerate-tests requires exactly one --test TEST_ID")
+        return 2
+    if args.selected_test_ids and not (args.rerun_tdd or args.regenerate_tests):
+        print("Error: --test may only be used with --rerun-tdd or --regenerate-tests")
         return 2
     if (args.add_tests or args.regenerate_tests) and not str(args.intent or "").strip():
         print("Error: --add-tests and --regenerate-tests require a non-empty --intent")
@@ -236,6 +240,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         selected_test_ids=args.selected_test_ids or None,
         add_tests_node_id=args.add_tests or None,
         regenerate_tests_node_id=args.regenerate_tests or None,
+        regenerate_test_id=(args.selected_test_ids or [None])[0] if args.regenerate_tests else None,
         test_intent=args.intent or None,
         sync_requirements=args.sync_requirements,
         model_api_mode=model_api_mode,
@@ -276,6 +281,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
             selected_test_ids=config.selected_test_ids,
             add_tests_node_id=config.add_tests_node_id,
             regenerate_tests_node_id=config.regenerate_tests_node_id,
+            regenerate_test_id=config.regenerate_test_id,
             test_intent=config.test_intent,
             sync_requirements=config.sync_requirements,
         )
