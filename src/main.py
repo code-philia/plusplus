@@ -38,6 +38,7 @@ class CompilationConfig:
     add_tests_node_id: str | None = None
     regenerate_tests_node_id: str | None = None
     test_intent: str | None = None
+    sync_requirements: bool = False
     model_api_mode: str | None = None
 
 
@@ -166,6 +167,11 @@ def build_compile_parser(subparsers) -> None:
         "--intent",
         help="Required test intent text for --add-tests",
     )
+    parser.add_argument(
+        "--sync-requirements",
+        action="store_true",
+        help="Incrementally compile newly added or modified requirements (requires --resume)",
+    )
     parser.set_defaults(func=cmd_compile)
 
 
@@ -177,13 +183,13 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     if args.clean and args.resume:
         print("Error: --clean and --resume are mutually exclusive")
         return 2
-    if (args.retry_failed or args.retry or args.rerun_tdd or args.add_tests or args.regenerate_tests) and not args.resume:
+    if (args.retry_failed or args.retry or args.rerun_tdd or args.add_tests or args.regenerate_tests or args.sync_requirements) and not args.resume:
         print("Error: interactive compile actions require --resume")
         return 2
     if args.retry_failed and args.retry:
         print("Error: --retry-failed and --retry are mutually exclusive")
         return 2
-    if sum(bool(value) for value in (args.retry_failed, args.retry, args.rerun_tdd, args.add_tests, args.regenerate_tests)) > 1:
+    if sum(bool(value) for value in (args.retry_failed, args.retry, args.rerun_tdd, args.add_tests, args.regenerate_tests, args.sync_requirements)) > 1:
         print("Error: only one interactive compile action may be requested at a time")
         return 2
     if args.rerun_tdd and not args.selected_test_ids:
@@ -231,6 +237,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         add_tests_node_id=args.add_tests or None,
         regenerate_tests_node_id=args.regenerate_tests or None,
         test_intent=args.intent or None,
+        sync_requirements=args.sync_requirements,
         model_api_mode=model_api_mode,
     )
     
@@ -270,6 +277,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
             add_tests_node_id=config.add_tests_node_id,
             regenerate_tests_node_id=config.regenerate_tests_node_id,
             test_intent=config.test_intent,
+            sync_requirements=config.sync_requirements,
         )
     finally:
         stop_cli_spinner()

@@ -185,6 +185,7 @@ class ARCWorkflowManager:
         add_tests_node_id: str | None = None,
         regenerate_tests_node_id: str | None = None,
         test_intent: str | None = None,
+        sync_requirements: bool = False,
     ) -> dict[str, Any]:
         await self._log("Compiler", "ARC compilation started.")
         if rerun_tdd_node_id and not resume_from_queue:
@@ -195,6 +196,8 @@ class ARCWorkflowManager:
             raise ValueError("Intent-based test generation requires resuming an existing ARC compilation workspace.")
         if add_tests_node_id and regenerate_tests_node_id:
             raise ValueError("Only one intent-based test generation operation may be requested at a time.")
+        if sync_requirements and not resume_from_queue:
+            raise ValueError("Requirement synchronization requires resuming an existing ARC compilation workspace.")
         if clear_all:
             cleaned = await self.cleanup_workspace()
             if not cleaned:
@@ -223,6 +226,7 @@ class ARCWorkflowManager:
             add_tests_node_id=add_tests_node_id,
             regenerate_tests_node_id=regenerate_tests_node_id,
             test_intent=test_intent,
+            sync_requirements=sync_requirements,
         )
         if result.get("ok"):
             self.runtime.events.mark_run_completed("ARC compilation completed.")
@@ -248,17 +252,21 @@ class ARCWorkflowManager:
         add_tests_node_id: str | None = None,
         regenerate_tests_node_id: str | None = None,
         test_intent: str | None = None,
+        sync_requirements: bool = False,
     ) -> dict[str, Any]:
         root_id = str(requirement_tree.get("id") or "").strip()
         if not root_id:
             await self._log("Compiler", "Requirement root node id is missing.", "error")
             return {"ok": False, "failed_nodes": []}
 
+        previous_requirements = self.runtime.traceability.list_requirements() if sync_requirements else []
+        sync_plan = self._plan_requirement_sync(previous_requirements, requirement_tree) if sync_requirements else None
         self.runtime.traceability.store_requirement_tree(requirement_tree)
         retry_requested = retry_failed or bool(retry_node_ids)
         queue_state = self._load_or_create_processing_queue(
             requirement_tree,
             require_compatible_existing_queue=retry_requested,
+            allow_requirement_tree_change=sync_requirements,
         )
         self._sync_queue_node_states(queue_state)
         recovered_tasks = self._recover_interrupted_queue(queue_state)
@@ -277,6 +285,11 @@ class ARCWorkflowManager:
             node_id=regenerate_tests_node_id or add_tests_node_id,
             intent=test_intent,
             replace_intent=bool(regenerate_tests_node_id),
+        )
+        incremental_tasks = self._append_incremental_requirement_tasks(
+            queue_state,
+            requirement_tree=requirement_tree,
+            affected_node_ids=sync_plan["affected_node_ids"] if sync_plan else [],
         )
         self._save_processing_queue(queue_state)
         for recovered in recovered_tasks:
@@ -316,6 +329,15 @@ class ARCWorkflowManager:
                 ),
                 node_id=test_generation_operation["node_id"],
             )
+        if sync_plan is not None:
+            await self._log(
+                "Compiler",
+                (
+                    "Requirement sync identified "
+                    f"{len(sync_plan['new_node_ids'])} new and {len(sync_plan['changed_node_ids'])} changed node(s); "
+                    f"queued {len(incremental_tasks)} incremental task(s)."
+                ),
+            )
         await self._log(
             "Compiler",
             f"Loaded processing queue with {len(queue_state['tasks'])} task(s) for root node {root_id}.",
@@ -329,10 +351,10 @@ class ARCWorkflowManager:
             node_id = task["node_id"]
             phase = task["phase"]
             requirement_data = self.runtime.traceability.get_requirement(node_id) or {}
-            is_interactive_task = bool(task.get("operation_id"))
+            is_scoped_operation = bool(task.get("operation_id")) and not bool(task.get("affects_node_state"))
 
             task["status"] = TASK_RUNNING
-            if is_interactive_task:
+            if is_scoped_operation:
                 self._set_operation_status(queue_state, task, TASK_RUNNING)
             else:
                 self._mark_task_running(queue_state["node_states"], node_id, phase)
@@ -344,14 +366,14 @@ class ARCWorkflowManager:
 
             if task_ok:
                 task["status"] = TASK_COMPLETED
-                if is_interactive_task:
+                if task.get("operation_id"):
                     self._set_operation_status(queue_state, task, TASK_COMPLETED)
-                else:
+                if not is_scoped_operation:
                     sessions.merge_node_session(node_id, {"resume_context": {}})
                     new_state = self._resolve_completed_node_state(node_id, phase)
                     self._set_node_state(queue_state["node_states"], node_id, new_state)
                 self._save_processing_queue(queue_state)
-                if is_interactive_task:
+                if is_scoped_operation:
                     operation_label = str(task.get("mode") or phase).upper().replace("_", "-")
                     await self._commit_phase_checkpoint(node_id, f"{phase}-{operation_label}", requirement_data)
                     await self._log("Compiler", f"Interactive task completed for node {node_id}.", node_id=node_id)
@@ -366,13 +388,13 @@ class ARCWorkflowManager:
                 continue
 
             task["status"] = TASK_FAILED
-            if is_interactive_task:
+            if task.get("operation_id"):
                 self._set_operation_status(queue_state, task, TASK_FAILED)
-            else:
+            if not is_scoped_operation:
                 self._set_node_state(queue_state["node_states"], node_id, NODE_FAILED)
                 self._mark_remaining_node_tasks_failed(queue_state, node_id)
             self._save_processing_queue(queue_state)
-            if is_interactive_task:
+            if is_scoped_operation:
                 operation_label = str(task.get("mode") or phase).upper().replace("_", "-")
                 await self._commit_phase_checkpoint(node_id, f"{phase}-{operation_label}-FAILED", requirement_data)
                 await self._log(
@@ -454,6 +476,157 @@ class ARCWorkflowManager:
         if isinstance(operation, dict):
             operation["status"] = status
 
+    def _plan_requirement_sync(
+        self,
+        previous_requirements: list[dict[str, Any]],
+        requirement_tree: dict[str, Any],
+    ) -> dict[str, list[str]]:
+        current_requirements = self._flatten_requirement_tree(requirement_tree)
+        previous_by_id = {
+            str(requirement.get("req_id") or requirement.get("id") or "").strip(): requirement
+            for requirement in previous_requirements
+            if isinstance(requirement, dict) and str(requirement.get("req_id") or requirement.get("id") or "").strip()
+        }
+        current_by_id = {str(requirement["req_id"]): requirement for requirement in current_requirements}
+        removed_node_ids = sorted(set(previous_by_id) - set(current_by_id))
+        if removed_node_ids:
+            raise ValueError(
+                "Requirement synchronization does not support deleting nodes; run a full compile instead. "
+                f"Removed node id(s): {', '.join(removed_node_ids)}"
+            )
+        moved_node_ids = sorted(
+            node_id
+            for node_id in set(previous_by_id) & set(current_by_id)
+            if str(previous_by_id[node_id].get("parent_id") or "").strip()
+            != str(current_by_id[node_id].get("parent_id") or "").strip()
+        )
+        if moved_node_ids:
+            raise ValueError(
+                "Requirement synchronization does not support moving nodes or changing their parent; run a full compile instead. "
+                f"Moved node id(s): {', '.join(moved_node_ids)}"
+            )
+
+        new_node_ids = sorted(set(current_by_id) - set(previous_by_id))
+        changed_node_ids = sorted(
+            node_id
+            for node_id in set(previous_by_id) & set(current_by_id)
+            if self._requirement_revision_payload(previous_by_id[node_id])
+            != self._requirement_revision_payload(current_by_id[node_id])
+        )
+        affected = set(new_node_ids) | set(changed_node_ids)
+        parent_by_id = {node_id: str(requirement.get("parent_id") or "").strip() for node_id, requirement in current_by_id.items()}
+        for node_id in list(affected):
+            parent_id = parent_by_id.get(node_id, "")
+            while parent_id:
+                affected.add(parent_id)
+                parent_id = parent_by_id.get(parent_id, "")
+        changed_or_new = set(new_node_ids) | set(changed_node_ids)
+        for node_id, requirement in current_by_id.items():
+            dependencies = {str(value or "").strip() for value in requirement.get("dependencies") or []}
+            if dependencies & changed_or_new:
+                affected.add(node_id)
+        for node_id in list(affected):
+            parent_id = parent_by_id.get(node_id, "")
+            while parent_id:
+                affected.add(parent_id)
+                parent_id = parent_by_id.get(parent_id, "")
+        return {
+            "new_node_ids": new_node_ids,
+            "changed_node_ids": changed_node_ids,
+            "affected_node_ids": sorted(affected),
+        }
+
+    @staticmethod
+    def _flatten_requirement_tree(requirement_tree: dict[str, Any]) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+
+        def walk(node: dict[str, Any], parent_id: str | None = None) -> None:
+            node_id = str(node.get("id") or node.get("req_id") or "").strip()
+            if not node_id:
+                return
+            children = [child for child in node.get("children", []) or [] if isinstance(child, dict)]
+            records.append(
+                {
+                    "req_id": node_id,
+                    "name": str(node.get("name") or "").strip(),
+                    "description": str(node.get("description") or "").strip(),
+                    "visual_reference": list(node.get("visual_reference") or []),
+                    "scenarios": [dict(item) for item in node.get("scenarios", []) or [] if isinstance(item, dict)],
+                    "parent_id": parent_id,
+                    "children_ids": [
+                        str(child.get("id") or child.get("req_id") or "").strip()
+                        for child in children
+                        if str(child.get("id") or child.get("req_id") or "").strip()
+                    ],
+                    "dependencies": [str(value).strip() for value in node.get("dependencies", []) or [] if str(value).strip()],
+                }
+            )
+            for child in children:
+                walk(child, node_id)
+
+        walk(requirement_tree)
+        return records
+
+    @staticmethod
+    def _requirement_revision_payload(requirement: dict[str, Any]) -> str:
+        payload = {
+            "name": str(requirement.get("name") or "").strip(),
+            "description": str(requirement.get("description") or "").strip(),
+            "visual_reference": requirement.get("visual_reference") or [],
+            "scenarios": requirement.get("scenarios") or [],
+            "parent_id": str(requirement.get("parent_id") or "").strip(),
+            "children_ids": requirement.get("children_ids") or [],
+            "dependencies": requirement.get("dependencies") or [],
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+    def _append_incremental_requirement_tasks(
+        self,
+        queue_state: dict[str, Any],
+        *,
+        requirement_tree: dict[str, Any],
+        affected_node_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        affected = {str(node_id).strip() for node_id in affected_node_ids if str(node_id).strip()}
+        if not affected:
+            return []
+        queue_state.setdefault("node_states", {})
+        for node_id in affected:
+            queue_state["node_states"].setdefault(node_id, NODE_UNSEEN)
+
+        operations = queue_state.setdefault("operations", {})
+        tasks: list[dict[str, Any]] = []
+        next_order = max((int(task.get("order", -1)) for task in queue_state.get("tasks", [])), default=-1) + 1
+        next_operation_number = len(operations) + 1
+        for template in self._build_processing_tasks(requirement_tree):
+            if template["node_id"] not in affected:
+                continue
+            operation_id = f"op-{next_operation_number:04d}"
+            while operation_id in operations:
+                next_operation_number += 1
+                operation_id = f"op-{next_operation_number:04d}"
+            task = {
+                **template,
+                "task_id": f"{operation_id}:{template['node_id']}:{template['phase']}",
+                "operation_id": operation_id,
+                "mode": "full",
+                "affects_node_state": True,
+                "order": next_order,
+                "status": TASK_PENDING,
+            }
+            queue_state.setdefault("tasks", []).append(task)
+            operations[operation_id] = {
+                "kind": "incremental_requirement_compile",
+                "node_id": template["node_id"],
+                "phase": template["phase"],
+                "status": TASK_PENDING,
+            }
+            queue_state["last_operation_id"] = operation_id
+            tasks.append(task)
+            next_order += 1
+            next_operation_number += 1
+        return tasks
+
     def _append_test_generation_task(
         self,
         queue_state: dict[str, Any],
@@ -507,6 +680,7 @@ class ARCWorkflowManager:
         requirement_tree: dict[str, Any],
         *,
         require_compatible_existing_queue: bool = False,
+        allow_requirement_tree_change: bool = False,
     ) -> dict[str, Any]:
         os.makedirs(self.arc_dir, exist_ok=True)
         root_id = str(requirement_tree.get("id", ""))
@@ -520,6 +694,10 @@ class ARCWorkflowManager:
             for node_id in node_ids:
                 queue_state["node_states"].setdefault(node_id, NODE_UNSEEN)
             self._apply_saved_states_to_tasks(queue_state)
+            return queue_state
+        if allow_requirement_tree_change and existing_queue and existing_queue.get("root_id") == root_id:
+            queue_state = self._migrate_processing_queue(existing_queue, requirement_tree)
+            queue_state["tree_revision"] = self._requirement_tree_revision(requirement_tree)
             return queue_state
         if require_compatible_existing_queue:
             raise ValueError(
