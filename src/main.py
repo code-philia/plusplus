@@ -294,7 +294,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    import sys
+    argv = sys.argv[1:]
+    if argv and argv[0] not in {"compile", "doctor", "config", "--version", "-h", "--help"}:
+        argv = ["compile", *argv]
+    args = parser.parse_args(argv)
+
     
     # Call subcommand handler
     if asyncio.iscoroutinefunction(args.func):
