@@ -33,6 +33,8 @@ class CompilationConfig:
     resume_from_queue: bool = False
     retry_failed: bool = False
     retry_node_ids: list[str] | None = None
+    rerun_tdd_node_id: str | None = None
+    selected_test_ids: list[str] | None = None
     model_api_mode: str | None = None
 
 
@@ -135,6 +137,18 @@ def build_compile_parser(subparsers) -> None:
         metavar="NODE_ID",
         help="Retry specific node IDs (requires --resume)",
     )
+    parser.add_argument(
+        "--rerun-tdd",
+        metavar="NODE_ID",
+        help="Run TDD only for selected registered tests of one leaf node (requires --resume)",
+    )
+    parser.add_argument(
+        "--test",
+        dest="selected_test_ids",
+        action="append",
+        metavar="TEST_ID",
+        help="Registered test ID to include with --rerun-tdd; repeat for multiple tests",
+    )
     parser.set_defaults(func=cmd_compile)
 
 
@@ -146,11 +160,20 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     if args.clean and args.resume:
         print("Error: --clean and --resume are mutually exclusive")
         return 2
-    if (args.retry_failed or args.retry) and not args.resume:
-        print("Error: --retry-failed and --retry require --resume")
+    if (args.retry_failed or args.retry or args.rerun_tdd) and not args.resume:
+        print("Error: --retry-failed, --retry, and --rerun-tdd require --resume")
         return 2
     if args.retry_failed and args.retry:
         print("Error: --retry-failed and --retry are mutually exclusive")
+        return 2
+    if args.rerun_tdd and (args.retry_failed or args.retry):
+        print("Error: --rerun-tdd is mutually exclusive with --retry and --retry-failed")
+        return 2
+    if args.rerun_tdd and not args.selected_test_ids:
+        print("Error: --rerun-tdd requires at least one --test TEST_ID")
+        return 2
+    if args.selected_test_ids and not args.rerun_tdd:
+        print("Error: --test may only be used with --rerun-tdd")
         return 2
     
     # Normalize paths
@@ -180,6 +203,8 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         resume_from_queue=args.resume,
         retry_failed=args.retry_failed,
         retry_node_ids=args.retry or None,
+        rerun_tdd_node_id=args.rerun_tdd or None,
+        selected_test_ids=args.selected_test_ids or None,
         model_api_mode=model_api_mode,
     )
     
@@ -214,6 +239,8 @@ async def cmd_compile(args: argparse.Namespace) -> int:
             resume_from_queue=config.resume_from_queue,
             retry_failed=config.retry_failed,
             retry_node_ids=config.retry_node_ids,
+            rerun_tdd_node_id=config.rerun_tdd_node_id,
+            selected_test_ids=config.selected_test_ids,
         )
     finally:
         stop_cli_spinner()

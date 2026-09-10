@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -24,6 +26,7 @@ load_project_env()
 LogCallback = Callable[[str, str, str | None, str | None], Awaitable[None] | None]
 
 QUEUE_FILENAME = "processing_queue.json"
+QUEUE_SCHEMA_VERSION = 2
 
 PHASE_DESIGN = "DESIGN"
 PHASE_IMPLEMENT = "IMPLEMENT"
@@ -177,8 +180,14 @@ class ARCWorkflowManager:
         resume_from_queue: bool = False,
         retry_failed: bool = False,
         retry_node_ids: list[str] | None = None,
+        rerun_tdd_node_id: str | None = None,
+        selected_test_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         await self._log("Compiler", "ARC compilation started.")
+        if rerun_tdd_node_id and not resume_from_queue:
+            raise ValueError("Selected-test TDD requires resuming an existing ARC compilation workspace.")
+        if rerun_tdd_node_id and (retry_failed or retry_node_ids):
+            raise ValueError("Selected-test TDD cannot be combined with node retry operations.")
         if clear_all:
             cleaned = await self.cleanup_workspace()
             if not cleaned:
@@ -202,6 +211,8 @@ class ARCWorkflowManager:
             requirement_tree,
             retry_failed=retry_failed,
             retry_node_ids=retry_node_ids,
+            rerun_tdd_node_id=rerun_tdd_node_id,
+            selected_test_ids=selected_test_ids,
         )
         if result.get("ok"):
             self.runtime.events.mark_run_completed("ARC compilation completed.")
@@ -222,6 +233,8 @@ class ARCWorkflowManager:
         *,
         retry_failed: bool = False,
         retry_node_ids: list[str] | None = None,
+        rerun_tdd_node_id: str | None = None,
+        selected_test_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         root_id = str(requirement_tree.get("id") or "").strip()
         if not root_id:
@@ -241,6 +254,11 @@ class ARCWorkflowManager:
             retry_failed=retry_failed,
             retry_node_ids=retry_node_ids,
         )
+        selected_tdd_operation = self._append_selected_tdd_task(
+            queue_state,
+            node_id=rerun_tdd_node_id,
+            test_ids=selected_test_ids,
+        )
         self._save_processing_queue(queue_state)
         for recovered in recovered_tasks:
             await self._log(
@@ -259,6 +277,16 @@ class ARCWorkflowManager:
                 status="warning",
                 node_id=node_id,
             )
+        if selected_tdd_operation:
+            await self._log(
+                "Compiler",
+                (
+                    f"Queued selected-test TDD operation {selected_tdd_operation['operation_id']} "
+                    f"for node {selected_tdd_operation['node_id']}: "
+                    f"{', '.join(selected_tdd_operation['test_ids'])}"
+                ),
+                node_id=selected_tdd_operation["node_id"],
+            )
         await self._log(
             "Compiler",
             f"Loaded processing queue with {len(queue_state['tasks'])} task(s) for root node {root_id}.",
@@ -272,9 +300,13 @@ class ARCWorkflowManager:
             node_id = task["node_id"]
             phase = task["phase"]
             requirement_data = self.runtime.traceability.get_requirement(node_id) or {}
+            is_selected_tdd = task.get("mode") == "selected_tests"
 
             task["status"] = TASK_RUNNING
-            self._mark_task_running(queue_state["node_states"], node_id, phase)
+            if is_selected_tdd:
+                self._set_operation_status(queue_state, task, TASK_RUNNING)
+            else:
+                self._mark_task_running(queue_state["node_states"], node_id, phase)
             queue_state["last_task_id"] = task["task_id"]
             self._save_processing_queue(queue_state)
 
@@ -283,10 +315,17 @@ class ARCWorkflowManager:
 
             if task_ok:
                 task["status"] = TASK_COMPLETED
-                sessions.merge_node_session(node_id, {"resume_context": {}})
-                new_state = self._resolve_completed_node_state(node_id, phase)
-                self._set_node_state(queue_state["node_states"], node_id, new_state)
+                if is_selected_tdd:
+                    self._set_operation_status(queue_state, task, TASK_COMPLETED)
+                else:
+                    sessions.merge_node_session(node_id, {"resume_context": {}})
+                    new_state = self._resolve_completed_node_state(node_id, phase)
+                    self._set_node_state(queue_state["node_states"], node_id, new_state)
                 self._save_processing_queue(queue_state)
+                if is_selected_tdd:
+                    await self._commit_phase_checkpoint(node_id, "IMPLEMENT-SELECTED-TESTS", requirement_data)
+                    await self._log("Compiler", f"Selected-test TDD completed for node {node_id}.", node_id=node_id)
+                    continue
                 if phase == PHASE_DESIGN:
                     self.runtime.events.mark_design_done(node_id)
                 else:
@@ -297,9 +336,21 @@ class ARCWorkflowManager:
                 continue
 
             task["status"] = TASK_FAILED
-            self._set_node_state(queue_state["node_states"], node_id, NODE_FAILED)
-            self._mark_remaining_node_tasks_failed(queue_state, node_id)
+            if is_selected_tdd:
+                self._set_operation_status(queue_state, task, TASK_FAILED)
+            else:
+                self._set_node_state(queue_state["node_states"], node_id, NODE_FAILED)
+                self._mark_remaining_node_tasks_failed(queue_state, node_id)
             self._save_processing_queue(queue_state)
+            if is_selected_tdd:
+                await self._commit_phase_checkpoint(node_id, "IMPLEMENT-SELECTED-TESTS-FAILED", requirement_data)
+                await self._log(
+                    "Compiler",
+                    f"Selected-test TDD failed for node {node_id}; preserving its prior compile state.",
+                    "error",
+                    node_id,
+                )
+                continue
             if phase == PHASE_DESIGN:
                 self.runtime.events.mark_design_failed(node_id)
             else:
@@ -309,6 +360,68 @@ class ARCWorkflowManager:
             await self._log("Compiler", f"{phase} failed for node {node_id}.", "error", node_id)
 
         return self._build_compile_result(queue_state)
+
+    def _append_selected_tdd_task(
+        self,
+        queue_state: dict[str, Any],
+        *,
+        node_id: str | None,
+        test_ids: list[str] | None,
+    ) -> dict[str, Any] | None:
+        normalized_node_id = str(node_id or "").strip()
+        normalized_test_ids = list(dict.fromkeys(str(test_id or "").strip() for test_id in test_ids or [] if str(test_id or "").strip()))
+        if not normalized_node_id and not normalized_test_ids:
+            return None
+        if not normalized_node_id or not normalized_test_ids:
+            raise ValueError("Selected-test TDD requires both a node id and at least one test id.")
+        if normalized_node_id not in queue_state.get("node_states", {}):
+            raise ValueError(f"Selected-test TDD requested for unknown node {normalized_node_id}.")
+
+        registered_tests = {
+            str(test.get("test_id") or "").strip(): test
+            for test in self.runtime.traceability.list_tests(req_id=normalized_node_id)
+            if isinstance(test, dict) and str(test.get("test_id") or "").strip()
+        }
+        unknown_test_ids = [test_id for test_id in normalized_test_ids if test_id not in registered_tests]
+        if unknown_test_ids:
+            raise ValueError(
+                f"Selected-test TDD requested unregistered test id(s) for node {normalized_node_id}: "
+                f"{', '.join(unknown_test_ids)}"
+            )
+
+        operations = queue_state.setdefault("operations", {})
+        if not isinstance(operations, dict):
+            raise ValueError("Processing queue operations must be an object.")
+        operation_id = f"op-{len(operations) + 1:04d}"
+        while operation_id in operations:
+            operation_id = f"op-{int(operation_id.split('-')[-1]) + 1:04d}"
+        order = max((int(task.get("order", -1)) for task in queue_state.get("tasks", [])), default=-1) + 1
+        task = {
+            "task_id": f"{operation_id}:{normalized_node_id}:{PHASE_IMPLEMENT}",
+            "operation_id": operation_id,
+            "node_id": normalized_node_id,
+            "phase": PHASE_IMPLEMENT,
+            "mode": "selected_tests",
+            "test_ids": normalized_test_ids,
+            "order": order,
+            "status": TASK_PENDING,
+        }
+        queue_state.setdefault("tasks", []).append(task)
+        operations[operation_id] = {
+            "kind": "rerun_tdd",
+            "node_id": normalized_node_id,
+            "test_ids": normalized_test_ids,
+            "status": TASK_PENDING,
+        }
+        queue_state["last_operation_id"] = operation_id
+        return task
+
+    @staticmethod
+    def _set_operation_status(queue_state: dict[str, Any], task: dict[str, Any], status: str) -> None:
+        operation_id = str(task.get("operation_id") or "").strip()
+        operation = queue_state.get("operations", {}).get(operation_id)
+        if isinstance(operation, dict):
+            operation["status"] = status
 
     def _load_or_create_processing_queue(
         self,
@@ -323,7 +436,7 @@ class ARCWorkflowManager:
         node_ids = self._collect_node_ids(expected_tasks)
         existing_queue = read_json_file(self.queue_path)
         if self._is_compatible_queue(existing_queue, root_id, expected_task_ids):
-            queue_state = existing_queue
+            queue_state = self._migrate_processing_queue(existing_queue, requirement_tree)
             queue_state.setdefault("node_states", {})
             for node_id in node_ids:
                 queue_state["node_states"].setdefault(node_id, NODE_UNSEEN)
@@ -334,13 +447,43 @@ class ARCWorkflowManager:
                 "Retry requested, but the existing processing queue is missing or incompatible with the current requirement tree."
             )
         queue_state = {
+            "schema_version": QUEUE_SCHEMA_VERSION,
+            "tree_revision": self._requirement_tree_revision(requirement_tree),
             "root_id": root_id,
             "tasks": expected_tasks,
             "node_states": {node_id: NODE_UNSEEN for node_id in node_ids},
             "last_task_id": None,
+            "last_operation_id": None,
+            "operations": {},
         }
         self._apply_saved_states_to_tasks(queue_state)
         return queue_state
+
+    @staticmethod
+    def _requirement_tree_revision(requirement_tree: dict[str, Any]) -> str:
+        canonical_tree = json.dumps(
+            requirement_tree,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        digest = hashlib.sha256(canonical_tree.encode("utf-8")).hexdigest()
+        return f"sha256:{digest}"
+
+    def _migrate_processing_queue(
+        self,
+        queue_state: dict[str, Any],
+        requirement_tree: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Add interactive-queue metadata without changing legacy task semantics."""
+
+        migrated = dict(queue_state)
+        migrated.setdefault("schema_version", QUEUE_SCHEMA_VERSION)
+        migrated.setdefault("tree_revision", self._requirement_tree_revision(requirement_tree))
+        migrated.setdefault("operations", {})
+        migrated.setdefault("last_operation_id", None)
+        return migrated
 
     def _build_processing_tasks(self, root_node: dict[str, Any]) -> list[dict[str, Any]]:
         tasks: list[dict[str, Any]] = []
@@ -380,11 +523,18 @@ class ARCWorkflowManager:
     def _is_compatible_queue(queue_state: dict[str, Any] | None, root_id: str, expected_task_ids: list[str]) -> bool:
         if not queue_state or queue_state.get("root_id") != root_id:
             return False
-        return [task.get("task_id") for task in queue_state.get("tasks", [])] == expected_task_ids
+        base_task_ids = [
+            task.get("task_id")
+            for task in queue_state.get("tasks", [])
+            if not task.get("operation_id")
+        ]
+        return base_task_ids == expected_task_ids
 
     @staticmethod
     def _apply_saved_states_to_tasks(queue_state: dict[str, Any]) -> None:
         for task in queue_state["tasks"]:
+            if task.get("operation_id"):
+                continue
             node_state = queue_state["node_states"].get(task["node_id"], NODE_UNSEEN)
             if node_state in {NODE_PASSED, NODE_CONVERGED, NODE_CONVERGED_WITH_FAILED_CHILDREN}:
                 task["status"] = TASK_COMPLETED
@@ -405,6 +555,11 @@ class ARCWorkflowManager:
             if task["status"] == TASK_RUNNING:
                 node_id = str(task.get("node_id", "") or "").strip()
                 phase = str(task.get("phase", "") or "").strip()
+                if task.get("operation_id"):
+                    task["status"] = TASK_PENDING
+                    self._set_operation_status(queue_state, task, TASK_PENDING)
+                    recovered.append({"node_id": node_id, "phase": phase, "task_id": str(task.get("task_id", ""))})
+                    continue
                 previous_state = str(queue_state.get("node_states", {}).get(node_id, NODE_UNSEEN) or NODE_UNSEEN)
                 task["status"] = TASK_PENDING
                 fallback_state = NODE_DESIGNED if phase == PHASE_IMPLEMENT else NODE_UNSEEN
@@ -587,6 +742,12 @@ class ARCWorkflowManager:
             return False
         if task["phase"] == PHASE_DESIGN:
             return await self.phase_runner.run_design_phase(node_id, requirement_data)
+        if task.get("mode") == "selected_tests":
+            return await self.phase_runner.run_implement_phase(
+                node_id,
+                requirement_data,
+                test_ids=task.get("test_ids") or [],
+            )
         return await self.phase_runner.run_implement_phase(node_id, requirement_data)
 
     async def _commit_phase_checkpoint(self, node_id: str, phase: str, requirement_data: dict[str, Any]) -> None:
@@ -630,10 +791,22 @@ class ARCWorkflowManager:
             node_id for node_id, state in queue_state["node_states"].items() if state == NODE_FAILED
         )
         completed_tasks = [task["task_id"] for task in queue_state["tasks"] if task["status"] == TASK_COMPLETED]
-        all_completed = all(task["status"] == TASK_COMPLETED for task in queue_state["tasks"])
+        base_tasks = [task for task in queue_state["tasks"] if not task.get("operation_id")]
+        base_compilation_completed = all(task["status"] == TASK_COMPLETED for task in base_tasks)
+        last_operation_id = str(queue_state.get("last_operation_id") or "").strip()
+        last_operation = queue_state.get("operations", {}).get(last_operation_id)
+        last_operation_completed = not last_operation_id or (
+            isinstance(last_operation, dict) and last_operation.get("status") == TASK_COMPLETED
+        )
+        failed_operations = sorted(
+            operation_id
+            for operation_id, operation in queue_state.get("operations", {}).items()
+            if isinstance(operation, dict) and operation.get("status") == TASK_FAILED
+        )
         return {
-            "ok": all_completed and not failed_nodes,
+            "ok": base_compilation_completed and last_operation_completed and not failed_nodes,
             "failed_nodes": failed_nodes,
+            "failed_operations": failed_operations,
             "visit_order": completed_tasks,
             "states": dict(queue_state["node_states"]),
         }

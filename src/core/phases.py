@@ -240,8 +240,22 @@ class WorkflowPhaseRunner:
         )
         return True
 
-    async def run_implement_phase(self, node_id: str, requirement_data: dict[str, Any]) -> bool:
+    async def run_implement_phase(
+        self,
+        node_id: str,
+        requirement_data: dict[str, Any],
+        test_ids: list[str] | None = None,
+    ) -> bool:
         is_non_leaf = bool(requirement_data.get("children_ids"))
+        selected_test_ids = list(dict.fromkeys(str(test_id or "").strip() for test_id in test_ids or [] if str(test_id or "").strip()))
+        if selected_test_ids and is_non_leaf:
+            await self._log(
+                "TestDrivenDeveloper",
+                "Selected-test TDD is only available for leaf requirement nodes.",
+                status="error",
+                node_id=node_id,
+            )
+            return False
         if is_non_leaf:
             interfaces = self.traceability.list_interfaces(req_id=node_id)
             self._mark_interfaces_implemented(interfaces)
@@ -260,29 +274,48 @@ class WorkflowPhaseRunner:
             return True
 
         del requirement_data
-        self._update_node_session(node_id, {"phase_status": {"implement": "in_progress"}})
+        if not selected_test_ids:
+            self._update_node_session(node_id, {"phase_status": {"implement": "in_progress"}})
         interfaces = self.traceability.list_interfaces(req_id=node_id)
         tests = self.traceability.list_tests(req_id=node_id)
+        if selected_test_ids:
+            tests_by_id = {
+                str(test.get("test_id", "") or "").strip(): test
+                for test in tests
+                if str(test.get("test_id", "") or "").strip()
+            }
+            unknown_test_ids = [test_id for test_id in selected_test_ids if test_id not in tests_by_id]
+            if unknown_test_ids:
+                await self._log(
+                    "TestDrivenDeveloper",
+                    f"Selected-test TDD received unregistered test id(s): {', '.join(unknown_test_ids)}",
+                    status="error",
+                    node_id=node_id,
+                )
+                return False
+            tests = [tests_by_id[test_id] for test_id in selected_test_ids]
         if not tests:
             await self._log(
                 "TestDrivenDeveloper",
                 "No node-local tests were registered; skipping TDD implementation for this node.",
                 node_id=node_id,
             )
-            self._mark_interfaces_implemented(interfaces)
-            self._update_node_session(node_id, {"phase_status": {"implement": "completed"}})
+            if not selected_test_ids:
+                self._mark_interfaces_implemented(interfaces)
+                self._update_node_session(node_id, {"phase_status": {"implement": "completed"}})
             return True
 
         final_ok = await self._run_tdd_for_node(
             node_id=node_id,
             tests=tests,
         )
-        if final_ok:
+        if final_ok and not selected_test_ids:
             self._mark_interfaces_implemented(interfaces)
-        self._update_node_session(
-            node_id,
-            {"phase_status": {"implement": "completed" if final_ok else "failed"}},
-        )
+        if not selected_test_ids:
+            self._update_node_session(
+                node_id,
+                {"phase_status": {"implement": "completed" if final_ok else "failed"}},
+            )
         return final_ok
 
     async def _run_tdd_for_node(
