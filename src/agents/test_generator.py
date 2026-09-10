@@ -64,8 +64,7 @@ class TestGenerator:
         *,
         preloaded_source: str | None = None,
         test_intent: str = "",
-        replace_intent: bool = False,
-        existing_test_ids: list[str] | None = None,
+        replace_test_id: str | None = None,
     ) -> tuple[list[dict[str, Any]] | None, str]:
         workspace_root = str(Path(
             self.workspace_root
@@ -108,8 +107,7 @@ class TestGenerator:
             dynamic_context=context_text,
             interface_contract=interface_contract,
             test_intent=test_intent,
-            replace_intent=replace_intent,
-            existing_test_ids=existing_test_ids or [],
+            replace_test_id=replace_test_id,
         )
         await self._log(f"skill-permitted: {', '.join(selected_skill_names) or 'none'}", node_id=node_id)
         await self._log("Invoking test generation.", node_id=node_id)

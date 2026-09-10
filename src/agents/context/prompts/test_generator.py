@@ -87,16 +87,14 @@ def get_user_prompt(
     dynamic_context: str,
     interface_contract: str = "",
     test_intent: str = "",
-    replace_intent: bool = False,
-    existing_test_ids: list[str] | None = None,
+    replace_test_id: str | None = None,
 ) -> str:
     sections = []
     if test_intent.strip():
-        operation = "Replace" if replace_intent else "Generate"
+        operation = "Modify" if replace_test_id else "Generate"
         replacement_rules = (
-            "Edit the existing intent-owned test files in place. Preserve unrelated tests in those files and return the replacement manifest. "
-            f"Existing intent-owned test ids are: {', '.join(existing_test_ids or []) or 'none'}."
-            if replace_intent
+            f"Modify only registered test `{replace_test_id}` in place. Preserve every other test in its file, keep the same test id and file path, and return a manifest containing only `{replace_test_id}`."
+            if replace_test_id
             else "Do not replace unrelated current-node tests; return only tests that serve this requested intent."
         )
         sections.append(

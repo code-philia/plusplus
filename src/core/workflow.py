@@ -4,6 +4,7 @@ import os
 import shutil
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -27,6 +28,8 @@ LogCallback = Callable[[str, str, str | None, str | None], Awaitable[None] | Non
 
 QUEUE_FILENAME = "processing_queue.json"
 QUEUE_SCHEMA_VERSION = 2
+PROJECT_METADATA_FILENAME = "project.json"
+PROJECT_METADATA_SCHEMA_VERSION = 1
 
 PHASE_DESIGN = "DESIGN"
 PHASE_IMPLEMENT = "IMPLEMENT"
@@ -44,6 +47,27 @@ NODE_PASSED = "PASSED"
 NODE_CONVERGED = "CONVERGED"
 NODE_CONVERGED_WITH_FAILED_CHILDREN = "CONVERGED_WITH_FAILED_CHILDREN"
 NODE_FAILED = "FAILED"
+
+
+def load_project_metadata(workspace_path: str) -> dict[str, Any] | None:
+    """Load validated workspace metadata used by the CLI resume path."""
+    metadata_path = Path(workspace_path).expanduser().resolve() / ".arc" / PROJECT_METADATA_FILENAME
+    metadata = read_json_file(metadata_path)
+    if not metadata:
+        return None
+
+    app_type = str(metadata.get("app_type", "")).strip().lower()
+    if app_type != normalize_app_type(app_type):
+        return None
+
+    try:
+        web_port = int(metadata.get("web_port", 3301))
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= web_port <= 65535:
+        return None
+
+    return {**metadata, "app_type": app_type, "web_port": web_port}
 
 
 class ARCWorkflowManager:
@@ -66,6 +90,7 @@ class ARCWorkflowManager:
 
         self.arc_dir = os.path.join(self.workspace_path, ".arc")
         self.queue_path = os.path.join(self.arc_dir, QUEUE_FILENAME)
+        self.project_metadata_path = os.path.join(self.arc_dir, PROJECT_METADATA_FILENAME)
         self.runtime = None
 
         set_web_port(self.web_port)
@@ -140,6 +165,7 @@ class ARCWorkflowManager:
             web_port=self.web_port,
         )
         self.runtime.traceability.init_store(reset=False)
+        self._save_project_metadata()
 
         app_handler = create_app_type_handler(
             workspace_path=self.workspace_path,
@@ -156,6 +182,22 @@ class ARCWorkflowManager:
         self.runtime.git.ensure_repo(create_initial_commit=True)
         return True
 
+    def _save_project_metadata(self) -> None:
+        """Persist workspace-level settings needed to safely resume compilation."""
+        existing = read_json_file(self.project_metadata_path) or {}
+        now = datetime.now(timezone.utc).isoformat()
+        write_json_file(
+            self.project_metadata_path,
+            {
+                "schema_version": PROJECT_METADATA_SCHEMA_VERSION,
+                "app_type": self.app_type,
+                "web_port": self.web_port,
+                "requirement_path": self.requirement_path,
+                "created_at": existing.get("created_at", now),
+                "updated_at": now,
+            },
+        )
+
     async def prepare_resume_context(self) -> None:
         set_workspace_root(self.workspace_path)
         set_app_type(self.app_type)
@@ -171,6 +213,9 @@ class ARCWorkflowManager:
             web_port=self.web_port,
         )
         self.runtime.traceability.init_store(reset=False)
+        # Backfill metadata for workspaces created before project.json existed.
+        if not read_json_file(self.project_metadata_path):
+            self._save_project_metadata()
         self.runtime.events.mark_run_resumed("ARC compilation resumed from processing queue.")
 
     async def start_compilation(
@@ -278,11 +323,13 @@ class ARCWorkflowManager:
             retry_failed=retry_failed,
             retry_node_ids=retry_node_ids,
         )
-        selected_tdd_operation = self._append_selected_tdd_task(
-            queue_state,
-            node_id=rerun_tdd_node_id,
-            test_ids=selected_test_ids,
-        )
+        selected_tdd_operation = None
+        if rerun_tdd_node_id:
+            selected_tdd_operation = self._append_selected_tdd_task(
+                queue_state,
+                node_id=rerun_tdd_node_id,
+                test_ids=selected_test_ids,
+            )
         test_generation_operation = self._append_test_generation_task(
             queue_state,
             node_id=regenerate_tests_node_id or add_tests_node_id,

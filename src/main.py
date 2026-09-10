@@ -19,7 +19,7 @@ from core.cli import (
     stop_cli_spinner,
 )
 from core.config import set_web_port
-from core.workflow import ARCWorkflowManager
+from core.workflow import ARCWorkflowManager, load_project_metadata
 
 
 @dataclass(slots=True)
@@ -112,14 +112,17 @@ def build_compile_parser(subparsers) -> None:
         "-t",
         "--type",
         dest="app_type",
-        default="web",
-        help=f"Application type (choices: {', '.join(list_app_types())})",
+        default=None,
+        help=(
+            f"Application type for a new workspace (choices: {', '.join(list_app_types())}); "
+            "on --resume, defaults to the workspace's saved type"
+        ),
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=3301,
-        help="Web server port (only for app-type=web, default: 3301)",
+        default=None,
+        help="Web server port (only for app-type=web; on --resume, defaults to the saved port)",
     )
     parser.add_argument(
         "--clean",
@@ -176,6 +179,41 @@ def build_compile_parser(subparsers) -> None:
     parser.set_defaults(func=cmd_compile)
 
 
+def _resolve_workspace_settings(
+    *,
+    output_dir: str,
+    resume_from_queue: bool,
+    requested_app_type: str | None,
+    requested_web_port: int | None,
+) -> tuple[str, int]:
+    """Resolve explicit CLI settings against persisted workspace metadata."""
+    metadata = load_project_metadata(output_dir) if resume_from_queue else None
+    saved_app_type = metadata.get("app_type") if metadata else None
+    saved_web_port = metadata.get("web_port") if metadata else None
+
+    if requested_app_type is not None:
+        app_type = normalize_app_type(requested_app_type)
+        if saved_app_type and app_type != saved_app_type:
+            raise ValueError(
+                f"--type {app_type!r} conflicts with saved workspace type {saved_app_type!r}. "
+                "Create a new output directory to change application type."
+            )
+    else:
+        app_type = saved_app_type or "web"
+
+    if requested_web_port is not None:
+        web_port = requested_web_port
+        if saved_web_port is not None and app_type == "web" and web_port != saved_web_port:
+            raise ValueError(
+                f"--port {web_port} conflicts with saved workspace port {saved_web_port}. "
+                "Omit --port to reuse the saved setting."
+            )
+    else:
+        web_port = saved_web_port if saved_web_port is not None else 3301
+
+    return app_type, web_port
+
+
 async def cmd_compile(args: argparse.Namespace) -> int:
     """Execute compile subcommand."""
     _ensure_dotenv_loaded()
@@ -217,11 +255,19 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     if args.clean and os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     
-    # Normalize app type
-    normalized_app_type = normalize_app_type(args.app_type)
+    try:
+        normalized_app_type, resolved_web_port = _resolve_workspace_settings(
+            output_dir=output_dir,
+            resume_from_queue=args.resume,
+            requested_app_type=args.app_type,
+            requested_web_port=args.port,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 2
     
     # Set web port
-    set_web_port(args.port)
+    set_web_port(resolved_web_port)
     
     # Model API mode
     model_api_mode = os.environ.get("ARC_OPENAI_API_MODE", "").strip() or None
@@ -232,7 +278,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         requirement_path=requirement_path,
         user_requested_clear_all=args.clean,
         app_type=normalized_app_type,
-        web_port=args.port,
+        web_port=resolved_web_port,
         resume_from_queue=args.resume,
         retry_failed=args.retry_failed,
         retry_node_ids=args.retry or None,
