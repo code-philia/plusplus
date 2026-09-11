@@ -48,18 +48,24 @@ class AppTypeHandler(ABC):
             )
         return os.path.join(_resolve_templates_root(), template_id)
 
-    async def initialize_workspace(self) -> bool:
+    async def initialize_workspace(self, *, seed_template: bool = True) -> bool:
         prereqs_ok = await self.check_prerequisites()
         if not prereqs_ok:
             return False
 
-        copied = await self.copy_template()
-        if not copied:
-            return False
+        if seed_template:
+            copied = await self.copy_template()
+            if not copied:
+                return False
 
-        setup_ok = await self.post_template_setup()
-        if not setup_ok:
-            return False
+            setup_ok = await self.post_template_setup()
+            if not setup_ok:
+                return False
+        else:
+            await self._log(
+                "System",
+                "Existing application detected; preserving it as the compilation baseline and skipping template scaffolding.",
+            )
 
         await self.install_dependencies()
         return True

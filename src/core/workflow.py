@@ -30,6 +30,9 @@ QUEUE_FILENAME = "processing_queue.json"
 QUEUE_SCHEMA_VERSION = 2
 PROJECT_METADATA_FILENAME = "project.json"
 PROJECT_METADATA_SCHEMA_VERSION = 1
+WORKSPACE_MODE_SCAFFOLD = "scaffold"
+WORKSPACE_MODE_EVOLUTION = "evolution"
+WORKSPACE_CONTROL_NAMES = {".arc", ".git", "requirements"}
 
 PHASE_DESIGN = "DESIGN"
 PHASE_IMPLEMENT = "IMPLEMENT"
@@ -92,6 +95,7 @@ class ARCWorkflowManager:
         self.queue_path = os.path.join(self.arc_dir, QUEUE_FILENAME)
         self.project_metadata_path = os.path.join(self.arc_dir, PROJECT_METADATA_FILENAME)
         self.runtime = None
+        self.workspace_mode = WORKSPACE_MODE_SCAFFOLD
 
         set_web_port(self.web_port)
         self.interface_designer = InterfaceDesigner(
@@ -147,9 +151,35 @@ class ARCWorkflowManager:
             await self._log("RequirementLoader", f"Error while reading requirements file: {exc}", "error")
             return None
 
+    def _has_existing_application(self) -> bool:
+        """Return whether the output contains application content, not ARC inputs/state."""
+        workspace = Path(self.workspace_path)
+        if not workspace.is_dir():
+            return False
+        for entry in workspace.iterdir():
+            if entry.name in WORKSPACE_CONTROL_NAMES:
+                continue
+            if entry.is_file() or entry.is_symlink():
+                return True
+            if entry.is_dir() and any(path.is_file() or path.is_symlink() for path in entry.rglob("*")):
+                return True
+        return False
+
+    def _reset_fresh_compilation_state(self) -> None:
+        """Discard old compiler state while preserving the application and runner inputs."""
+        arc_dir = Path(self.arc_dir)
+        Path(self.queue_path).unlink(missing_ok=True)
+        (arc_dir / "visual_analysis_cache.json").unlink(missing_ok=True)
+        shutil.rmtree(arc_dir / "node_sessions", ignore_errors=True)
+
     async def initialize_project(self) -> bool:
+        self.workspace_mode = (
+            WORKSPACE_MODE_EVOLUTION if self._has_existing_application() else WORKSPACE_MODE_SCAFFOLD
+        )
+        os.environ["ARC_WORKSPACE_MODE"] = self.workspace_mode
         await self._log("System", f"Initializing project environment in {self.workspace_path}...")
         Path(self.arc_dir).mkdir(parents=True, exist_ok=True)
+        self._reset_fresh_compilation_state()
         set_workspace_root(self.workspace_path)
         set_app_type(self.app_type)
         set_web_port(self.web_port)
@@ -164,7 +194,10 @@ class ARCWorkflowManager:
             app_type=self.app_type,
             web_port=self.web_port,
         )
-        self.runtime.traceability.init_store(reset=False)
+        # A non-resume invocation always compiles a new requirement document.
+        # Old application code may be the evolution baseline, but old ARC
+        # queue/traceability state must not suppress nodes in the new tree.
+        self.runtime.traceability.init_store(reset=True)
         self._save_project_metadata()
 
         app_handler = create_app_type_handler(
@@ -174,11 +207,18 @@ class ARCWorkflowManager:
             interface_designer=self.interface_designer,
             log_cb=self.log_cb,
         )
-        init_ok = await app_handler.initialize_workspace()
+        init_ok = await app_handler.initialize_workspace(
+            seed_template=self.workspace_mode == WORKSPACE_MODE_SCAFFOLD,
+        )
         if not init_ok:
             return False
 
-        await self._log("System", "Initializing Git repository...")
+        await self._log(
+            "System",
+            "Recording the existing application as the evolution baseline."
+            if self.workspace_mode == WORKSPACE_MODE_EVOLUTION
+            else "Initializing Git repository...",
+        )
         self.runtime.git.ensure_repo(create_initial_commit=True)
         return True
 
@@ -193,6 +233,7 @@ class ARCWorkflowManager:
                 "app_type": self.app_type,
                 "web_port": self.web_port,
                 "requirement_path": self.requirement_path,
+                "workspace_mode": self.workspace_mode,
                 "created_at": existing.get("created_at", now),
                 "updated_at": now,
             },
@@ -213,8 +254,15 @@ class ARCWorkflowManager:
             web_port=self.web_port,
         )
         self.runtime.traceability.init_store(reset=False)
+        metadata = read_json_file(self.project_metadata_path) or {}
+        stored_mode = str(metadata.get("workspace_mode") or WORKSPACE_MODE_SCAFFOLD).strip().lower()
+        self.workspace_mode = (
+            stored_mode if stored_mode in {WORKSPACE_MODE_SCAFFOLD, WORKSPACE_MODE_EVOLUTION}
+            else WORKSPACE_MODE_SCAFFOLD
+        )
+        os.environ["ARC_WORKSPACE_MODE"] = self.workspace_mode
         # Backfill metadata for workspaces created before project.json existed.
-        if not read_json_file(self.project_metadata_path):
+        if not metadata:
             self._save_project_metadata()
         self.runtime.events.mark_run_resumed("ARC compilation resumed from processing queue.")
 

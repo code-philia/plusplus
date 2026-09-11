@@ -14,17 +14,25 @@ def json_block(value: Any) -> str:
 
 
 def compiler_background() -> str:
-    return section(
-        "ARC Compiler",
-        [
+    lines = [
             "ARC compiles a structured requirement tree into interfaces, tests, implementation, and traceability records.",
             "The requirement node is the source of truth. Preserve parent/child ownership, dependency links, and declared scenario constraints.",
             "Treat the codebase as one connected system: every artifact should fit existing routes, handlers, tests, persistence, and ownership boundaries instead of becoming an isolated fragment.",
             "The final product is a usable application, not a collection of files that individually satisfy prompts. Local node work must preserve end-to-end runtime coherence.",
             "Compilation is staged: InterfaceDesigner defines and materializes contracts, TestGenerator creates executable verification assets, TestDrivenDeveloper implements through feedback.",
             "The system, not the agent, owns queue state, traceability persistence, workspace initialization, Git checkpoints, and app-type-specific build/test execution.",
-        ],
-    )
+    ]
+    if os.environ.get("ARC_WORKSPACE_MODE", "").strip().lower() == "evolution":
+        lines.extend(
+            [
+                "This compilation starts from an existing application and a new requirement tree; the existing application is the authoritative evolution baseline, not disposable scaffold output.",
+                "Preserve existing user-visible behavior, routes, APIs, persistence, tests, configuration, and architecture unless the new requirement explicitly changes them.",
+                "Treat requirements absent from the new document as existing behavior to preserve, not as permission to remove code or simplify the application.",
+                "Inspect and extend the existing implementation before creating files; do not replace the project wholesale, re-scaffold it, or build a parallel application.",
+                "Make the smallest coherent changes needed for the new requirements and keep existing tests/build paths working alongside newly generated verification.",
+            ]
+        )
+    return section("ARC Compiler", lines)
 
 
 def reasoning_reflection_policy() -> str:
