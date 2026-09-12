@@ -64,7 +64,7 @@ def load_project_metadata(workspace_path: str) -> dict[str, Any] | None:
         return None
 
     try:
-        web_port = int(metadata.get("web_port", 3301))
+        web_port = int(metadata.get("web_port", 3000))
     except (TypeError, ValueError):
         return None
     if not 1 <= web_port <= 65535:
@@ -81,7 +81,7 @@ class ARCWorkflowManager:
         workspace_path: str,
         requirement_path: str = "",
         app_type: str = "web",
-        web_port: int = 3301,
+        web_port: int = 3000,
         log_cb: LogCallback | None = None,
     ) -> None:
         self.workspace_path = str(Path(workspace_path).expanduser().resolve())

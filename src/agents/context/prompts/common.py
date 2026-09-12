@@ -98,7 +98,7 @@ def app_runtime_contract() -> str:
     from app_type_handler import get_app_type_handler_class
 
     app_type = os.environ.get("ARC_APP_TYPE", "web").strip().lower() or "web"
-    web_port = int(os.environ.get("ARC_WEB_PORT", "3301") or 3301)
+    web_port = int(os.environ.get("ARC_WEB_PORT", "3000") or 3000)
     android_package = os.environ.get("ARC_ANDROID_PACKAGE", "com.example.template").strip() or "com.example.template"
     handler_class = get_app_type_handler_class(app_type)
     lines = handler_class.runtime_contract_lines(

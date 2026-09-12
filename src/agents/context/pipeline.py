@@ -11,7 +11,7 @@ from typing import Any, Callable
 class ContextConfig:
     workspace_dir: str = "."
     app_type: str = "web"
-    web_port: int = 3301
+    web_port: int = 3000
     android_package: str = "com.example.template"
 
 

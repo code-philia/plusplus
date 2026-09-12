@@ -29,7 +29,7 @@ class CompilationConfig:
     requirement_path: str
     user_requested_clear_all: bool = False
     app_type: str = "web"
-    web_port: int = 3301
+    web_port: int = 3000
     resume_from_queue: bool = False
     retry_failed: bool = False
     retry_node_ids: list[str] | None = None
@@ -209,7 +209,7 @@ def _resolve_workspace_settings(
                 "Omit --port to reuse the saved setting."
             )
     else:
-        web_port = saved_web_port if saved_web_port is not None else 3301
+        web_port = saved_web_port if saved_web_port is not None else 3000
 
     return app_type, web_port
 

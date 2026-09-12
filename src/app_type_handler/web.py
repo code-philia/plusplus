@@ -767,33 +767,11 @@ class WebAppType(AppTypeHandler):
         return None
 
     async def post_template_setup(self) -> bool:
-        replacements = {
-            "__ARC_WEB_PORT__": str(get_web_port()),
-        }
-        target_files = [
-            os.path.join(self.workspace_path, "backend", "src", "index.js"),
-            os.path.join(self.workspace_path, "backend", "playwright.config.js"),
-            os.path.join(self.workspace_path, "frontend", "vite.config.js"),
-        ]
-
-        try:
-            for file_path in target_files:
-                if not os.path.exists(file_path):
-                    continue
-                with open(file_path, "r", encoding="utf-8") as file:
-                    content = file.read()
-                for old_value, new_value in replacements.items():
-                    content = content.replace(old_value, new_value)
-                with open(file_path, "w", encoding="utf-8") as file:
-                    file.write(content)
-            await self._log(
-                "System",
-                f"Configured web template for single-port backend hosting on port {get_web_port()}.",
-            )
-            return True
-        except Exception as exc:
-            await self._log("System", f"Failed to configure web template: {str(exc)}")
-            return False
+        await self._log(
+            "System",
+            f"Web template uses port {get_web_port()} (default 3000; configurable with --port).",
+        )
+        return True
 
     async def install_dependencies(self) -> None:
         backend_path = os.path.join(self.workspace_path, "backend")
