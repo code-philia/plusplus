@@ -65,6 +65,7 @@ def _edge_key(source_req_id: str, target_req_id: str, from_interface_id: str, to
 @dataclass(frozen=True)
 class RequirementRecord:
     req_id: str
+    type: str = "ATOMIC"
     name: str = ""
     description: str = ""
     visual_reference: list[str] | None = None
@@ -72,6 +73,7 @@ class RequirementRecord:
     parent_id: str | None = None
     children_ids: list[str] | None = None
     dependencies: list[str] | None = None
+    source: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -184,12 +186,14 @@ class TraceabilityStore:
                 "req_id": req_id,
                 "id": req_id,
                 "name": str(node.get("name") or "").strip(),
+                "type": str(node.get("type") or "ATOMIC").strip().upper(),
                 "description": str(node.get("description") or "").strip(),
                 "visual_reference": _as_str_list(node.get("visual_reference")),
                 "scenarios": node_scenarios,
                 "parent_id": _as_optional_str(parent_id),
                 "children_ids": children_ids,
                 "dependencies": _as_str_list(node.get("dependencies")),
+                "source": dict(node.get("source")) if isinstance(node.get("source"), dict) else None,
             }
             for scenario in node_scenarios:
                 scenario_id = str(scenario.get("id") or scenario.get("scenario_id") or "").strip()
@@ -237,6 +241,7 @@ class TraceabilityStore:
         self,
         *,
         req_id: str,
+        type: str = "ATOMIC",
         name: str = "",
         description: str = "",
         visual_reference: list[str] | None = None,
@@ -244,6 +249,7 @@ class TraceabilityStore:
         parent_id: str | None = None,
         children_ids: list[str] | None = None,
         dependencies: list[str] | None = None,
+        source: dict[str, Any] | None = None,
     ) -> None:
         normalized_req_id = str(req_id or "").strip()
         if not normalized_req_id:
@@ -254,6 +260,7 @@ class TraceabilityStore:
             normalized_req_id,
             {
                 "req_id": normalized_req_id,
+                "type": str(type or "ATOMIC").strip().upper(),
                 "name": str(name or "").strip(),
                 "description": str(description or "").strip(),
                 "visual_reference": _as_str_list(visual_reference),
@@ -261,6 +268,7 @@ class TraceabilityStore:
                 "parent_id": _as_optional_str(parent_id),
                 "children_ids": _as_str_list(children_ids),
                 "dependencies": _as_str_list(dependencies),
+                "source": dict(source) if isinstance(source, dict) else None,
             },
         )
         scenarios_table = self._read_table("scenarios")
@@ -287,6 +295,7 @@ class TraceabilityStore:
         merged = {**current, **fields}
         self.upsert_requirement(
             req_id=req_id,
+            type=str(merged.get("type") or "ATOMIC"),
             name=str(merged.get("name") or "").strip(),
             description=str(merged.get("description") or "").strip(),
             visual_reference=_as_str_list(merged.get("visual_reference")),
@@ -294,6 +303,7 @@ class TraceabilityStore:
             parent_id=merged.get("parent_id"),
             children_ids=_as_str_list(merged.get("children_ids")),
             dependencies=_as_str_list(merged.get("dependencies")),
+            source=merged.get("source") if isinstance(merged.get("source"), dict) else None,
         )
 
     def delete_requirement(self, req_id: str) -> None:

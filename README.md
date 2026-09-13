@@ -17,7 +17,10 @@
 [![CLI](https://img.shields.io/badge/Interface-CLI-16a34a.svg)](#cli-usage)
 [![Status](https://img.shields.io/badge/Status-Active%20Build-9333ea.svg)](#news)
 
-> Instead of asking an LLM to "write an app" from a long prompt, ARC compiles structured requirements through staged agents, test-first generation, and explicit traceability.
+> ARC uses a deterministic compiler controller. Models may later execute schema-constrained semantic passes, but they do not control parsing, linking, scheduling, freezing, or repository permissions.
+
+> [!IMPORTANT]
+> The codebase is being migrated from the original staged-agent implementation to the compiler architecture in [docs/guide.md](docs/guide.md). The deterministic requirement front end is implemented; discovery, design, lowering, implementation, and acceptance passes are still pending. Until those passes land, `arc compile` intentionally exits non-zero after writing front-end artifacts rather than claiming that a runnable application was produced.
 
 ## News &#x2728;
 
@@ -41,7 +44,7 @@ ARC takes a compiler-oriented view instead:
 - Tests are not just verification. They are executable constraints.
 - Traceability is not optional metadata. It is part of the system contract.
 
-In practice, ARC models requirements as a structured graph, compiles them through multiple agent stages, and records how each requirement node maps to interfaces, tests, code, and commits.
+In practice, ARC parses requirements into versioned intermediate representations, resolves dependencies into a graph, and records every accepted transformation as traceable artifacts.
 
 ## What ARC Does
 
@@ -50,8 +53,9 @@ ARC is designed as a requirement-to-system compiler with a staged pipeline:
 | Stage | What ARC does |
 | --- | --- |
 | **Structured requirement modeling** | Consumes a hierarchical requirement tree with dependencies, scenarios, and optional multimodal references such as screenshots or design assets. |
-| **Interface design** | Derives explicit interfaces and implementation boundaries before broad code generation begins. |
-| **Test-first generation** | Produces unit, integration, and end-to-end tests from requirement scenarios before implementation. |
+| **Deterministic front end** | Normalizes FOLDER/ATOMIC nodes, assigns stable scenario IDs, preserves provenance, validates dependencies, and emits topological ATOMIC implementation waves. |
+| **Global design (planned)** | Builds Fact IR and a Global Symbol Table before lowering frozen Design IR into a whole-program skeleton. |
+| **Constrained implementation (planned)** | Generates requirement and contract tests, then grants workers write capability only for declared implementation regions. |
 | **Traceability by default** | Records the requirement-to-interface-to-test-to-code chain instead of treating generation as a black box. |
 
 ## Getting Started
@@ -62,7 +66,7 @@ Use the following setup as a practical baseline. The installation example below 
 
 - [Python 3.11+](https://www.python.org/downloads/)
 - A virtual environment and package manager such as [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
-- An OpenAI-compatible API endpoint and model
+- An OpenAI-compatible API endpoint and model is optional until semantic passes are enabled
 
 Additional requirements for web generation:
 - [Node.js 20+](https://nodejs.org/en/download) with [`pnpm`](https://pnpm.io/installation)
@@ -116,16 +120,11 @@ cp .env_example .env
 Edit `.env` with your configuration:
 
 ```bash
-# Required
+# Optional: semantic model passes
 OPENAI_API_KEY=sk-your-api-key-here
 OPENAI_BASE_URL=https://api.openai.com/v1
 MODEL=gpt-5.6
 ARC_OPENAI_API_MODE=responses
-
-# Optional: Visual analysis
-VISUAL_API_KEY=
-VISUAL_BASE_URL=
-VISUAL_MODEL=
 
 # Optional: Debug mode
 ARC_DEBUG=0
@@ -147,7 +146,8 @@ At minimum, ARC expects:
 
 Conceptually, ARC produces three layers of output:
 
-- **Runnable system**: the generated web or Android project
+- **Compiler artifacts**: Requirement IR, dependency graph, diagnostics, and later Fact/Design/Module IR
+- **Runnable system**: the generated target project after all compiler passes are implemented
 - **Execution memory**: queue state, debug logs, and intermediate compiler artifacts
 - **Audit trail**: traceability records and git history that explain how requirements became code
 
@@ -204,25 +204,12 @@ Run `arc --help` or `arc compile --help` for detailed usage.
 
 #### Runtime behavior
 
-- ARC copies the requirement directory into `<output-dir>/requirements/` (you must specify `-o` explicitly)
-- Compilation executes inside `output-dir`
-- If `--clear-all` is not used and `.arc/processing_queue.json` already exists, ARC resumes from that workspace
-
-#### Partial failure recovery
-
-ARC now supports retrying failed nodes in an existing workspace without wiping generated code.
-
-- `--retry-failed` retries every node whose queue state is `FAILED`
-- `--retry REQ-1 REQ-2` retries only the named nodes, including nodes that already passed
-- `--clear-all` cannot be combined with retry flags
-
-Retry semantics are phase-aware:
-
-- If a node's `DESIGN` task failed, ARC treats it as a design failure, resets both queue tasks for that node to `PENDING`, clears that node's design/test traceability artifacts, and restarts the node from `UNSEEN`
-- If a node's `IMPLEMENT` task failed while `DESIGN` completed, ARC treats it as an implement-only failure, keeps the design artifacts, resets only `IMPLEMENT` to `PENDING`, and restarts the node from `DESIGNED`
-- If a selected node is already completed, ARC restarts that node from `DESIGN` but preserves existing interfaces, tests, node-session artifacts, and implementation files so the agents can revise incrementally in the same workspace
-
-This distinction comes from the queue itself, not from a separate manual flag. The workflow checks the task statuses for the node and chooses the narrowest safe reset for that node.
+- Compilation artifacts are written beneath `<output-dir>/.arc/`.
+- `.arc/compiler/requirement_ir.json` contains the normalized source representation and provenance.
+- `.arc/compiler/dependency_graph.json` contains explicit and effective ATOMIC dependencies plus implementation waves.
+- `.arc/compiler/diagnostics.json` contains stable diagnostic codes.
+- `.arc/processing_queue.json` is a versioned pass queue; it no longer represents per-node agent sessions.
+- Existing CLI resume/retry parameters remain accepted while pass-level resume semantics are implemented.
 
 #### Model API mode
 

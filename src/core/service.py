@@ -4,9 +4,6 @@ from pathlib import Path
 from typing import Any
 
 from arcbench_agent_runtime.runtime import AgentRuntime
-from agents.context.pipeline import set_context_config, set_context_runtime
-
-
 _runtime: AgentRuntime | None = None
 
 
@@ -28,13 +25,7 @@ def configure_runtime(
         runner_events_path=runner_events_path,
         traceability_dir=traceability_dir,
     )
-    set_context_runtime(_runtime)
-    set_context_config(
-        workspace_dir=resolved_project_dir,
-        app_type=app_type,
-        web_port=web_port,
-        android_package=android_package,
-    )
+    del app_type, web_port, android_package
     return _runtime
 
 
@@ -51,4 +42,3 @@ def has_runtime() -> bool:
 def reset_runtime_for_tests() -> None:
     global _runtime
     _runtime = None
-    set_context_runtime(None)

@@ -8,9 +8,6 @@ from typing import Any
 
 from colorama import Fore, Style
 
-from agents.context.pipeline import set_context_config
-
-
 _workspace_root = Path(os.environ.get("ARC_WORKSPACE_ROOT", ".")).expanduser().resolve()
 _app_type = os.environ.get("ARC_APP_TYPE", "web").strip().lower() or "web"
 _web_port = int(os.environ.get("ARC_WEB_PORT", "3301") or 3301)
@@ -39,7 +36,6 @@ def set_workspace_root(path: str | os.PathLike[str]) -> None:
     global _workspace_root
     _workspace_root = Path(path).expanduser().resolve()
     os.environ["ARC_WORKSPACE_ROOT"] = str(_workspace_root)
-    set_context_config(workspace_dir=str(_workspace_root))
 
 
 def get_workspace_root() -> str:
@@ -57,7 +53,6 @@ def set_app_type(app_type: str) -> None:
     global _app_type
     _app_type = (app_type or "web").strip().lower() or "web"
     os.environ["ARC_APP_TYPE"] = _app_type
-    set_context_config(app_type=_app_type)
 
 
 def get_app_type() -> str:
@@ -68,7 +63,6 @@ def set_web_port(port: int | str) -> None:
     global _web_port
     _web_port = int(port)
     os.environ["ARC_WEB_PORT"] = str(_web_port)
-    set_context_config(web_port=_web_port)
 
 
 def get_web_port() -> int:
@@ -92,7 +86,6 @@ def set_android_package(package_name: str) -> None:
     global _android_package
     _android_package = str(package_name or "").strip() or "com.example.template"
     os.environ["ARC_ANDROID_PACKAGE"] = _android_package
-    set_context_config(android_package=_android_package)
 
 
 def get_android_package() -> str:
@@ -120,20 +113,21 @@ def check_config() -> dict[str, Any]:
     warnings = []
     info = []
 
-    # Check required environment variables
-    required_vars = {
+    # Model configuration is optional for the deterministic front end. Later
+    # semantic passes may require it, but CLI inspection and parsing must not.
+    model_vars = {
         "OPENAI_API_KEY": "Main API key for model inference",
         "OPENAI_BASE_URL": "API base URL",
         "MODEL": "Main coding model name",
         "ARC_OPENAI_API_MODE": "API mode (responses or chat_completions)",
     }
 
-    for var, description in required_vars.items():
+    for var, description in model_vars.items():
         value = os.environ.get(var, "").strip()
         if not value:
-            errors.append(f"Missing required variable: {var} ({description})")
+            warnings.append(f"Model pass not configured: {var} ({description})")
         elif var == "OPENAI_API_KEY" and value.startswith("sk-your-"):
-            errors.append(f"{var} still contains placeholder value")
+            warnings.append(f"{var} still contains placeholder value")
         elif var == "ARC_OPENAI_API_MODE" and value not in {"responses", "chat_completions"}:
             errors.append(f"{var} must be 'responses' or 'chat_completions', got: {value}")
 
@@ -172,13 +166,7 @@ def check_config() -> dict[str, Any]:
     else:
         info.append(f"Python version: {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
 
-    # Check agent runtime availability
-    try:
-        import deepagents as _agent_runtime
-        version = getattr(_agent_runtime, '__version__', 'installed')
-        info.append(f"Agent runtime: {version}")
-    except ImportError:
-        errors.append("Agent runtime not installed (reinstall ARC or check dependencies)")
+    info.append("Deterministic compiler front end: available")
 
     # Check Node.js for web app type
     import shutil

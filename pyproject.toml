@@ -8,18 +8,10 @@ version = "1.2.0"
 description = "Agentic Requirement Compiler"
 requires-python = ">=3.11"
 dependencies = [
-  "aiofiles",
-  "openai",
   "requests",
   "python-dotenv",
   "pyyaml",
-  "pydantic",
   "colorama",
-  "jsonschema",
-  "tiktoken",
-  "httpx[socks]",
-  "deepagents",
-  "langchain-openai",
 ]
 
 [project.scripts]
@@ -32,12 +24,12 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["src"]
 include = [
-  "agents",
-  "agents.*",
   "app_type_handler",
   "app_type_handler.*",
   "arcbench_agent_runtime",
   "arcbench_agent_runtime.*",
+  "compiler",
+  "compiler.*",
   "core",
   "core.*",
 ]
