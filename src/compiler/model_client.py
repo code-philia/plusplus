@@ -4,8 +4,8 @@ import json
 import os
 from typing import Any, Protocol
 
-import requests
 from dotenv import load_dotenv
+from openai import OpenAI
 
 
 class StructuredModel(Protocol):
@@ -26,8 +26,8 @@ class ModelConfigurationError(RuntimeError):
     """Raised when a semantic pass has no usable model configuration."""
 
 
-class OpenAIChatCompletionsModel:
-    """Structured-output client for the OpenAI Chat Completions API."""
+class Model:
+    """Structured-output client backed by the configured chat-completions endpoint."""
 
     def __init__(
         self,
@@ -36,6 +36,7 @@ class OpenAIChatCompletionsModel:
         api_key: str,
         base_url: str = "https://api.openai.com/v1",
         timeout_seconds: float = 120.0,
+        transport_retries: int = 2,
     ) -> None:
         if not model.strip():
             raise ModelConfigurationError("MODEL is required for the DATABASE_SCHEMA pass.")
@@ -45,9 +46,15 @@ class OpenAIChatCompletionsModel:
         self.api_key = api_key.strip()
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self._client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout_seconds,
+            max_retries=max(0, transport_retries),
+        )
 
     @classmethod
-    def from_env(cls) -> "OpenAIChatCompletionsModel":
+    def from_env(cls) -> "Model":
         env_file = os.environ.get("ARC_ENV_FILE", "").strip()
         load_dotenv(env_file or ".env", override=False)
         return cls(
@@ -82,18 +89,17 @@ class OpenAIChatCompletionsModel:
             },
         }
 
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json=body,
-            timeout=self.timeout_seconds,
+        response = self._client.chat.completions.create(
+            model=body["model"],
+            stream=False,
+            reasoning_effort="low",
+            messages=body["messages"],
+            response_format=body["response_format"],
         )
-        response.raise_for_status()
-        payload = response.json()
-        text = str(payload["choices"][0]["message"]["content"])
+        content = response.choices[0].message.content
+        if content is None:
+            raise ValueError("Structured model response is empty.")
+        text = str(content)
         parsed = json.loads(text)
         if not isinstance(parsed, dict):
             raise ValueError("Structured model response must be a JSON object.")

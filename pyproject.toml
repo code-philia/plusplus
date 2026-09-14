@@ -8,7 +8,7 @@ version = "1.2.0"
 description = "Agentic Requirement Compiler"
 requires-python = ">=3.11"
 dependencies = [
-  "requests",
+  "openai>=2.44.0",
   "python-dotenv",
   "pyyaml",
   "colorama",
