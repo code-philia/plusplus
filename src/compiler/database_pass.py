@@ -6,12 +6,13 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from arcbench_agent_runtime.jsonio import read_json, write_json_atomic
+from core.logging import SynchronousLog
 
 from .model_client import StructuredModel
-PROMPT_VERSION = "database-facts-v1"
+PROMPT_VERSION = "database-facts-v2"
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 FIELD_TYPES = {"string", "integer", "number", "boolean", "date", "datetime", "json"}
 PERSISTENCE_VALUES = {"REQUIRED", "NOT_REQUIRED"}
@@ -28,7 +29,7 @@ CHECK_KINDS = {
 }
 
 
-DATABASE_FACTS_SCHEMA: dict[str, Any] = {
+DATABASE_FACT_ITEM_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["requirement_id", "entities"],
@@ -106,16 +107,39 @@ DATABASE_FACTS_SCHEMA: dict[str, Any] = {
     },
 }
 
+DATABASE_FACTS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["items"],
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": DATABASE_FACT_ITEM_SCHEMA,
+        },
+    },
+}
+
 
 DATABASE_FACT_INSTRUCTIONS = """You are the DATABASE_SCHEMA discovery pass of a requirement compiler.
-Analyze exactly one atomic requirement. Return only database facts implied by this requirement, not a complete
-system schema. Use stable singular snake_case entity keys and reuse keys listed in known_entities. Include the
+Analyze every atomic requirement in requirements. Return one item per requirement and only facts implied by that
+requirement, not a complete system schema. Use stable singular snake_case entity keys and reuse keys listed in
+known_entities. Requirements in the same request belong to one dependency wave and may be considered together to
+keep entity naming consistent. Include the
 minimum technical fields needed to implement explicitly required persistence, identity, authentication,
 idempotency, and lookup behavior. Do not invent product features. NOT_REQUIRED means the entity is transient and
 will not become a table. Record a relation only on the entity that owns the foreign key, using MANY_TO_ONE or
 ONE_TO_ONE. Represent many-to-many relationships as an explicit join entity with two MANY_TO_ONE relations.
+All compiler-provided primary keys and every relation foreign key are strings. Declare a relation and let the
+compiler derive its <relation_name>_id field; do not emit that field yourself. If you do emit it, its type must be
+string. Never use integer identifiers for a relation field.
+This is a logical schema: fields contains only scalar domain fields, relations is the sole source of cross-entity
+references, and indexes may name either a scalar field or a relation name (for example ["account", "journey"]),
+never its derived <relation_name>_id field. Checks may name scalar fields only. Use pattern/min_length/max_length
+only with string fields, date_past/date_future only with date or datetime fields, and minimum/maximum only with
+integer or number fields.
+Relation names are logical domain names and must not end in _id.
 Express validation as structured checks; never emit SQL. Every array must be present, including empty arrays.
-requirement_id must exactly equal the input target id.
+Return exactly one item for every input requirement_id and no additional items.
 """
 
 
@@ -137,11 +161,18 @@ class DatabaseSchemaPass:
     def __init__(self, model: StructuredModel, artifact_root: Path) -> None:
         self._model = model
         self._artifact_root = artifact_root.expanduser().resolve()
+        self._log = SynchronousLog("DatabaseSchemaPass", workspace_root=self._artifact_root.parents[1])
         retry_text = os.environ.get("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", "2")
         try:
             self._retry_count = max(0, min(int(retry_text), 10))
         except ValueError:
             self._retry_count = 2
+        batch_size_text = os.environ.get("ARC_DATABASE_BATCH_SIZE", "8")
+        try:
+            self._batch_size = max(1, min(int(batch_size_text), 32))
+        except ValueError:
+            self._batch_size = 8
+        self._trace_enabled = _enabled_env_flag("ARC_DATABASE_TRACE", default=True)
 
     def compile(
         self,
@@ -151,7 +182,7 @@ class DatabaseSchemaPass:
         resume: bool = False,
     ) -> DatabasePassResult:
         nodes = requirement_ir.get("nodes", {})
-        atomic_ids = _ordered_atomic_ids(
+        waves = _ordered_waves(
             requirement_ir.get("atomic_units", []),
             dependency_graph or {},
         )
@@ -159,47 +190,66 @@ class DatabaseSchemaPass:
         errors: list[str] = []
         node_states: dict[str, str] = {}
         cache_paths: dict[str, str] = {}
-        accumulator = _SchemaAccumulator(errors)
+        accumulator = _SchemaAccumulator(errors, self._trace)
 
-        for node_id in atomic_ids:
-            node = nodes.get(node_id)
-            if not isinstance(node, dict):
-                errors.append(_format_error("ARC2101", "Atomic requirement is missing from Requirement IR.", node_id=node_id))
-                node_states[node_id] = "FAILED"
-                continue
-            analysis_node = dict(node)
-            analysis_node["dependencies"] = effective_dependencies.get(
-                node_id,
-                node.get("dependencies", []),
-            )
-            context = self._node_context(
-                analysis_node,
-                nodes,
-                accumulator.known_entities_for(analysis_node),
-            )
-            input_hash = _stable_hash({"prompt_version": PROMPT_VERSION, "context": context})
-            cache_path = self._cache_path(node_id)
-            cache_paths[node_id] = str(cache_path)
-            facts = self._read_cached_facts(cache_path, input_hash) if resume else None
-            if facts is None:
-                facts = self._generate_facts(node_id, context, errors)
-                if facts is not None:
-                    write_json_atomic(
-                        cache_path,
-                        {
-                            "schema_version": 1,
-                            "prompt_version": PROMPT_VERSION,
-                            "node_id": node_id,
-                            "input_sha256": input_hash,
-                            "facts": facts,
-                        },
+        for wave in waves:
+            analysis_nodes: list[dict[str, Any]] = []
+            for node_id in wave:
+                node = nodes.get(node_id)
+                if not isinstance(node, dict):
+                    errors.append(_format_error("ARC2101", "Atomic requirement is missing from Requirement IR.", node_id=node_id))
+                    node_states[node_id] = "FAILED"
+                    continue
+                analysis_node = dict(node)
+                analysis_node["dependencies"] = effective_dependencies.get(
+                    node_id,
+                    node.get("dependencies", []),
+                )
+                analysis_nodes.append(analysis_node)
+
+            known_entities = sorted({
+                entity
+                for node in analysis_nodes
+                for entity in accumulator.known_entities_for(node)
+            })
+            wave_results: dict[str, dict[str, Any]] = {}
+            for batch in _batches(analysis_nodes, self._batch_size):
+                requirement_ids = [str(node["id"]) for node in batch]
+                context = {
+                    "known_entities": known_entities,
+                    "requirements": [self._node_context(node, nodes) for node in batch],
+                }
+                input_hash = _stable_hash({"prompt_version": PROMPT_VERSION, "context": context})
+                cache_path = self._cache_path(requirement_ids)
+                for node_id in requirement_ids:
+                    cache_paths[node_id] = str(cache_path)
+                facts_by_node = self._read_cached_facts(cache_path, input_hash, requirement_ids) if resume else None
+                if facts_by_node is not None:
+                    self._trace(
+                        "CACHE_HIT "
+                        f"batch={','.join(requirement_ids)} path={cache_path.name}"
                     )
-            if facts is None:
-                node_states[node_id] = "FAILED"
-                continue
-            before_errors = len(errors)
-            accumulator.apply(node_id, facts)
-            node_states[node_id] = "FAILED" if len(errors) > before_errors else "SCHEMA_ANALYZED"
+                if facts_by_node is None:
+                    facts_by_node = self._generate_facts(requirement_ids, context, errors)
+                    if facts_by_node is not None:
+                        write_json_atomic(
+                            cache_path,
+                            {
+                                "schema_version": 1,
+                                "prompt_version": PROMPT_VERSION,
+                                "input_sha256": input_hash,
+                                "items": [facts_by_node[node_id] for node_id in requirement_ids],
+                            },
+                        )
+                if facts_by_node is None:
+                    node_states.update({node_id: "FAILED" for node_id in requirement_ids})
+                    continue
+                wave_results.update(facts_by_node)
+
+            for node_id in sorted(wave_results):
+                before_errors = len(errors)
+                accumulator.apply(node_id, wave_results[node_id])
+                node_states[node_id] = "FAILED" if len(errors) > before_errors else "SCHEMA_ANALYZED"
 
         schema = accumulator.finish()
         schema["status"] = "RESOLVED" if not errors else "PROPOSED"
@@ -207,15 +257,21 @@ class DatabaseSchemaPass:
 
     def _generate_facts(
         self,
-        node_id: str,
+        requirement_ids: list[str],
         context: dict[str, Any],
         errors: list[str],
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, dict[str, Any]] | None:
         validation_feedback: list[str] = []
         for attempt in range(self._retry_count + 1):
             request_payload = dict(context)
             if validation_feedback:
                 request_payload["previous_validation_errors"] = validation_feedback
+            self._trace(
+                "MODEL_CALL "
+                f"attempt={attempt + 1}/{self._retry_count + 1} "
+                f"batch={','.join(requirement_ids)} "
+                f"known_entities={','.join(context.get('known_entities', [])) or '-'}"
+            )
             try:
                 payload = self._model.generate_json(
                     schema_name="arc_database_facts",
@@ -225,29 +281,48 @@ class DatabaseSchemaPass:
                 )
             except Exception as exc:
                 validation_feedback = [f"Model call failed: {exc}"]
+                self._trace("MODEL_ERROR " + validation_feedback[0])
                 if attempt >= self._retry_count:
-                    errors.append(_format_error("ARC2102", validation_feedback[0], node_id=node_id))
+                    errors.append(
+                        _format_error(
+                            "ARC2102",
+                            validation_feedback[0],
+                            node_id=", ".join(requirement_ids),
+                        )
+                    )
                     return None
                 continue
-            validation_feedback = _validate_facts_payload(node_id, payload)
+            self._trace_json(
+                "MODEL_RESULT "
+                f"attempt={attempt + 1} batch={','.join(requirement_ids)}",
+                payload,
+            )
+            validation_feedback = _validate_batch_payload(requirement_ids, payload)
             if not validation_feedback:
-                return payload
+                return {item["requirement_id"]: item for item in payload["items"]}
+            self._trace("MODEL_VALIDATION_ERROR " + "; ".join(validation_feedback))
             if attempt >= self._retry_count:
                 errors.append(
                     _format_error(
                         "ARC2103",
                         "Invalid database facts: " + "; ".join(validation_feedback),
-                        node_id=node_id,
                     )
                 )
                 return None
         return None
 
+    def _trace(self, message: str) -> None:
+        if self._trace_enabled:
+            self._log.info(message)
+
+    def _trace_json(self, heading: str, payload: dict[str, Any]) -> None:
+        if self._trace_enabled:
+            self._log.info(heading + "\n" + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+
     @staticmethod
     def _node_context(
         node: dict[str, Any],
         nodes: dict[str, Any],
-        known_entities: list[str],
     ) -> dict[str, Any]:
         ancestors: list[dict[str, str]] = []
         parent_id = node.get("parent_id")
@@ -265,36 +340,38 @@ class DatabaseSchemaPass:
             parent_id = parent.get("parent_id")
         ancestors.reverse()
         return {
-            "target": {
-                "id": str(node.get("id", "")),
-                "name": str(node.get("name", "")),
-                "description": str(node.get("description", "")),
-                "scenarios": node.get("scenarios", []),
-                "dependencies": node.get("dependencies", []),
-            },
+            "requirement_id": str(node.get("id", "")),
+            "name": str(node.get("name", "")),
+            "description": str(node.get("description", "")),
+            "scenarios": node.get("scenarios", []),
+            "dependencies": node.get("dependencies", []),
             "ancestors": ancestors,
-            "known_entities": known_entities,
         }
 
-    def _cache_path(self, node_id: str) -> Path:
-        safe_id = re.sub(r"[^A-Za-z0-9._-]+", "_", node_id).strip("._") or "requirement"
-        suffix = hashlib.sha256(node_id.encode("utf-8")).hexdigest()[:10]
-        return self._artifact_root / "database_facts" / f"{safe_id}-{suffix}.json"
+    def _cache_path(self, requirement_ids: list[str]) -> Path:
+        label = "-".join(requirement_ids)
+        safe_label = re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("._")[:48] or "batch"
+        suffix = hashlib.sha256(label.encode("utf-8")).hexdigest()[:10]
+        return self._artifact_root / "database_facts" / f"{safe_label}-{suffix}.json"
 
     @staticmethod
-    def _read_cached_facts(path: Path, input_hash: str) -> dict[str, Any] | None:
+    def _read_cached_facts(
+        path: Path,
+        input_hash: str,
+        requirement_ids: list[str],
+    ) -> dict[str, dict[str, Any]] | None:
         cached = read_json(path, {})
-        facts = cached.get("facts")
-        if cached.get("input_sha256") != input_hash or not isinstance(facts, dict):
+        payload = {"items": cached.get("items")}
+        if cached.get("input_sha256") != input_hash or _validate_batch_payload(requirement_ids, payload):
             return None
-        node_id = str(cached.get("node_id", ""))
-        return facts if not _validate_facts_payload(node_id, facts) else None
+        return {item["requirement_id"]: item for item in payload["items"]}
 
 
 class _SchemaAccumulator:
-    def __init__(self, errors: list[str]) -> None:
+    def __init__(self, errors: list[str], trace: Callable[[str], None]) -> None:
         self._entities: dict[str, dict[str, Any]] = {}
         self._errors = errors
+        self._trace = trace
 
     @property
     def entity_keys(self) -> list[str]:
@@ -341,7 +418,18 @@ class _SchemaAccumulator:
                 },
             )
             _append_unique(entity["sources"], node_id)
+            relation_fields = {
+                _relation_field_name(relation): str(relation["name"])
+                for relation in observation["relations"]
+            }
             for raw_field in observation["fields"]:
+                relation_name = relation_fields.get(raw_field["name"])
+                if relation_name is not None:
+                    self._trace(
+                        "FK_REFERENCE_NORMALIZED "
+                        f"field={key}.{raw_field['name']} relation={relation_name}"
+                    )
+                    continue
                 self._merge_field(entity, raw_field, node_id)
             for raw_index in observation["indexes"]:
                 fields = tuple(raw_index["fields"])
@@ -394,7 +482,6 @@ class _SchemaAccumulator:
         _append_unique(existing["sources"], node_id)
 
     def finish(self) -> dict[str, Any]:
-        foreign_keys: list[dict[str, Any]] = []
         for key, entity in sorted(self._entities.items()):
             if "id" not in entity["fields"]:
                 entity["fields"]["id"] = {
@@ -418,42 +505,16 @@ class _SchemaAccumulator:
                         )
                     )
                     continue
-                field_name = relation["name"] if relation["name"].endswith("_id") else f"{relation['name']}_id"
-                existing_field = entity["fields"].get(field_name)
-                if existing_field is not None and existing_field["type"] != "string":
-                    self._errors.append(
-                        _format_error(
-                            "ARC2203",
-                            f"Foreign key field {key}.{field_name} must have type string.",
-                            node_id=relation["sources"][0] if relation["sources"] else None,
-                        )
+                field_name = _relation_field_name(relation)
+                if field_name in entity["fields"]:
+                    legacy_type = entity["fields"][field_name]["type"]
+                    self._trace(
+                        "FK_REFERENCE_NORMALIZED "
+                        f"field={key}.{field_name} "
+                        f"relation={relation['name']} "
+                        f"legacy_type={legacy_type}"
                     )
-                    continue
-                if existing_field is None:
-                    entity["fields"][field_name] = {
-                        "name": field_name,
-                        "type": "string",
-                        "required": relation["required"],
-                        "unique": relation["cardinality"] == "ONE_TO_ONE",
-                        "case_insensitive": False,
-                        "description": f"Foreign key to {target}.id.",
-                        "primary_key": False,
-                        "sources": sorted(relation["sources"]),
-                    }
-                else:
-                    existing_field["required"] = existing_field["required"] or relation["required"]
-                    existing_field["unique"] = existing_field["unique"] or relation["cardinality"] == "ONE_TO_ONE"
-                    for source in relation["sources"]:
-                        _append_unique(existing_field["sources"], source)
-                foreign_keys.append(
-                    {
-                        "from_entity": key,
-                        "from_field": field_name,
-                        "to_entity": target,
-                        "to_field": "id",
-                        "sources": sorted(relation["sources"]),
-                    }
-                )
+                    del entity["fields"][field_name]
         entities = []
         for key in sorted(self._entities):
             entity = self._entities[key]
@@ -463,7 +524,7 @@ class _SchemaAccumulator:
                     "table": entity["table"],
                     "sources": sorted(entity["sources"]),
                     "fields": [entity["fields"][name] for name in sorted(entity["fields"])],
-                    "indexes": [entity["indexes"][index] for index in sorted(entity["indexes"])],
+                    "indexes": _logical_indexes(entity),
                     "checks": [entity["checks"][check] for check in sorted(entity["checks"])],
                     "relations": [entity["relations"][relation] for relation in sorted(entity["relations"])],
                 }
@@ -472,10 +533,6 @@ class _SchemaAccumulator:
             "schema_version": 1,
             "status": "PROPOSED",
             "entities": entities,
-            "foreign_keys": sorted(
-                foreign_keys,
-                key=lambda item: (item["from_entity"], item["from_field"], item["to_entity"]),
-            ),
         }
 
 
@@ -528,11 +585,15 @@ def _validate_facts_payload(node_id: str, payload: dict[str, Any]) -> list[str]:
                     errors.append(f"{field_prefix}.{boolean_name} must be boolean")
             if not isinstance(raw_field.get("description"), str):
                 errors.append(f"{field_prefix}.description must be a string")
+        relation_names, derived_relation_fields = _relation_reference_names(relations)
+        if relation_names & field_names:
+            errors.append(f"{prefix} relation name conflicts with a scalar field")
+        valid_index_references = field_names | relation_names | derived_relation_fields
         for raw_index in indexes:
             if not isinstance(raw_index, dict) or not isinstance(raw_index.get("fields"), list):
                 errors.append(f"{prefix} contains an invalid index")
                 continue
-            if not raw_index["fields"] or any(name not in field_names for name in raw_index["fields"]):
+            if not raw_index["fields"] or any(name not in valid_index_references for name in raw_index["fields"]):
                 errors.append(f"{prefix} index references an unknown field")
             if not isinstance(raw_index.get("unique"), bool):
                 errors.append(f"{prefix} index unique must be boolean")
@@ -542,12 +603,26 @@ def _validate_facts_payload(node_id: str, payload: dict[str, Any]) -> list[str]:
                 continue
             if raw_check.get("kind") not in CHECK_KINDS or not isinstance(raw_check.get("value"), str):
                 errors.append(f"{prefix} contains an invalid check")
+            else:
+                field = next(
+                    (
+                        item
+                        for item in fields
+                        if isinstance(item, dict) and item.get("name") == raw_check.get("field")
+                    ),
+                    {},
+                )
+                if not _check_matches_type(str(field.get("type", "")), str(raw_check["kind"])):
+                    errors.append(f"{prefix} check kind is incompatible with its field type")
         for raw_relation in relations:
             if not isinstance(raw_relation, dict):
                 errors.append(f"{prefix} contains an invalid relation")
                 continue
-            if not isinstance(raw_relation.get("name"), str) or not IDENTIFIER_PATTERN.fullmatch(raw_relation["name"]):
+            relation_name = raw_relation.get("name")
+            if not isinstance(relation_name, str) or not IDENTIFIER_PATTERN.fullmatch(relation_name):
                 errors.append(f"{prefix} relation name must be snake_case")
+            elif relation_name.endswith("_id"):
+                errors.append(f"{prefix} relation name must be logical, not a physical *_id field")
             target = raw_relation.get("target_entity")
             if not isinstance(target, str) or not IDENTIFIER_PATTERN.fullmatch(target):
                 errors.append(f"{prefix} relation target must be snake_case")
@@ -555,6 +630,36 @@ def _validate_facts_payload(node_id: str, payload: dict[str, Any]) -> list[str]:
                 errors.append(f"{prefix} relation cardinality is invalid")
             if not isinstance(raw_relation.get("required"), bool):
                 errors.append(f"{prefix} relation required must be boolean")
+    return errors
+
+
+def _validate_batch_payload(requirement_ids: list[str], payload: dict[str, Any]) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["response must be an object"]
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return ["items must be an array"]
+
+    expected = set(requirement_ids)
+    returned: set[str] = set()
+    errors: list[str] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            errors.append(f"items[{index}] must be an object")
+            continue
+        node_id = str(item.get("requirement_id", ""))
+        if node_id not in expected:
+            errors.append(f"unexpected requirement_id: {node_id}")
+            continue
+        if node_id in returned:
+            errors.append(f"duplicate requirement_id: {node_id}")
+            continue
+        returned.add(node_id)
+        errors.extend(f"{node_id}: {error}" for error in _validate_facts_payload(node_id, item))
+
+    missing = sorted(expected - returned)
+    if missing:
+        errors.append("missing requirement_id: " + ", ".join(missing))
     return errors
 
 
@@ -572,21 +677,71 @@ def _format_error(code: str, message: str, *, node_id: str | None = None) -> str
     return f"{code}: {message}" + (f" ({node_id})" if node_id else "")
 
 
-def _ordered_atomic_ids(atomic_ids: Any, dependency_graph: dict[str, Any]) -> list[str]:
-    """Flatten deterministic dependency waves without losing unscheduled nodes."""
+def _ordered_waves(atomic_ids: Any, dependency_graph: dict[str, Any]) -> list[list[str]]:
+    """Return deterministic dependency waves without losing unscheduled nodes."""
 
     declared = [str(node_id) for node_id in atomic_ids if str(node_id)] if isinstance(atomic_ids, list) else []
     declared_set = set(declared)
-    ordered: list[str] = []
+    ordered: list[list[str]] = []
     seen: set[str] = set()
     waves = dependency_graph.get("implementation_waves", [])
     if isinstance(waves, list):
         for wave in waves:
             if not isinstance(wave, list):
                 continue
-            for node_id in sorted(str(item) for item in wave):
-                if node_id in declared_set and node_id not in seen:
-                    ordered.append(node_id)
-                    seen.add(node_id)
-    ordered.extend(sorted(declared_set - seen))
+            current = [
+                node_id
+                for node_id in sorted(str(item) for item in wave)
+                if node_id in declared_set and node_id not in seen
+            ]
+            if current:
+                ordered.append(current)
+                seen.update(current)
+    remaining = sorted(declared_set - seen)
+    if remaining:
+        ordered.append(remaining)
     return ordered
+
+
+def _batches(nodes: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    return [nodes[index:index + size] for index in range(0, len(nodes), size)]
+
+
+def _enabled_env_flag(name: str, *, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _relation_field_name(relation: dict[str, Any]) -> str:
+    name = str(relation["name"])
+    return name if name.endswith("_id") else f"{name}_id"
+
+
+def _relation_reference_names(relations: list[Any]) -> tuple[set[str], set[str]]:
+    names = {str(relation.get("name", "")) for relation in relations if isinstance(relation, dict)}
+    return names - {""}, {_relation_field_name(relation) for relation in relations if isinstance(relation, dict)}
+
+
+def _logical_indexes(entity: dict[str, Any]) -> list[dict[str, Any]]:
+    relations = {str(relation["name"]): relation for relation in entity["relations"].values()}
+    physical_aliases = {_relation_field_name(relation): name for name, relation in relations.items()}
+    merged: dict[tuple[tuple[str, ...], bool], dict[str, Any]] = {}
+    for index in entity["indexes"].values():
+        fields = tuple(physical_aliases.get(field, field) for field in index["fields"])
+        key = (fields, index["unique"])
+        result = merged.setdefault(key, {"fields": list(fields), "unique": index["unique"], "sources": []})
+        for source in index["sources"]:
+            _append_unique(result["sources"], source)
+    return [merged[key] for key in sorted(merged)]
+
+
+def _check_matches_type(field_type: str, kind: str) -> bool:
+    if kind in {"min_length", "max_length", "pattern"}:
+        return field_type == "string"
+    if kind in {"date_past", "date_future"}:
+        return field_type in {"date", "datetime"}
+    if kind in {"minimum", "maximum"}:
+        return field_type in {"integer", "number"}
+    return True

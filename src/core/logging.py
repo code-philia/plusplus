@@ -86,6 +86,30 @@ def write_terminal_log(
     print(format_terminal_log(agent_name, message, status=status, node_id=node_id), flush=True)
 
 
+class SynchronousLog:
+    """Write one compiler event to both the terminal and workspace debug log."""
+
+    def __init__(self, agent_name: str, *, workspace_root: str | os.PathLike[str] | None = None) -> None:
+        self._agent_name = agent_name
+        self._workspace_root = str(workspace_root) if workspace_root is not None else None
+
+    def info(self, message: str, *, node_id: str | None = None) -> None:
+        self._write(message, status=None, node_id=node_id)
+
+    def error(self, message: str, *, node_id: str | None = None) -> None:
+        self._write(message, status="error", node_id=node_id)
+
+    def _write(self, message: str, *, status: str | None, node_id: str | None) -> None:
+        append_debug_log(
+            self._agent_name,
+            message,
+            status=status,
+            node_id=node_id,
+            workspace_root=self._workspace_root,
+        )
+        write_terminal_log(self._agent_name, message, status=status, node_id=node_id)
+
+
 ANSI_RESET = "\033[0m"
 ANSI_DIM = "\033[2m"
 ANSI_BOLD = "\033[1m"
