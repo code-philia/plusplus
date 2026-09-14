@@ -51,6 +51,7 @@ class ARCWorkflowManager:
         *,
         clear_all: bool = False,
         resume_from_queue: bool = False,
+        skip_database: bool = False,
         retry_failed: bool = False,
         retry_node_ids: list[str] | None = None,
     ) -> dict[str, object]:
@@ -81,6 +82,7 @@ class ARCWorkflowManager:
                 app_type=self.app_type,
                 web_port=self.web_port,
                 resume=resume_from_queue,
+                skip_database=skip_database,
                 retry_failed=retry_failed,
                 retry_node_ids=tuple(retry_node_ids or ()),
             )
@@ -89,8 +91,8 @@ class ARCWorkflowManager:
             runtime.events.mark_run_completed("ARC compilation completed.")
             await self._log("Compiler", "Compilation finished successfully.")
         elif result.ok:
-            runtime.events.mark_run_paused("ARC database schema completed; remaining passes are pending.")
-            await self._log("Compiler", "Compilation paused after the implemented DATABASE_SCHEMA pass.", "warning")
+            runtime.events.mark_run_paused("ARC Design IR completed; remaining passes are pending.")
+            await self._log("Compiler", "Compilation paused after the implemented DESIGN pass.", "warning")
         else:
             runtime.events.mark_run_failed("ARC compiler pass failed.")
             await self._log("Compiler", "Compilation failed; inspect the compiler log.", "error")

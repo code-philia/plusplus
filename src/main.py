@@ -31,12 +31,19 @@ class CompilationConfig:
     app_type: str = "web"
     web_port: int = 3301
     resume_from_queue: bool = False
+    skip_database: bool = False
     retry_failed: bool = False
     retry_node_ids: list[str] | None = None
 
 
 def _get_repo_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _should_reset_debug_log(*, resume: bool, skip_database: bool) -> bool:
+    """Keep one continuous log when compilation reuses prior run artifacts."""
+
+    return not (resume or skip_database)
 
 
 def _ensure_dotenv_loaded() -> None:
@@ -124,6 +131,11 @@ def build_compile_parser(subparsers) -> None:
         help="Resume from saved compilation queue",
     )
     parser.add_argument(
+        "--skip-database",
+        action="store_true",
+        help="Reuse <output-dir>/.arc/compiler/database_schema.json and start at DESIGN",
+    )
+    parser.add_argument(
         "--retry-failed",
         action="store_true",
         help="Retry all failed nodes from previous run (requires --resume)",
@@ -144,6 +156,9 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     # Validate mutual exclusivity
     if args.clean and args.resume:
         print("Error: --clean and --resume are mutually exclusive")
+        return 2
+    if args.clean and args.skip_database:
+        print("Error: --clean and --skip-database are mutually exclusive")
         return 2
     if (args.retry_failed or args.retry) and not args.resume:
         print("Error: --retry-failed and --retry require --resume")
@@ -174,13 +189,20 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         app_type=normalized_app_type,
         web_port=args.port,
         resume_from_queue=args.resume,
+        skip_database=args.skip_database,
         retry_failed=args.retry_failed,
         retry_node_ids=args.retry or None,
     )
     
     # Print banner and startup info
     print_cli_banner()
-    log_path = init_debug_logger(config.output_dir, reset_existing=not config.resume_from_queue)
+    log_path = init_debug_logger(
+        config.output_dir,
+        reset_existing=_should_reset_debug_log(
+            resume=config.resume_from_queue,
+            skip_database=config.skip_database,
+        ),
+    )
     print_cli_startup(
         project_path=config.output_dir,
         requirement_path=config.requirement_path,
@@ -206,6 +228,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         result = await workflow_manager.start_compilation(
             clear_all=False,
             resume_from_queue=config.resume_from_queue,
+            skip_database=config.skip_database,
             retry_failed=config.retry_failed,
             retry_node_ids=config.retry_node_ids,
         )

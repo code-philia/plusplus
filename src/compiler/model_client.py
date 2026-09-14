@@ -26,6 +26,23 @@ class ModelConfigurationError(RuntimeError):
     """Raised when a semantic pass has no usable model configuration."""
 
 
+def describe_model_error(error: BaseException) -> str:
+    """Render the public exception and its underlying transport cause."""
+
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen and len(parts) < 8:
+        seen.add(id(current))
+        message = str(current).strip() or repr(current)
+        parts.append(f"{type(current).__name__}: {message}")
+        next_error = current.__cause__
+        if next_error is None and not current.__suppress_context__:
+            next_error = current.__context__
+        current = next_error
+    return " <- ".join(parts)
+
+
 class Model:
     """Structured-output client backed by the configured chat-completions endpoint."""
 

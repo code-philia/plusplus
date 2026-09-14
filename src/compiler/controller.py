@@ -8,9 +8,10 @@ from typing import Awaitable, Callable
 from arcbench_agent_runtime.runtime import AgentRuntime
 
 from .artifacts import CompilerArtifactStore
-from .database_pass import DatabaseSchemaPass
+from .database_pass import DatabasePassResult, DatabaseSchemaPass, validate_database_schema
+from .design_pass import DesignPass, database_hash, design_hash
 from .frontend import RequirementFrontend
-from .model_client import ModelConfigurationError, OpenAIChatCompletionsModel, StructuredModel
+from .model_client import Model, ModelConfigurationError, StructuredModel
 from .models import CompilationRequest, CompilationResult
 
 
@@ -77,16 +78,57 @@ class Compiler:
         #                    Compiler Database Pass
         # ===================================================================
 
-        await self._log("Compiler", "Running DATABASE_SCHEMA pass over atomic requirements.")
+        if request.skip_database:
+            await self._log("Compiler", "Skipping DATABASE_SCHEMA pass; reusing existing database schema.")
+            existing_schema, read_error = artifact_store.read_database()
+            validation_errors = (
+                [read_error]
+                if read_error
+                else validate_database_schema(existing_schema or {})
+            )
+            if validation_errors:
+                for error in validation_errors:
+                    await self._log("Compiler", f"ARC2104: Cannot reuse database schema: {error}", "error")
+                artifacts["processing_queue"] = artifact_store.write_pass_queue(
+                    root_id=root_id,
+                    node_states=states,
+                    frontend_ok=True,
+                    database_status="FAILED",
+                )
+                return CompilationResult(
+                    ok=False,
+                    complete=False,
+                    root_id=root_id,
+                    states=states,
+                    failed_nodes=atomic_ids,
+                    artifacts=artifacts,
+                )
+            database = DatabasePassResult(
+                schema=existing_schema or {},
+                node_states={node_id: "SCHEMA_REUSED" for node_id in atomic_ids},
+            )
+            states.update(database.node_states)
+            artifacts["database_schema"] = str(artifact_store.root / "database_schema.json")
+            artifacts["processing_queue"] = artifact_store.write_pass_queue(
+                root_id=root_id,
+                node_states=states,
+                frontend_ok=True,
+                database_status="REUSED",
+            )
+            for node_id, state in database.node_states.items():
+                self._runtime.traceability.upsert_node_state(node_id, state, "database_schema")
+        else:
+            await self._log("Compiler", "Running DATABASE_SCHEMA pass over atomic requirements.")
+            database = None
         try:
-            model = self._model or OpenAIChatCompletionsModel.from_env()
+            model = self._model or Model.from_env()
         except ModelConfigurationError as exc:
             await self._log("Compiler", str(exc), "error")
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
                 frontend_ok=True,
-                database_status="FAILED",
+                database_status="REUSED" if request.skip_database else "FAILED",
             )
             return CompilationResult(
                 ok=False,
@@ -97,31 +139,74 @@ class Compiler:
                 artifacts=artifacts,
             )
 
-        database_pass = DatabaseSchemaPass(model, artifact_store.root)
-        database = await asyncio.to_thread(
-            database_pass.compile,
+        if database is None:
+            database_pass = DatabaseSchemaPass(model, artifact_store.root)
+            database = await asyncio.to_thread(
+                database_pass.compile,
+                frontend.requirement_ir,
+                frontend.dependency_graph,
+                resume=request.resume,
+            )
+            states.update(database.node_states)
+            artifacts.update(artifact_store.write_database(schema=database.schema))
+            database_status = "COMPLETED" if database.ok else "FAILED"
+            artifacts["processing_queue"] = artifact_store.write_pass_queue(
+                root_id=root_id,
+                node_states=states,
+                frontend_ok=True,
+                database_status=database_status,
+            )
+            for node_id, state in database.node_states.items():
+                self._runtime.traceability.upsert_node_state(node_id, state, "database_schema")
+            for error in database.errors:
+                await self._log("Compiler", error, "error")
+            if not database.ok:
+                failed_nodes = sorted(node_id for node_id, state in states.items() if state == "FAILED")
+                await self._log("Compiler", "DATABASE_SCHEMA pass failed.", "error")
+                return CompilationResult(
+                    ok=False,
+                    complete=False,
+                    root_id=root_id,
+                    states=states,
+                    failed_nodes=failed_nodes,
+                    artifacts=artifacts,
+                )
+
+        # ===================================================================
+        #                    Compiler Design Pass
+        # ===================================================================
+
+        await self._log("Compiler", "Running MODULE_DRAFT and DATAFLOW_LINK passes.")
+        design_pass = DesignPass(model, artifact_store.root)
+        design = await asyncio.to_thread(
+            design_pass.compile,
             frontend.requirement_ir,
             frontend.dependency_graph,
+            database.schema,
             resume=request.resume,
         )
-        states.update(database.node_states)
+        states.update(design.node_states)
         artifacts.update(
-            artifact_store.write_database(schema=database.schema)
+            artifact_store.write_design(
+                design_ir=design.design_ir,
+                design_sha256=design_hash(design.design_ir) if design.ok else None,
+                database_sha256=database_hash(database.schema) if design.ok else None,
+            )
         )
-        database_status = "COMPLETED" if database.ok else "FAILED"
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
             frontend_ok=True,
-            database_status=database_status,
+            database_status="REUSED" if request.skip_database else "COMPLETED",
+            design_status="COMPLETED" if design.ok else "FAILED",
         )
-        for node_id, state in database.node_states.items():
-            self._runtime.traceability.upsert_node_state(node_id, state, "database_schema")
-        for error in database.errors:
+        for node_id, state in design.node_states.items():
+            self._runtime.traceability.upsert_node_state(node_id, state, "design")
+        for error in design.errors:
             await self._log("Compiler", error, "error")
-        if not database.ok:
+        if not design.ok:
             failed_nodes = sorted(node_id for node_id, state in states.items() if state == "FAILED")
-            await self._log("Compiler", "DATABASE_SCHEMA pass failed.", "error")
+            await self._log("Compiler", "DESIGN pass failed.", "error")
             return CompilationResult(
                 ok=False,
                 complete=False,
@@ -133,7 +218,7 @@ class Compiler:
 
         await self._log(
             "Compiler",
-            "Database schema completed; design, lowering, implementation, and acceptance passes are not implemented yet.",
+            "Design IR completed and frozen; lowering, implementation, and acceptance passes are pending.",
             "warning",
         )
         return CompilationResult(

@@ -11,7 +11,7 @@ from typing import Any, Callable
 from arcbench_agent_runtime.jsonio import read_json, write_json_atomic
 from core.logging import SynchronousLog
 
-from .model_client import StructuredModel
+from .model_client import StructuredModel, describe_model_error
 PROMPT_VERSION = "database-facts-v2"
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 FIELD_TYPES = {"string", "integer", "number", "boolean", "date", "datetime", "json"}
@@ -280,7 +280,7 @@ class DatabaseSchemaPass:
                     output_schema=DATABASE_FACTS_SCHEMA,
                 )
             except Exception as exc:
-                validation_feedback = [f"Model call failed: {exc}"]
+                validation_feedback = [f"Model call failed: {describe_model_error(exc)}"]
                 self._trace("MODEL_ERROR " + validation_feedback[0])
                 if attempt >= self._retry_count:
                     errors.append(
@@ -660,6 +660,109 @@ def _validate_batch_payload(requirement_ids: list[str], payload: dict[str, Any])
     missing = sorted(expected - returned)
     if missing:
         errors.append("missing requirement_id: " + ", ".join(missing))
+    return errors
+
+
+def validate_database_schema(schema: dict[str, Any]) -> list[str]:
+    """Validate a persisted logical database schema before a later pass reuses it."""
+
+    if not isinstance(schema, dict):
+        return ["schema must be a JSON object"]
+    if schema.get("schema_version") != 1:
+        return ["schema_version must be 1"]
+    entities = schema.get("entities")
+    if not isinstance(entities, list):
+        return ["entities must be an array"]
+
+    errors: list[str] = []
+    entity_keys: set[str] = set()
+    for index, entity in enumerate(entities):
+        prefix = f"entities[{index}]"
+        if not isinstance(entity, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        key = entity.get("key")
+        if not isinstance(key, str) or not IDENTIFIER_PATTERN.fullmatch(key):
+            errors.append(f"{prefix}.key must be snake_case")
+        elif key in entity_keys:
+            errors.append(f"duplicate entity key: {key}")
+        else:
+            entity_keys.add(key)
+
+    for index, entity in enumerate(entities):
+        prefix = f"entities[{index}]"
+        if not isinstance(entity, dict):
+            continue
+        fields = entity.get("fields")
+        indexes = entity.get("indexes")
+        checks = entity.get("checks")
+        relations = entity.get("relations")
+        if not all(isinstance(value, list) for value in (fields, indexes, checks, relations)):
+            errors.append(f"{prefix} fields/indexes/checks/relations must be arrays")
+            continue
+
+        field_names: set[str] = set()
+        field_types: dict[str, str] = {}
+        for field_index, raw_field in enumerate(fields):
+            field_prefix = f"{prefix}.fields[{field_index}]"
+            if not isinstance(raw_field, dict):
+                errors.append(f"{field_prefix} must be an object")
+                continue
+            name = raw_field.get("name")
+            if not isinstance(name, str) or not IDENTIFIER_PATTERN.fullmatch(name):
+                errors.append(f"{field_prefix}.name must be snake_case")
+                continue
+            if name in field_names:
+                errors.append(f"duplicate field: {entity.get('key', '?')}.{name}")
+                continue
+            field_names.add(name)
+            field_type = raw_field.get("type")
+            if field_type not in FIELD_TYPES:
+                errors.append(f"{field_prefix}.type is invalid")
+            else:
+                field_types[name] = field_type
+
+        relation_names: set[str] = set()
+        for relation_index, relation in enumerate(relations):
+            relation_prefix = f"{prefix}.relations[{relation_index}]"
+            if not isinstance(relation, dict):
+                errors.append(f"{relation_prefix} must be an object")
+                continue
+            name = relation.get("name")
+            target = relation.get("target_entity")
+            if not isinstance(name, str) or not IDENTIFIER_PATTERN.fullmatch(name) or name.endswith("_id"):
+                errors.append(f"{relation_prefix}.name must be a logical snake_case name")
+            elif name in relation_names or name in field_names:
+                errors.append(f"duplicate or conflicting relation: {entity.get('key', '?')}.{name}")
+            else:
+                relation_names.add(name)
+            if not isinstance(target, str) or target not in entity_keys:
+                errors.append(f"{relation_prefix}.target_entity must reference an entity")
+            if relation.get("cardinality") not in CARDINALITIES:
+                errors.append(f"{relation_prefix}.cardinality is invalid")
+            if not isinstance(relation.get("required"), bool):
+                errors.append(f"{relation_prefix}.required must be boolean")
+
+        for raw_index in indexes:
+            if not isinstance(raw_index, dict) or not isinstance(raw_index.get("fields"), list):
+                errors.append(f"{prefix} contains an invalid index")
+                continue
+            if not raw_index["fields"] or any(
+                name not in field_names | relation_names for name in raw_index["fields"]
+            ):
+                errors.append(f"{prefix} index references an unknown logical field")
+            if not isinstance(raw_index.get("unique"), bool):
+                errors.append(f"{prefix} index unique must be boolean")
+
+        for raw_check in checks:
+            if not isinstance(raw_check, dict) or raw_check.get("field") not in field_names:
+                errors.append(f"{prefix} check references an unknown scalar field")
+                continue
+            kind = raw_check.get("kind")
+            if kind not in CHECK_KINDS or not isinstance(raw_check.get("value"), str):
+                errors.append(f"{prefix} contains an invalid check")
+            elif not _check_matches_type(field_types.get(str(raw_check["field"]), ""), str(kind)):
+                errors.append(f"{prefix} check kind is incompatible with its field type")
     return errors
 
 
