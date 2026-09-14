@@ -124,7 +124,6 @@ Edit `.env` with your configuration:
 OPENAI_API_KEY=sk-your-api-key-here
 OPENAI_BASE_URL=https://api.openai.com/v1
 MODEL=gpt-5.6
-ARC_OPENAI_API_MODE=responses
 
 # Optional: Debug mode
 ARC_DEBUG=0
@@ -146,7 +145,7 @@ At minimum, ARC expects:
 
 Conceptually, ARC produces three layers of output:
 
-- **Compiler artifacts**: Requirement IR, dependency graph, diagnostics, and later Fact/Design/Module IR
+- **Compiler artifacts**: Requirement IR, dependency graph, and later Fact/Design/Module IR
 - **Runnable system**: the generated target project after all compiler passes are implemented
 - **Execution memory**: queue state, debug logs, and intermediate compiler artifacts
 - **Audit trail**: traceability records and git history that explain how requirements became code
@@ -207,19 +206,10 @@ Run `arc --help` or `arc compile --help` for detailed usage.
 - Compilation artifacts are written beneath `<output-dir>/.arc/`.
 - `.arc/compiler/requirement_ir.json` contains the normalized source representation and provenance.
 - `.arc/compiler/dependency_graph.json` contains explicit and effective ATOMIC dependencies plus implementation waves.
-- `.arc/compiler/diagnostics.json` contains stable diagnostic codes.
+- `.arc/compiler/database_facts/` checkpoints one bounded database-fact result per ATOMIC requirement.
+- `.arc/compiler/database_schema.json` contains the deterministically merged whole-system database schema.
 - `.arc/processing_queue.json` is a versioned pass queue; it no longer represents per-node agent sessions.
-- Existing CLI resume/retry parameters remain accepted while pass-level resume semantics are implemented.
-
-#### Model API mode
-
-ARC supports two OpenAI-compatible API modes, configured via `ARC_OPENAI_API_MODE` in `.env`:
-
-- `chat_completions` (default) - Uses `/v1/chat/completions` endpoint, most compatible
-- `responses` - Uses `/v1/responses` endpoint for models that support it
-
-Set this in your `.env` file (see Configuration section above).
-
+- `arc compile --resume` reuses a node fact only when its requirement context and prompt version hashes still match.
 
 ## Visualization
 

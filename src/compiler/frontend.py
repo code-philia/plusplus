@@ -8,9 +8,6 @@ from typing import Any
 
 import yaml
 
-from .models import Diagnostic
-
-
 SUPPORTED_NODE_TYPES = {"FOLDER", "ATOMIC"}
 IMAGE_REFERENCE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 
@@ -20,11 +17,11 @@ class FrontendResult:
     requirement_ir: dict[str, Any]
     dependency_graph: dict[str, Any]
     normalized_tree: dict[str, Any]
-    diagnostics: list[Diagnostic] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not any(item.severity == "error" for item in self.diagnostics)
+        return not self.errors
 
 
 class RequirementFrontend:
@@ -32,21 +29,21 @@ class RequirementFrontend:
 
     def compile(self, requirement_path: Path) -> FrontendResult:
         source_path = requirement_path.expanduser().resolve()
-        diagnostics: list[Diagnostic] = []
+        errors: list[str] = []
         try:
             source_bytes = source_path.read_bytes()
             payload = yaml.safe_load(source_bytes.decode("utf-8")) or {}
         except (OSError, UnicodeError, yaml.YAMLError) as exc:
-            diagnostics.append(Diagnostic("ARC1001", f"Cannot parse requirement document: {exc}", source=str(source_path)))
-            return FrontendResult({}, {}, {}, diagnostics)
+            errors.append(_format_error("ARC1001", f"Cannot parse requirement document: {exc}", source=str(source_path)))
+            return FrontendResult({}, {}, {}, errors)
 
         if isinstance(payload, dict) and isinstance(payload.get("root"), dict):
             payload = payload["root"]
         elif isinstance(payload, dict) and "id" not in payload and isinstance(payload.get("requirement"), dict):
             payload = payload["requirement"]
         if not isinstance(payload, dict):
-            diagnostics.append(Diagnostic("ARC1002", "Requirement document root must be a mapping.", source=str(source_path)))
-            return FrontendResult({}, {}, {}, diagnostics)
+            errors.append(_format_error("ARC1002", "Requirement document root must be a mapping.", source=str(source_path)))
+            return FrontendResult({}, {}, {}, errors)
 
         nodes: dict[str, dict[str, Any]] = {}
         node_order: list[str] = []
@@ -57,15 +54,15 @@ class RequirementFrontend:
             source_name=source_path.name,
             nodes=nodes,
             node_order=node_order,
-            diagnostics=diagnostics,
+            errors=errors,
         )
         root_id = str(normalized_tree.get("id") or "")
-        self._validate_dependencies(nodes, diagnostics)
+        self._validate_dependencies(nodes, errors)
 
         atomic_ids = sorted(node_id for node_id, node in nodes.items() if node["type"] == "ATOMIC")
         folder_ids = sorted(node_id for node_id, node in nodes.items() if node["type"] == "FOLDER")
-        effective_dependencies = self._effective_atomic_dependencies(nodes, atomic_ids, diagnostics)
-        waves = self._topological_waves(atomic_ids, effective_dependencies, diagnostics)
+        effective_dependencies = self._effective_atomic_dependencies(nodes, atomic_ids, errors)
+        waves = self._topological_waves(atomic_ids, effective_dependencies, errors)
 
         requirement_ir = {
             "schema_version": 1,
@@ -90,8 +87,8 @@ class RequirementFrontend:
             "implementation_waves": waves,
         }
         if not root_id:
-            diagnostics.append(Diagnostic("ARC1003", "Requirement root id is missing.", source=str(source_path)))
-        return FrontendResult(requirement_ir, dependency_graph, normalized_tree, diagnostics)
+            errors.append(_format_error("ARC1003", "Requirement root id is missing.", source=str(source_path)))
+        return FrontendResult(requirement_ir, dependency_graph, normalized_tree, errors)
 
     def _normalize_node(
         self,
@@ -102,37 +99,37 @@ class RequirementFrontend:
         source_name: str,
         nodes: dict[str, dict[str, Any]],
         node_order: list[str],
-        diagnostics: list[Diagnostic],
+        errors: list[str],
     ) -> dict[str, Any]:
         node_id = str(raw.get("id") or raw.get("req_id") or "").strip()
         source = f"{source_name}#{pointer}"
         if not node_id:
             node_id = f"<missing:{pointer}>"
-            diagnostics.append(Diagnostic("ARC1101", "Requirement node id is missing.", source=source))
+            errors.append(_format_error("ARC1101", "Requirement node id is missing.", source=source))
         elif node_id in nodes:
-            diagnostics.append(Diagnostic("ARC1102", f"Duplicate requirement id: {node_id}", node_id=node_id, source=source))
+            errors.append(_format_error("ARC1102", f"Duplicate requirement id: {node_id}", node_id=node_id, source=source))
 
         node_type = str(raw.get("type") or ("FOLDER" if raw.get("children") else "ATOMIC")).strip().upper()
         if node_type not in SUPPORTED_NODE_TYPES:
-            diagnostics.append(Diagnostic("ARC1103", f"Unsupported requirement node type: {node_type}", node_id=node_id, source=source))
+            errors.append(_format_error("ARC1103", f"Unsupported requirement node type: {node_type}", node_id=node_id, source=source))
             node_type = "ATOMIC"
 
         raw_dependencies = raw.get("dependencies") or []
         if not isinstance(raw_dependencies, list):
-            diagnostics.append(Diagnostic("ARC1104", "dependencies must be a list.", node_id=node_id, source=source))
+            errors.append(_format_error("ARC1104", "dependencies must be a list.", node_id=node_id, source=source))
             raw_dependencies = []
         dependencies = sorted({str(item).strip() for item in raw_dependencies if str(item).strip()})
 
         raw_children = raw.get("children") or []
         if not isinstance(raw_children, list):
-            diagnostics.append(Diagnostic("ARC1105", "children must be a list.", node_id=node_id, source=source))
+            errors.append(_format_error("ARC1105", "children must be a list.", node_id=node_id, source=source))
             raw_children = []
         if node_type == "ATOMIC" and raw_children:
-            diagnostics.append(Diagnostic("ARC1106", "ATOMIC requirement cannot contain children.", node_id=node_id, source=source))
+            errors.append(_format_error("ARC1106", "ATOMIC requirement cannot contain children.", node_id=node_id, source=source))
 
         description = str(raw.get("description") or "").strip()
         visual_references = self._visual_references(raw.get("visual_reference"), description)
-        scenarios = self._normalize_scenarios(raw.get("scenarios"), node_id, source, diagnostics)
+        scenarios = self._normalize_scenarios(raw.get("scenarios"), node_id, source, errors)
 
         node = {
             "id": node_id,
@@ -153,7 +150,7 @@ class RequirementFrontend:
         normalized_children: list[dict[str, Any]] = []
         for index, child in enumerate(raw_children):
             if not isinstance(child, dict):
-                diagnostics.append(Diagnostic("ARC1107", "Requirement child must be a mapping.", node_id=node_id, source=f"{source}/{index}"))
+                errors.append(_format_error("ARC1107", "Requirement child must be a mapping.", node_id=node_id, source=f"{source}/{index}"))
                 continue
             normalized_child = self._normalize_node(
                 child,
@@ -162,7 +159,7 @@ class RequirementFrontend:
                 source_name=source_name,
                 nodes=nodes,
                 node_order=node_order,
-                diagnostics=diagnostics,
+                errors=errors,
             )
             normalized_children.append(normalized_child)
         node["children_ids"] = [child["id"] for child in normalized_children]
@@ -179,21 +176,21 @@ class RequirementFrontend:
         }
 
     @staticmethod
-    def _normalize_scenarios(value: Any, node_id: str, source: str, diagnostics: list[Diagnostic]) -> list[dict[str, Any]]:
+    def _normalize_scenarios(value: Any, node_id: str, source: str, errors: list[str]) -> list[dict[str, Any]]:
         if value is None:
             return []
         if not isinstance(value, list):
-            diagnostics.append(Diagnostic("ARC1201", "scenarios must be a list.", node_id=node_id, source=source))
+            errors.append(_format_error("ARC1201", "scenarios must be a list.", node_id=node_id, source=source))
             return []
         scenarios: list[dict[str, Any]] = []
         seen: set[str] = set()
         for index, raw in enumerate(value, start=1):
             if not isinstance(raw, dict):
-                diagnostics.append(Diagnostic("ARC1202", "Scenario must be a mapping.", node_id=node_id, source=source))
+                errors.append(_format_error("ARC1202", "Scenario must be a mapping.", node_id=node_id, source=source))
                 continue
             scenario_id = str(raw.get("id") or raw.get("scenario_id") or f"{node_id}:scenario:{index}").strip()
             if scenario_id in seen:
-                diagnostics.append(Diagnostic("ARC1203", f"Duplicate scenario id: {scenario_id}", node_id=node_id, source=source))
+                errors.append(_format_error("ARC1203", f"Duplicate scenario id: {scenario_id}", node_id=node_id, source=source))
                 continue
             seen.add(scenario_id)
             steps = raw.get("steps") if isinstance(raw.get("steps"), list) else []
@@ -220,19 +217,19 @@ class RequirementFrontend:
         return sorted(set(values))
 
     @staticmethod
-    def _validate_dependencies(nodes: dict[str, dict[str, Any]], diagnostics: list[Diagnostic]) -> None:
+    def _validate_dependencies(nodes: dict[str, dict[str, Any]], errors: list[str]) -> None:
         for node_id, node in sorted(nodes.items()):
             for dependency in node["dependencies"]:
                 if dependency == node_id:
-                    diagnostics.append(Diagnostic("ARC1301", "Requirement cannot depend on itself.", node_id=node_id))
+                    errors.append(_format_error("ARC1301", "Requirement cannot depend on itself.", node_id=node_id))
                 elif dependency not in nodes:
-                    diagnostics.append(Diagnostic("ARC1302", f"Unresolved requirement dependency: {dependency}", node_id=node_id))
+                    errors.append(_format_error("ARC1302", f"Unresolved requirement dependency: {dependency}", node_id=node_id))
 
     def _effective_atomic_dependencies(
         self,
         nodes: dict[str, dict[str, Any]],
         atomic_ids: list[str],
-        diagnostics: list[Diagnostic],
+        errors: list[str],
     ) -> dict[str, list[str]]:
         atomic_set = set(atomic_ids)
         descendants: dict[str, set[str]] = {}
@@ -276,7 +273,7 @@ class RequirementFrontend:
     def _topological_waves(
         atomic_ids: list[str],
         dependencies: dict[str, list[str]],
-        diagnostics: list[Diagnostic],
+        errors: list[str],
     ) -> list[list[str]]:
         remaining = set(atomic_ids)
         completed: set[str] = set()
@@ -285,9 +282,14 @@ class RequirementFrontend:
             wave = sorted(node_id for node_id in remaining if set(dependencies[node_id]) <= completed)
             if not wave:
                 cycle_nodes = sorted(remaining)
-                diagnostics.append(Diagnostic("ARC1303", f"Requirement dependency cycle detected: {', '.join(cycle_nodes)}"))
+                errors.append(_format_error("ARC1303", f"Requirement dependency cycle detected: {', '.join(cycle_nodes)}"))
                 break
             waves.append(wave)
             completed.update(wave)
             remaining.difference_update(wave)
         return waves
+
+
+def _format_error(code: str, message: str, *, node_id: str | None = None, source: str | None = None) -> str:
+    context = ", ".join(value for value in (node_id, source) if value)
+    return f"{code}: {message}" + (f" ({context})" if context else "")

@@ -28,8 +28,6 @@ def load_project_env(env_path: str | os.PathLike[str] | None = None) -> None:
             value = value.strip().strip('"').strip("'")
             if key and key not in os.environ:
                 os.environ[key] = value
-    _copy_env_if_missing("OPENAI_KEY", "OPENAI_API_KEY")
-    _copy_env_if_missing("OPENAI_BASE_URL", "OPENAI_API_BASE")
 
 
 def set_workspace_root(path: str | os.PathLike[str]) -> None:
@@ -92,13 +90,6 @@ def get_android_package() -> str:
     return _android_package
 
 
-def _copy_env_if_missing(source: str, target: str) -> None:
-    source_value = os.environ.get(source, "").strip()
-    target_value = os.environ.get(target, "").strip()
-    if source_value and not target_value:
-        os.environ[target] = source_value
-
-
 def check_config() -> dict[str, Any]:
     """
     Validate ARC configuration and environment.
@@ -119,7 +110,6 @@ def check_config() -> dict[str, Any]:
         "OPENAI_API_KEY": "Main API key for model inference",
         "OPENAI_BASE_URL": "API base URL",
         "MODEL": "Main coding model name",
-        "ARC_OPENAI_API_MODE": "API mode (responses or chat_completions)",
     }
 
     for var, description in model_vars.items():
@@ -128,8 +118,6 @@ def check_config() -> dict[str, Any]:
             warnings.append(f"Model pass not configured: {var} ({description})")
         elif var == "OPENAI_API_KEY" and value.startswith("sk-your-"):
             warnings.append(f"{var} still contains placeholder value")
-        elif var == "ARC_OPENAI_API_MODE" and value not in {"responses", "chat_completions"}:
-            errors.append(f"{var} must be 'responses' or 'chat_completions', got: {value}")
 
     # Check optional visual model
     visual_key = os.environ.get("VISUAL_API_KEY", "").strip()
@@ -291,13 +279,6 @@ def interactive_config_setup() -> int:
     model = input(f"Model name [{default_model}]: ").strip()
     configs["MODEL"] = model if model else default_model
 
-    # ARC_OPENAI_API_MODE
-    existing_mode = existing_config.get("ARC_OPENAI_API_MODE", "")
-    default_mode = existing_mode if existing_mode else "chat_completions"
-    print(f"\nAPI mode (responses or chat_completions) [{default_mode}]: ", end="")
-    mode = input().strip()
-    configs["ARC_OPENAI_API_MODE"] = mode if mode else default_mode
-
     # Merge with existing config
     final_config = {**existing_config, **configs}
 
@@ -310,11 +291,10 @@ def interactive_config_setup() -> int:
     lines.append(f"OPENAI_API_KEY={final_config['OPENAI_API_KEY']}")
     lines.append(f"OPENAI_BASE_URL={final_config['OPENAI_BASE_URL']}")
     lines.append(f"MODEL={final_config['MODEL']}")
-    lines.append(f"ARC_OPENAI_API_MODE={final_config['ARC_OPENAI_API_MODE']}")
     lines.append("")
 
     # Preserve other existing keys
-    core_keys = {"OPENAI_API_KEY", "OPENAI_BASE_URL", "MODEL", "ARC_OPENAI_API_MODE"}
+    core_keys = {"OPENAI_API_KEY", "OPENAI_BASE_URL", "MODEL"}
     other_keys = {k: v for k, v in existing_config.items() if k not in core_keys}
 
     if other_keys:

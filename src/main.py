@@ -33,7 +33,6 @@ class CompilationConfig:
     resume_from_queue: bool = False
     retry_failed: bool = False
     retry_node_ids: list[str] | None = None
-    model_api_mode: str | None = None
 
 
 def _get_repo_root() -> str:
@@ -167,9 +166,6 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     # Set web port
     set_web_port(args.port)
     
-    # Model API mode
-    model_api_mode = os.environ.get("ARC_OPENAI_API_MODE", "").strip() or None
-    
     config = CompilationConfig(
         output_dir=output_dir,
         requirement_dir=requirement_dir,
@@ -180,7 +176,6 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         resume_from_queue=args.resume,
         retry_failed=args.retry_failed,
         retry_node_ids=args.retry or None,
-        model_api_mode=model_api_mode,
     )
     
     # Print banner and startup info
@@ -196,7 +191,6 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         resume_from_queue=config.resume_from_queue,
         retry_failed=config.retry_failed,
         retry_node_ids=config.retry_node_ids,
-        model_api_mode=config.model_api_mode,
     )
     
     # Run compilation

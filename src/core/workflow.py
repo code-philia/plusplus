@@ -89,11 +89,11 @@ class ARCWorkflowManager:
             runtime.events.mark_run_completed("ARC compilation completed.")
             await self._log("Compiler", "Compilation finished successfully.")
         elif result.ok:
-            runtime.events.mark_run_paused("ARC front end completed; remaining passes are pending.")
-            await self._log("Compiler", "Compilation paused after the implemented front-end pass.", "warning")
+            runtime.events.mark_run_paused("ARC database schema completed; remaining passes are pending.")
+            await self._log("Compiler", "Compilation paused after the implemented DATABASE_SCHEMA pass.", "warning")
         else:
-            runtime.events.mark_run_failed("ARC compiler front end failed.")
-            await self._log("Compiler", "Compilation failed during the front-end pass.", "error")
+            runtime.events.mark_run_failed("ARC compiler pass failed.")
+            await self._log("Compiler", "Compilation failed; inspect the compiler log.", "error")
         return result.to_dict()
 
     async def _log(

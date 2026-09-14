@@ -632,7 +632,6 @@ def print_cli_startup(
     resume_from_queue: bool = False,
     retry_failed: bool = False,
     retry_node_ids: list[str] | None = None,
-    model_api_mode: str | None = None,
 ) -> None:
     from app_type_handler import read_stack_summary
 
@@ -660,8 +659,6 @@ def print_cli_startup(
         print(f"   {Fore.CYAN}retry     {Style.RESET_ALL}{', '.join(retry_node_ids)}")
     if app_type == "web" and web_port is not None:
         print(f"   {Fore.CYAN}port      {Style.RESET_ALL}{web_port}")
-    if model_api_mode:
-        print(f"   {Fore.CYAN}model api {Style.RESET_ALL}{model_api_mode}")
     print(f"   {Fore.CYAN}stack     {Style.RESET_ALL}{read_stack_summary(project_path, app_type)}")
     print(f"   {Fore.CYAN}view      {Style.RESET_ALL}{view_label}")
     if log_path:
