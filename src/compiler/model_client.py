@@ -53,7 +53,7 @@ class Model:
         api_key: str,
         base_url: str = "https://api.openai.com/v1",
         timeout_seconds: float = 120.0,
-        transport_retries: int = 2,
+        transport_retries: int = 0,
     ) -> None:
         if not model.strip():
             raise ModelConfigurationError("MODEL is required for the DATABASE_SCHEMA pass.")
@@ -79,6 +79,8 @@ class Model:
             api_key=os.environ.get("OPENAI_API_KEY", ""),
             base_url=os.environ.get("OPENAI_BASE_URL", "").strip()
             or "https://api.openai.com/v1",
+            timeout_seconds=_positive_env_float("ARC_MODEL_TIMEOUT_SECONDS", 120.0),
+            transport_retries=_nonnegative_env_int("ARC_MODEL_TRANSPORT_RETRIES", 0),
         )
 
     def generate_json(
@@ -121,3 +123,18 @@ class Model:
         if not isinstance(parsed, dict):
             raise ValueError("Structured model response must be a JSON object.")
         return parsed
+
+
+def _positive_env_float(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _nonnegative_env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, str(default))))
+    except ValueError:
+        return default

@@ -176,7 +176,10 @@ class Compiler:
         #                    Compiler Design Pass
         # ===================================================================
 
-        await self._log("Compiler", "Running MODULE_DRAFT and DATAFLOW_LINK passes.")
+        await self._log(
+            "Compiler",
+            "Running REQUIREMENT_CONTRACT, MODULE_CALL_TREE, and FLOW_BINDING passes.",
+        )
         design_pass = DesignPass(model, artifact_store.root)
         design = await asyncio.to_thread(
             design_pass.compile,

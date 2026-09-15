@@ -39,7 +39,7 @@ def assign_module_files(modules: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 class DesignValidator:
-    """Validate module-local Interfaces and fully qualified dataflow mappings."""
+    """Validate flow-derived module interfaces, database edges, and requirement coverage."""
 
     def validate(
         self,
@@ -55,8 +55,8 @@ class DesignValidator:
             for entity in database_schema.get("entities", [])
             if entity.get("key")
         }
-        if design.get("schema_version") != 3:
-            errors.append("Design IR schema_version must be 3")
+        if design.get("schema_version") != 4:
+            errors.append("Design IR schema_version must be 4")
         if "types" in design:
             errors.append("Design IR must not contain a global types registry")
 
@@ -120,14 +120,28 @@ class DesignValidator:
 
             input_fields = _interface_fields(module, "input", errors)
             _interface_fields(module, "output", errors)
-            reads = set(module.get("reads", []))
-            writes = set(module.get("writes", []))
-            generates = set(module.get("generates", []))
+            _interface_fields(module, "local", errors)
+            reads = _string_values(module, "reads", errors)
+            writes = _string_values(module, "writes", errors)
+            generates = _string_values(module, "generates", errors)
+            access_ids = _string_values(module, "access_ids", errors)
+            effect_ids = _string_values(module, "effect_ids", errors)
+            realized_access_ids = _string_values(module, "realized_access_ids", errors)
+            realized_effect_ids = _string_values(module, "realized_effect_ids", errors)
+            if access_ids != realized_access_ids:
+                errors.append(f"Database read responsibilities are not fully realized: {module_id}")
+            if effect_ids != realized_effect_ids:
+                errors.append(f"Database write responsibilities are not fully realized: {module_id}")
             if kind != "REPOSITORY" and (reads or writes or generates):
                 errors.append(f"Only REPOSITORY modules may access database entities: {module_id}")
             for entity in sorted(reads | writes):
                 if entity not in database_entities:
-                    errors.append(f"Unknown database entity: {module_id} -> {entity}")
+                    hint = (
+                        " (reads/writes require an entity key such as 'account', not entity.field)"
+                        if "." in entity
+                        else ""
+                    )
+                    errors.append(f"Unknown database entity: {module_id} -> {entity}{hint}")
 
             generated_by_entity: dict[str, set[str]] = {}
             for generated in generates:
@@ -181,6 +195,26 @@ class DesignValidator:
             sources = link.get("sources", [])
             if not isinstance(sources, list) or not sources or any(source not in requirement_ids for source in sources):
                 errors.append(f"Invalid link requirement sources: {source_module_id} -> {target_module_id}")
+            if link_type in {"READ_DB", "WRITE_DB"}:
+                module_id = target_module_id if link_type == "READ_DB" else source_module_id
+                database_ref = source_module_id if link_type == "READ_DB" else target_module_id
+                if module_id not in modules or not database_ref.startswith("db."):
+                    errors.append(f"Unresolved database link endpoint: {source_module_id} -> {target_module_id}")
+                    continue
+                module = modules[module_id]
+                if module.get("kind") != "REPOSITORY":
+                    errors.append(f"Only REPOSITORY may have a database link: {module_id}")
+                entity = database_ref.removeprefix("db.")
+                allowed = set(module.get("reads", [])) if link_type == "READ_DB" else set(module.get("writes", []))
+                if entity not in allowed:
+                    errors.append(f"Database link is not declared by module: {module_id} -> {entity}")
+                responsibility_id = str(link.get("responsibility_id", ""))
+                realized_key = "realized_access_ids" if link_type == "READ_DB" else "realized_effect_ids"
+                if responsibility_id not in set(module.get(realized_key, [])):
+                    errors.append(
+                        f"Database link has an unknown responsibility: {module_id} -> {responsibility_id}"
+                    )
+                continue
             if link_type not in {"CALL", "RETURN"}:
                 errors.append(f"Invalid link type: {link_type}")
                 continue
@@ -201,21 +235,31 @@ class DesignValidator:
                 )
             if link_type == "CALL":
                 graph[source_module_id].add(target_module_id)
-                source_fields = _field_map(source_module.get("input", []))
+                source_fields = {
+                    **_field_map(source_module.get("input", [])),
+                    **_field_map(source_module.get("local", [])),
+                }
                 target_fields = _field_map(target_module.get("input", []))
-                source_direction = "input"
+                source_directions = ("input", "local")
                 target_direction = "input"
             else:
                 source_fields = _field_map(source_module.get("output", []))
-                target_fields = _field_map(target_module.get("output", []))
-                source_direction = "output"
-                target_direction = "output"
+                target_fields = {
+                    **_field_map(target_module.get("local", [])),
+                    **_field_map(target_module.get("output", [])),
+                }
+                source_directions = ("output",)
+                target_direction = ("local", "output")
             edge_targets: set[str] = set()
             for mapping in link.get("mapping", []):
                 source_ref = str(mapping.get("source", ""))
                 target_ref = str(mapping.get("target", ""))
-                source_name = _qualified_name(source_ref, source_module_id, source_direction)
-                target_name = _qualified_name(target_ref, target_module_id, target_direction)
+                source_name = _qualified_name_any(source_ref, source_module_id, source_directions)
+                target_name = _qualified_name_any(
+                    target_ref,
+                    target_module_id,
+                    (target_direction,) if isinstance(target_direction, str) else target_direction,
+                )
                 if source_name is None or source_name not in source_fields:
                     errors.append(f"Unknown mapping source: {source_ref}")
                     continue
@@ -374,6 +418,24 @@ def _interface_fields(
     return fields
 
 
+def _string_values(
+    module: dict[str, Any],
+    key: str,
+    errors: list[str],
+) -> set[str]:
+    """Read a string-array property without letting malformed model data crash validation."""
+
+    module_id = str(module.get("id", ""))
+    raw_values = module.get(key)
+    if not isinstance(raw_values, list):
+        errors.append(f"Module {key} must be an array: {module_id}")
+        return set()
+    invalid_count = sum(not isinstance(value, str) for value in raw_values)
+    if invalid_count:
+        errors.append(f"Module {key} must contain only strings: {module_id}")
+    return {value for value in raw_values if isinstance(value, str)}
+
+
 def _field_map(raw_fields: Any) -> dict[str, dict[str, Any]]:
     return {
         str(field.get("name")): field
@@ -388,6 +450,14 @@ def _qualified_name(reference: str, module_id: str, direction: str) -> str | Non
         return None
     name = reference[len(prefix):]
     return name if SYMBOL_PATTERN.fullmatch(name) else None
+
+
+def _qualified_name_any(reference: str, module_id: str, directions: tuple[str, ...]) -> str | None:
+    for direction in directions:
+        name = _qualified_name(reference, module_id, direction)
+        if name is not None:
+            return name
+    return None
 
 
 def _assignable(source: str, target: str) -> bool:
