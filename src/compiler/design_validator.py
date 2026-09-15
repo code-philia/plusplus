@@ -164,7 +164,10 @@ class DesignValidator:
                 required = {
                     str(field.get("name", ""))
                     for field in entity.get("fields", [])
-                    if field.get("required") and not field.get("primary_key")
+                    if field.get("required")
+                    and not field.get("primary_key")
+                    and field.get("origin") != "RELATIONSHIP"
+                    and field.get("type") != "foreign_key"
                 } | {
                     str(relation.get("name", ""))
                     for relation in entity.get("relations", [])

@@ -8,7 +8,15 @@ from typing import Awaitable, Callable
 from arcbench_agent_runtime.runtime import AgentRuntime
 
 from .artifacts import CompilerArtifactStore
-from .database_pass import DatabasePassResult, DatabaseSchemaPass, validate_database_schema
+from .database_pass import (
+    DatabasePassResult,
+    DatabaseSchemaPass,
+    database_structure,
+    database_traceability,
+    hydrate_database_schema,
+    validate_database_schema,
+    validate_database_structure,
+)
 from .design_pass import DesignPass, database_hash, design_hash
 from .frontend import RequirementFrontend
 from .model_client import Model, ModelConfigurationError, StructuredModel
@@ -81,11 +89,22 @@ class Compiler:
         if request.skip_database:
             await self._log("Compiler", "Skipping DATABASE_SCHEMA pass; reusing existing database schema.")
             existing_schema, read_error = artifact_store.read_database()
-            validation_errors = (
-                [read_error]
-                if read_error
-                else validate_database_schema(existing_schema or {})
-            )
+            if read_error:
+                validation_errors = [read_error]
+                reusable_schema = existing_schema or {}
+            elif isinstance(existing_schema, dict) and "traceability" in existing_schema:
+                # Read schema_version 1 and early schema_version 2 artifacts during migration.
+                reusable_schema = existing_schema
+                validation_errors = validate_database_schema(reusable_schema)
+            else:
+                validation_errors = validate_database_structure(existing_schema or {})
+                links = self._runtime.traceability.read_database_schema_links()
+                reusable_schema = hydrate_database_schema(existing_schema or {}, links)
+                if not validation_errors:
+                    validation_errors = validate_database_schema(
+                        reusable_schema,
+                        expected_requirement_ids=set(atomic_ids),
+                    )
             if validation_errors:
                 for error in validation_errors:
                     await self._log("Compiler", f"ARC2104: Cannot reuse database schema: {error}", "error")
@@ -104,11 +123,14 @@ class Compiler:
                     artifacts=artifacts,
                 )
             database = DatabasePassResult(
-                schema=existing_schema or {},
+                schema=reusable_schema,
                 node_states={node_id: "SCHEMA_REUSED" for node_id in atomic_ids},
             )
             states.update(database.node_states)
             artifacts["database_schema"] = str(artifact_store.root / "database_schema.json")
+            artifacts["database_traceability"] = str(
+                self._runtime.traceability.table_path("database_schema")
+            )
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
@@ -118,7 +140,10 @@ class Compiler:
             for node_id, state in database.node_states.items():
                 self._runtime.traceability.upsert_node_state(node_id, state, "database_schema")
         else:
-            await self._log("Compiler", "Running DATABASE_SCHEMA pass over atomic requirements.")
+            await self._log(
+                "Compiler",
+                "Running ENTITY, FIELD, RELATIONSHIP, and CONSTRAINT database passes.",
+            )
             database = None
         try:
             model = self._model or Model.from_env()
@@ -148,7 +173,14 @@ class Compiler:
                 resume=request.resume,
             )
             states.update(database.node_states)
-            artifacts.update(artifact_store.write_database(schema=database.schema))
+            artifacts.update(database.pass_artifacts)
+            structure = database_structure(database.schema)
+            links = database_traceability(database.schema)
+            artifacts.update(artifact_store.write_database(schema=structure))
+            self._runtime.traceability.store_database_schema_links(links)
+            artifacts["database_traceability"] = str(
+                self._runtime.traceability.table_path("database_schema")
+            )
             database_status = "COMPLETED" if database.ok else "FAILED"
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
@@ -222,6 +254,19 @@ class Compiler:
         await self._log(
             "Compiler",
             "Design IR completed and frozen; lowering, implementation, and acceptance passes are pending.",
+            "warning",
+        )
+        return CompilationResult(
+            ok=True,
+            complete=False,
+            root_id=root_id,
+            states=states,
+            artifacts=artifacts,
+        )
+
+        await self._log(
+            "Compiler",
+            "Database schema completed; the DESIGN pass is currently disabled.",
             "warning",
         )
         return CompilationResult(

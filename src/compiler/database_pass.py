@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -12,92 +14,104 @@ from arcbench_agent_runtime.jsonio import read_json, write_json_atomic
 from core.logging import SynchronousLog
 
 from .model_client import StructuredModel, describe_model_error
-PROMPT_VERSION = "database-facts-v2"
+
+
+SCHEMA_VERSION = 2
+ENTITY_PROMPT_VERSION = "database-entities-v3"
+FIELD_PROMPT_VERSION = "database-fields-v3"
+RELATIONSHIP_PROMPT_VERSION = "database-relationships-v3"
+CONSTRAINT_PROMPT_VERSION = "database-constraints-v2"
+
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
-FIELD_TYPES = {"string", "integer", "number", "boolean", "date", "datetime", "json"}
-PERSISTENCE_VALUES = {"REQUIRED", "NOT_REQUIRED"}
-CARDINALITIES = {"MANY_TO_ONE", "ONE_TO_ONE"}
+FIELD_TYPES = {"string", "integer", "number", "boolean", "date", "datetime", "json", "uuid", "foreign_key"}
+RELATIONSHIP_TYPES = {"ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_MANY"}
+CONSTRAINT_TYPES = {
+    "PRIMARY_KEY", "FOREIGN_KEY", "NOT_NULL", "UNIQUE", "COMPOSITE_UNIQUE", "CHECK", "APPLICATION_RULE"
+}
+ENFORCEMENT_VALUES = {"DATABASE", "APPLICATION"}
+FIELD_ORIGINS = {"REQUIREMENT", "RELATIONSHIP", "SYSTEM"}
 CHECK_KINDS = {
-    "min_length",
-    "max_length",
-    "pattern",
-    "date_past",
-    "date_future",
-    "enum",
-    "minimum",
-    "maximum",
+    "min_length", "max_length", "pattern", "date_past", "date_future", "enum", "minimum", "maximum", "format"
 }
 
 
-DATABASE_FACT_ITEM_SCHEMA: dict[str, Any] = {
+def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+ENTITY_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["requirement_id", "entities"],
+    "required": ["requirement_id", "reuse_entities", "new_entities", "unresolved_entities"],
+    "properties": {
+        "requirement_id": {"type": "string"},
+        "reuse_entities": {"type": "array", "items": {"type": "string"}},
+        "new_entities": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False, "required": ["key", "description"],
+                "properties": {"key": {"type": "string"}, "description": {"type": "string"}},
+            },
+        },
+        "unresolved_entities": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["concept", "candidate_entities", "reason"],
+                "properties": {
+                    "concept": {"type": "string"},
+                    "candidate_entities": {"type": "array", "items": {"type": "string"}, "minItems": 2},
+                    "reason": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+FIELD_PROPERTIES_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "min_length", "max_length", "pattern", "enum", "format", "minimum", "maximum", "date_past",
+        "date_future", "default",
+    ],
+    "properties": {
+        "min_length": _nullable({"type": "integer", "minimum": 0}),
+        "max_length": _nullable({"type": "integer", "minimum": 0}),
+        "pattern": _nullable({"type": "string"}),
+        "enum": _nullable({"type": "array", "items": {"type": "string"}, "minItems": 1}),
+        "format": _nullable({"type": "string"}),
+        "minimum": _nullable({"type": "number"}),
+        "maximum": _nullable({"type": "number"}),
+        "date_past": _nullable({"type": "boolean"}),
+        "date_future": _nullable({"type": "boolean"}),
+        "default": _nullable({"type": ["string", "number", "boolean"]}),
+    },
+}
+
+FIELD_DECISION_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False, "required": ["requirement_id", "entities"],
     "properties": {
         "requirement_id": {"type": "string"},
         "entities": {
             "type": "array",
             "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["key", "persistence", "fields", "indexes", "checks", "relations"],
+                "type": "object", "additionalProperties": False,
+                "required": ["entity", "reuse_fields", "new_fields"],
                 "properties": {
-                    "key": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-                    "persistence": {"type": "string", "enum": sorted(PERSISTENCE_VALUES)},
-                    "fields": {
+                    "entity": {"type": "string"},
+                    "reuse_fields": {"type": "array", "items": {"type": "string"}},
+                    "new_fields": {
                         "type": "array",
                         "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": [
-                                "name", "type", "required", "unique", "case_insensitive", "description"
-                            ],
-                            "properties": {
-                                "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-                                "type": {"type": "string", "enum": sorted(FIELD_TYPES)},
-                                "required": {"type": "boolean"},
-                                "unique": {"type": "boolean"},
-                                "case_insensitive": {"type": "boolean"},
-                                "description": {"type": "string"},
-                            },
-                        },
-                    },
-                    "indexes": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["fields", "unique"],
-                            "properties": {
-                                "fields": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                                "unique": {"type": "boolean"},
-                            },
-                        },
-                    },
-                    "checks": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["field", "kind", "value"],
-                            "properties": {
-                                "field": {"type": "string"},
-                                "kind": {"type": "string", "enum": sorted(CHECK_KINDS)},
-                                "value": {"type": "string"},
-                            },
-                        },
-                    },
-                    "relations": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["name", "target_entity", "cardinality", "required"],
+                            "type": "object", "additionalProperties": False,
+                            "required": ["name", "type", "nullable", "description", "properties"],
                             "properties": {
                                 "name": {"type": "string"},
-                                "target_entity": {"type": "string"},
-                                "cardinality": {"type": "string", "enum": sorted(CARDINALITIES)},
-                                "required": {"type": "boolean"},
+                                "type": {"type": "string", "enum": sorted(FIELD_TYPES - {"uuid", "foreign_key"})},
+                                "nullable": {"type": "boolean"},
+                                "description": {"type": "string"},
+                                "properties": FIELD_PROPERTIES_SCHEMA,
                             },
                         },
                     },
@@ -107,39 +121,149 @@ DATABASE_FACT_ITEM_SCHEMA: dict[str, Any] = {
     },
 }
 
-DATABASE_FACTS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["items"],
+RELATIONSHIP_DECISION_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "required": ["requirement_id", "relationships", "unresolved_relationships"],
     "properties": {
-        "items": {
+        "requirement_id": {"type": "string"},
+        "relationships": {
             "type": "array",
-            "items": DATABASE_FACT_ITEM_SCHEMA,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["parent", "child", "type", "child_required", "description"],
+                "properties": {
+                    "parent": {"type": "string"}, "child": {"type": "string"},
+                    "type": {"type": "string", "enum": sorted(RELATIONSHIP_TYPES)},
+                    "child_required": {"type": "boolean"}, "description": {"type": "string"},
+                },
+            },
+        },
+        "unresolved_relationships": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["entities", "candidate_types", "reason"],
+                "properties": {
+                    "entities": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2},
+                    "candidate_types": {
+                        "type": "array", "items": {"type": "string", "enum": sorted(RELATIONSHIP_TYPES)},
+                        "minItems": 2,
+                    },
+                    "reason": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+CONSTRAINT_DECISION_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False, "required": ["requirement_id", "constraints"],
+    "properties": {
+        "requirement_id": {"type": "string"},
+        "constraints": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["type", "fields", "description", "enforcement"],
+                "properties": {
+                    "type": {"type": "string", "enum": ["UNIQUE", "COMPOSITE_UNIQUE", "CHECK", "APPLICATION_RULE"]},
+                    "fields": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    "description": {"type": "string"},
+                    "enforcement": {"type": "string", "enum": sorted(ENFORCEMENT_VALUES)},
+                },
+            },
         },
     },
 }
 
 
-DATABASE_FACT_INSTRUCTIONS = """You are the DATABASE_SCHEMA discovery pass of a requirement compiler.
-Analyze every atomic requirement in requirements. Return one item per requirement and only facts implied by that
-requirement, not a complete system schema. Use stable singular snake_case entity keys and reuse keys listed in
-known_entities. Requirements in the same request belong to one dependency wave and may be considered together to
-keep entity naming consistent. Include the
-minimum technical fields needed to implement explicitly required persistence, identity, authentication,
-idempotency, and lookup behavior. Do not invent product features. NOT_REQUIRED means the entity is transient and
-will not become a table. Record a relation only on the entity that owns the foreign key, using MANY_TO_ONE or
-ONE_TO_ONE. Represent many-to-many relationships as an explicit join entity with two MANY_TO_ONE relations.
-All compiler-provided primary keys and every relation foreign key are strings. Declare a relation and let the
-compiler derive its <relation_name>_id field; do not emit that field yourself. If you do emit it, its type must be
-string. Never use integer identifiers for a relation field.
-This is a logical schema: fields contains only scalar domain fields, relations is the sole source of cross-entity
-references, and indexes may name either a scalar field or a relation name (for example ["account", "journey"]),
-never its derived <relation_name>_id field. Checks may name scalar fields only. Use pattern/min_length/max_length
-only with string fields, date_past/date_future only with date or datetime fields, and minimum/maximum only with
-integer or number fields.
-Relation names are logical domain names and must not end in _id.
-Express validation as structured checks; never emit SQL. Every array must be present, including empty arrays.
-Return exactly one item for every input requirement_id and no additional items.
+ENTITY_INSTRUCTIONS = """You are Pass 1, ENTITY_DISCOVERY, of a database schema compiler.
+For exactly one atomic requirement, decide which persistent entities it reuses and which persistent entities must
+be introduced. Existing entities are compiler symbols: reuse them when their meaning fits. Do not produce fields,
+relationships, constraints, APIs, modules, or SQL. Entity keys are singular snake_case. Case-only name differences
+are the same symbol. Terms explicitly paired by the requirement, such as "journey/train", are aliases: reuse the
+existing entity whose description matches. UI selection, page context, form state, and other transient nouns are
+not database entities and must not be reported as unresolved. Use unresolved_entities only when one persistent
+concept has at least two existing candidate entities and the requirement cannot choose between them; include both
+candidates. Include every persistent entity used by the requirement.
+
+Return exactly one JSON object with these keys and no others:
+- requirement_id: copy the supplied requirement.requirement_id exactly.
+- reuse_entities: array of existing entity keys; use [] when none.
+- new_entities: array of {"key": singular_snake_case, "description": string}; use [] when none.
+- unresolved_entities: array of {"concept": string, "candidate_entities": [at least two existing keys],
+  "reason": string}; use [] unless there is a real choice between existing entities.
+
+Valid output example:
+{"requirement_id":"REQ-3.2","reuse_entities":["traveler","train_service"],"new_entities":[{"key":"booking","description":"A confirmed booking."}],"unresolved_entities":[]}
+Valid empty output example:
+{"requirement_id":"REQ-4.1","reuse_entities":[],"new_entities":[],"unresolved_entities":[]}
+"""
+
+FIELD_INSTRUCTIONS = """You are Pass 2, FIELD_DISCOVERY, of a database schema compiler.
+For exactly one atomic requirement, discover scalar domain fields only for entities already associated with it.
+Reuse existing fields whenever their meaning fits. Do not create entities, relationships, foreign-key fields,
+cross-field constraints, APIs, modules, or SQL. Do not put id in new_fields because the compiler creates it; id may
+appear in reuse_fields only when the requirement uses it. Relationship references such as user_id are forbidden
+in new_fields because Pass 3 lowers relationships into foreign keys. Return every related entity.
+Each properties member is required by the response protocol: use null when it does not apply, and false for an
+inactive date_past/date_future flag. Never invent a default or format merely to fill the response structure.
+
+Return exactly one JSON object with these keys and no others:
+- requirement_id: copy the supplied requirement.requirement_id exactly.
+- entities: one entry for every supplied related_entities item, even when it contributes no fields. Each entry is
+  {"entity": existing_key, "reuse_fields": [existing field names], "new_fields": [field declarations]}.
+- Every field declaration contains name, type, nullable, description, and properties. properties must contain all
+  ten protocol keys: min_length, max_length, pattern, enum, format, minimum, maximum, date_past, date_future,
+  default. Set every inapplicable value to null; false is also allowed for inactive date flags.
+- Emit each entity and field once. Never put id or names ending in _id in new_fields.
+
+Valid output example:
+{"requirement_id":"REQ-3.2","entities":[{"entity":"booking","reuse_fields":[],"new_fields":[{"name":"booking_number","type":"string","nullable":false,"description":"Public booking number.","properties":{"min_length":1,"max_length":20,"pattern":null,"enum":null,"format":null,"minimum":null,"maximum":null,"date_past":null,"date_future":null,"default":null}}]},{"entity":"train_service","reuse_fields":["train_number"],"new_fields":[]},{"entity":"traveler","reuse_fields":[],"new_fields":[]}]}
+Valid no-field output example:
+{"requirement_id":"REQ-3.1","entities":[{"entity":"train_service","reuse_fields":[],"new_fields":[]}]}
+"""
+
+RELATIONSHIP_INSTRUCTIONS = """You are Pass 3, RELATIONSHIP_RESOLUTION, of a database schema compiler.
+For exactly one atomic requirement, decide only logical relationships among the supplied related entities. Choose
+parent, child, ONE_TO_ONE / ONE_TO_MANY / MANY_TO_MANY, and whether the child reference is required. Do not create
+entities, fields, foreign keys, constraints, APIs, modules, or SQL. The compiler lowers accepted relationships.
+The input may contain existing_relationships. Do not contradict their cardinality; repeat the same declaration
+only when this requirement also establishes or relies on that persistent relationship so traceability is retained.
+Do not infer a relationship merely because two entities appear together. A read-only requirement, transient
+selection context, or explicit statement that no record is created means no new relationship; return an empty
+relationship list without an unresolved explanation. Use unresolved_relationships only when the requirement needs
+a persistent relationship but at least two different cardinalities remain plausible; include both candidates.
+
+Return exactly one JSON object with these keys and no others:
+- requirement_id: copy the supplied requirement.requirement_id exactly.
+- relationships: array of {"parent": entity key, "child": entity key, "type": "ONE_TO_ONE" |
+  "ONE_TO_MANY" | "MANY_TO_MANY", "child_required": boolean, "description": string}.
+- unresolved_relationships: array of {"entities": [exactly two entity keys], "candidate_types": [at least two
+  relationship types], "reason": string}. Use it only for a real cardinality ambiguity.
+
+Valid output example:
+{"requirement_id":"REQ-3.2","relationships":[{"parent":"traveler","child":"booking","type":"ONE_TO_MANY","child_required":true,"description":"A traveler may own many bookings."}],"unresolved_relationships":[]}
+Valid no-relationship output example:
+{"requirement_id":"REQ-3.1","relationships":[],"unresolved_relationships":[]}
+"""
+
+CONSTRAINT_INSTRUCTIONS = """You are Pass 4, CONSTRAINT_RESOLUTION, of a database schema compiler.
+For exactly one atomic requirement, extract integrity rules not already represented by field properties or
+relationships. Use UNIQUE, COMPOSITE_UNIQUE, CHECK, or APPLICATION_RULE and fully qualified entity.field symbols.
+DATABASE enforcement is only for rules a database can enforce without request/session context. Do not create or
+change entities, fields, or relationships, and do not emit SQL. The compiler adds structural constraints itself.
+
+Return exactly one JSON object with these keys and no others:
+- requirement_id: copy the supplied requirement.requirement_id exactly.
+- constraints: array of {"type": "UNIQUE" | "COMPOSITE_UNIQUE" | "CHECK" | "APPLICATION_RULE",
+  "fields": [one or more fully-qualified entity.field names], "description": string,
+  "enforcement": "DATABASE" | "APPLICATION"}. Use [] when no additional business rule exists.
+
+Valid output example:
+{"requirement_id":"REQ-1.1","constraints":[{"type":"UNIQUE","fields":["traveler.username"],"description":"Username must be unique.","enforcement":"DATABASE"}]}
+Valid empty output example:
+{"requirement_id":"REQ-3.1","constraints":[]}
 """
 
 
@@ -149,30 +273,429 @@ class DatabasePassResult:
     node_states: dict[str, str]
     errors: list[str] = field(default_factory=list)
     cache_paths: dict[str, str] = field(default_factory=dict)
+    pass_artifacts: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
         return not self.errors
 
 
+class DatabaseSchemaState:
+    """Compiler-owned state; semantic passes can mutate it only through apply methods."""
+
+    def __init__(self) -> None:
+        self.entities: dict[str, dict[str, Any]] = {}
+        self.relationships: dict[str, dict[str, Any]] = {}
+        self.constraints: dict[str, dict[str, Any]] = {}
+        self.requirement_entity_links: dict[str, set[str]] = {}
+        self.requirement_field_links: dict[str, set[str]] = {}
+        self.requirement_relationship_links: dict[str, set[str]] = {}
+        self.requirement_constraint_links: dict[str, set[str]] = {}
+        self.unresolved: list[dict[str, str]] = []
+
+    def entity_headers(self) -> list[dict[str, str]]:
+        return [{"key": item["key"], "description": item["description"]} for item in self._ordered_entities()]
+
+    def ensure_requirement(self, requirement_id: str) -> None:
+        """Retain traceability even when a requirement needs no persistent data."""
+
+        self.requirement_entity_links.setdefault(requirement_id, set())
+
+    def related_entity_keys(self, requirement_id: str) -> list[str]:
+        return sorted(self.requirement_entity_links.get(requirement_id, set()))
+
+    def schema_slice(self, requirement_id: str) -> dict[str, Any]:
+        keys = set(self.related_entity_keys(requirement_id))
+        return {
+            "entities": [self._public_entity(self.entities[key]) for key in sorted(keys)],
+            "relationships": [copy.deepcopy(item) for item in self.relationships.values() if item["parent"] in keys and item["child"] in keys],
+            "constraints": [copy.deepcopy(item) for item in self.constraints.values() if requirement_id in item["requirement_ids"]],
+        }
+
+    def for_requirement(self, requirement_id: str) -> dict[str, Any]:
+        """Return the complete schema projection traceable to one requirement."""
+
+        return schema_for_requirement(self.to_schema(status="PROPOSED"), requirement_id)
+
+    def apply_entities(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
+        for raw_key in decision.get("reuse_entities", []):
+            key = _normalize_identifier(str(raw_key))
+            if key not in self.entities:
+                errors.append(_format_error("ARC2211", f"Pass 1 reuses an unknown entity: {raw_key}.", node_id=requirement_id))
+            else:
+                self._link_entity(requirement_id, key)
+        for raw in decision.get("new_entities", []):
+            key = _normalize_identifier(str(raw.get("key", "")))
+            if not IDENTIFIER_PATTERN.fullmatch(key):
+                errors.append(_format_error("ARC2212", f"Pass 1 emitted an invalid entity key: {raw.get('key')}.", node_id=requirement_id))
+                continue
+            if key not in self.entities:
+                self.entities[key] = {
+                    "key": key, "table": key, "description": str(raw.get("description", "")).strip(),
+                    "requirement_ids": [], "fields": {}, "relations": {},
+                }
+                self._add_field(key, {
+                    "name": "id", "type": "uuid", "nullable": False,
+                    "description": "Compiler-provided stable primary key.", "properties": {"format": "uuid"},
+                    "origin": "SYSTEM", "references": None,
+                }, requirement_id, errors, trace=False)
+            self._link_entity(requirement_id, key)
+        for item in decision.get("unresolved_entities", []):
+            candidates = ", ".join(str(value) for value in item.get("candidate_entities", []))
+            self._record_unresolved(
+                "UNRESOLVED_ENTITY",
+                requirement_id,
+                f"{item.get('concept', '')}: {item.get('reason', '')} (candidates: {candidates})",
+            )
+
+    def apply_fields(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
+        related = set(self.related_entity_keys(requirement_id))
+        seen: set[str] = set()
+        for item in decision.get("entities", []):
+            key = _normalize_identifier(str(item.get("entity", "")))
+            if key not in related:
+                errors.append(_format_error("ARC2221", f"Pass 2 references an entity outside its requirement slice: {key}.", node_id=requirement_id))
+                continue
+            # Structured model output can repeat an entity or split its fields
+            # across several entries. Applying every fragment is deterministic:
+            # reuse links are sets and _add_field rejects incompatible declarations.
+            seen.add(key)
+            for raw_name in item.get("reuse_fields", []):
+                name = _normalize_identifier(str(raw_name))
+                if name not in self.entities[key]["fields"]:
+                    errors.append(_format_error("ARC2223", f"Pass 2 reuses an unknown field: {key}.{name}.", node_id=requirement_id))
+                else:
+                    self._link_field(requirement_id, key, name)
+            for raw_field in item.get("new_fields", []):
+                name = _normalize_identifier(str(raw_field.get("name", "")))
+                if name == "id" or name.endswith("_id"):
+                    errors.append(_format_error("ARC2224", f"Pass 2 cannot create system or foreign-key field: {key}.{name}.", node_id=requirement_id))
+                    continue
+                self._add_field(key, {
+                    "name": name, "type": raw_field.get("type"), "nullable": raw_field.get("nullable"),
+                    "description": str(raw_field.get("description", "")).strip(),
+                    "properties": _compact_properties(raw_field.get("properties", {})),
+                    "origin": "REQUIREMENT", "references": None,
+                }, requirement_id, errors)
+        if related - seen:
+            errors.append(_format_error("ARC2225", "Pass 2 omitted related entities: " + ", ".join(sorted(related - seen)) + ".", node_id=requirement_id))
+
+    def apply_relationships(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
+        related = set(self.related_entity_keys(requirement_id))
+        for raw in decision.get("relationships", []):
+            parent = _normalize_identifier(str(raw.get("parent", "")))
+            child = _normalize_identifier(str(raw.get("child", "")))
+            relationship_type = str(raw.get("type", ""))
+            if parent not in related or child not in related or parent == child:
+                errors.append(_format_error("ARC2231", f"Pass 3 relationship is outside its requirement slice: {parent} -> {child}.", node_id=requirement_id))
+                continue
+            if relationship_type not in RELATIONSHIP_TYPES:
+                errors.append(_format_error("ARC2232", f"Pass 3 emitted invalid cardinality: {relationship_type}.", node_id=requirement_id))
+                continue
+            conflict = next((item for item in self.relationships.values() if item["parent"] == parent and item["child"] == child and item["type"] != relationship_type), None)
+            if conflict:
+                errors.append(_format_error("ARC2233", f"Conflicting relationship cardinality: {parent} -> {child}.", node_id=requirement_id))
+                continue
+            relationship_id = _relationship_id(parent, child, relationship_type)
+            relationship = self.relationships.get(relationship_id)
+            if relationship is None:
+                relationship = {
+                    "id": relationship_id, "parent": parent, "child": child, "type": relationship_type,
+                    "child_required": bool(raw.get("child_required")), "description": str(raw.get("description", "")).strip(),
+                    "fk_entity": None, "fk_field": None, "association_entity": None, "requirement_ids": [],
+                }
+                self.relationships[relationship_id] = relationship
+                self._lower_relationship(relationship, requirement_id, errors)
+            else:
+                relationship["child_required"] = relationship["child_required"] or bool(raw.get("child_required"))
+                if relationship["fk_entity"] and relationship["fk_field"]:
+                    fk_entity, fk_field = relationship["fk_entity"], relationship["fk_field"]
+                    field_item = self.entities[fk_entity]["fields"][fk_field]
+                    field_item["nullable"] = not relationship["child_required"]
+                    field_item["required"] = relationship["child_required"]
+                    self._link_field(requirement_id, fk_entity, fk_field)
+                    relation = self.entities[fk_entity]["relations"][parent]
+                    relation["required"] = relationship["child_required"]
+                    _append_unique(relation["sources"], requirement_id)
+                if relationship["association_entity"]:
+                    association = relationship["association_entity"]
+                    self._link_entity(requirement_id, association)
+                    for target in (parent, child):
+                        self._link_field(requirement_id, association, f"{target}_id")
+            _append_unique(relationship["requirement_ids"], requirement_id)
+            self.requirement_relationship_links.setdefault(requirement_id, set()).add(relationship_id)
+        for item in decision.get("unresolved_relationships", []):
+            entities = " -> ".join(str(value) for value in item.get("entities", []))
+            candidates = ", ".join(str(value) for value in item.get("candidate_types", []))
+            self._record_unresolved(
+                "UNRESOLVED_RELATIONSHIP",
+                requirement_id,
+                f"{entities}: {item.get('reason', '')} (candidate types: {candidates})",
+            )
+
+    def apply_constraints(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
+        allowed = set(self.related_entity_keys(requirement_id))
+        for raw in decision.get("constraints", []):
+            constraint_type = str(raw.get("type", ""))
+            enforcement = str(raw.get("enforcement", ""))
+            fields = [str(value) for value in raw.get("fields", [])]
+            if constraint_type not in {"UNIQUE", "COMPOSITE_UNIQUE", "CHECK", "APPLICATION_RULE"}:
+                errors.append(_format_error("ARC2241", f"Invalid Pass 4 constraint type: {constraint_type}.", node_id=requirement_id))
+            elif enforcement not in ENFORCEMENT_VALUES or (constraint_type == "APPLICATION_RULE" and enforcement != "APPLICATION"):
+                errors.append(_format_error("ARC2242", f"Invalid constraint enforcement: {enforcement}.", node_id=requirement_id))
+            elif not fields or any(not self._field_exists(ref) for ref in fields):
+                errors.append(_format_error("ARC2243", "Pass 4 constraint references an unknown field.", node_id=requirement_id))
+            elif any(ref.partition(".")[0] not in allowed for ref in fields):
+                errors.append(_format_error("ARC2244", "Pass 4 constraint is outside its requirement slice.", node_id=requirement_id))
+            else:
+                self._add_constraint(constraint_type, fields, str(raw.get("description", "")).strip(), enforcement, requirement_id, origin="REQUIREMENT")
+
+    def add_static_constraints(self) -> None:
+        """Lower structural facts to constraints without an LLM call."""
+
+        for entity in self._ordered_entities():
+            for field_item in entity["fields"].values():
+                ref = f"{entity['key']}.{field_item['name']}"
+                for source in field_item["requirement_ids"] or ["SYSTEM"]:
+                    if field_item.get("primary_key"):
+                        self._add_constraint("PRIMARY_KEY", [ref], "Entity primary key.", "DATABASE", source, origin="SYSTEM")
+                    if not field_item["nullable"]:
+                        self._add_constraint("NOT_NULL", [ref], "Field is required.", "DATABASE", source, origin=field_item["origin"])
+                    if field_item.get("references"):
+                        self._add_constraint(
+                            "FOREIGN_KEY", [ref, field_item["references"]], "Relationship foreign key.",
+                            "DATABASE", source, origin="RELATIONSHIP",
+                        )
+                    for kind, value in sorted(field_item.get("properties", {}).items()):
+                        if kind == "default":
+                            continue
+                        self._add_constraint(
+                            "CHECK", [ref], f"{kind}={json.dumps(value, ensure_ascii=False, sort_keys=True)}",
+                            "APPLICATION" if kind == "format" else "DATABASE", source, origin=field_item["origin"],
+                        )
+        for relationship in self.relationships.values():
+            if relationship["type"] == "ONE_TO_ONE" and relationship["fk_entity"] and relationship["fk_field"]:
+                for source in relationship["requirement_ids"] or ["SYSTEM"]:
+                    self._add_constraint(
+                        "UNIQUE", [f"{relationship['fk_entity']}.{relationship['fk_field']}"],
+                        "One-to-one relationship.", "DATABASE", source, origin="RELATIONSHIP",
+                    )
+            if relationship["type"] == "MANY_TO_MANY" and relationship["association_entity"]:
+                association = relationship["association_entity"]
+                fields = [
+                    f"{association}.{relationship['parent']}_id",
+                    f"{association}.{relationship['child']}_id",
+                ]
+                for source in relationship["requirement_ids"] or ["SYSTEM"]:
+                    self._add_constraint(
+                        "COMPOSITE_UNIQUE", fields, "Association pair must be unique.",
+                        "DATABASE", source, origin="RELATIONSHIP",
+                    )
+
+    def to_schema(self, *, status: str) -> dict[str, Any]:
+        requirement_ids = (
+            set(self.requirement_entity_links)
+            | set(self.requirement_field_links)
+            | set(self.requirement_relationship_links)
+            | set(self.requirement_constraint_links)
+        )
+        traceability = {
+            requirement_id: {
+                "entities": sorted(self.requirement_entity_links.get(requirement_id, set())),
+                "fields": sorted(self.requirement_field_links.get(requirement_id, set())),
+                "relationships": sorted(self.requirement_relationship_links.get(requirement_id, set())),
+                "constraints": sorted(self.requirement_constraint_links.get(requirement_id, set())),
+            }
+            for requirement_id in sorted(requirement_ids)
+        }
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "status": status,
+            "entities": [self._public_entity(item) for item in self._ordered_entities()],
+            "relationships": [copy.deepcopy(self.relationships[key]) for key in sorted(self.relationships)],
+            "constraints": [copy.deepcopy(self.constraints[key]) for key in sorted(self.constraints)],
+            "traceability": {"requirements": traceability},
+            "unresolved": copy.deepcopy(self.unresolved),
+        }
+
+    def _ordered_entities(self) -> list[dict[str, Any]]:
+        return [self.entities[key] for key in sorted(self.entities)]
+
+    def _public_entity(self, entity: dict[str, Any]) -> dict[str, Any]:
+        fields = [copy.deepcopy(entity["fields"][name]) for name in sorted(entity["fields"])]
+        indexes: list[dict[str, Any]] = []
+        for constraint in self.constraints.values():
+            refs = constraint["fields"]
+            if constraint["type"] in {"UNIQUE", "COMPOSITE_UNIQUE"} and refs and all(
+                ref.startswith(f"{entity['key']}.") for ref in refs
+            ):
+                indexes.append({
+                    "fields": [ref.partition(".")[2] for ref in refs],
+                    "unique": True,
+                    "sources": list(constraint["requirement_ids"]),
+                })
+        checks: list[dict[str, Any]] = []
+        for field_item in fields:
+            for kind, value in field_item.get("properties", {}).items():
+                if kind in CHECK_KINDS:
+                    checks.append({
+                        "field": field_item["name"], "kind": kind, "value": str(value),
+                        "sources": list(field_item["requirement_ids"]),
+                    })
+        return {
+            "key": entity["key"], "name": entity["key"], "table": entity["table"],
+            "description": entity["description"],
+            "sources": list(entity["requirement_ids"]), "requirement_ids": list(entity["requirement_ids"]),
+            "fields": fields,
+            # Nested logical relations retain the Stage 2 database-slice contract.
+            "relations": [copy.deepcopy(entity["relations"][name]) for name in sorted(entity["relations"])],
+            "indexes": sorted(indexes, key=lambda item: item["fields"]),
+            "checks": sorted(checks, key=lambda item: (item["field"], item["kind"], item["value"])),
+        }
+
+    def _link_entity(self, requirement_id: str, key: str) -> None:
+        _append_unique(self.entities[key]["requirement_ids"], requirement_id)
+        self.requirement_entity_links.setdefault(requirement_id, set()).add(key)
+
+    def _link_field(self, requirement_id: str, entity_key: str, field_name: str) -> None:
+        field_item = self.entities[entity_key]["fields"][field_name]
+        _append_unique(field_item["requirement_ids"], requirement_id)
+        _append_unique(field_item["sources"], requirement_id)
+        self.requirement_field_links.setdefault(requirement_id, set()).add(f"{entity_key}.{field_name}")
+
+    def _add_field(
+        self,
+        entity_key: str,
+        raw: dict[str, Any],
+        requirement_id: str,
+        errors: list[str],
+        *,
+        trace: bool = True,
+    ) -> None:
+        name = _normalize_identifier(str(raw.get("name", "")))
+        field_type = str(raw.get("type", ""))
+        if not IDENTIFIER_PATTERN.fullmatch(name) or field_type not in FIELD_TYPES or not isinstance(raw.get("nullable"), bool):
+            errors.append(_format_error("ARC2226", f"Invalid field declaration: {entity_key}.{name}.", node_id=requirement_id))
+            return
+        existing = self.entities[entity_key]["fields"].get(name)
+        if existing is not None:
+            if existing["type"] != field_type or existing.get("references") != raw.get("references"):
+                errors.append(_format_error("ARC2227", f"Conflicting field declaration: {entity_key}.{name}.", node_id=requirement_id))
+                return
+            existing["nullable"] = existing["nullable"] and bool(raw["nullable"])
+            existing["required"] = not existing["nullable"]
+            _merge_properties(existing["properties"], raw.get("properties", {}), entity_key, name, requirement_id, errors)
+        else:
+            existing = {
+                "name": name,
+                "type": field_type,
+                "logical_type": field_type,
+                "nullable": bool(raw["nullable"]),
+                "required": not bool(raw["nullable"]),
+                "unique": name == "id",
+                "case_insensitive": False,
+                "primary_key": name == "id",
+                "description": str(raw.get("description", "")).strip(),
+                "properties": copy.deepcopy(raw.get("properties", {})),
+                "origin": str(raw.get("origin", "REQUIREMENT")),
+                "references": raw.get("references"),
+                "requirement_ids": [],
+                "sources": [],
+            }
+            self.entities[entity_key]["fields"][name] = existing
+        if requirement_id != "SYSTEM":
+            _append_unique(existing["requirement_ids"], requirement_id)
+            _append_unique(existing["sources"], requirement_id)
+            if trace:
+                self.requirement_field_links.setdefault(requirement_id, set()).add(f"{entity_key}.{name}")
+
+    def _lower_relationship(self, relationship: dict[str, Any], requirement_id: str, errors: list[str]) -> None:
+        parent, child = relationship["parent"], relationship["child"]
+        if relationship["type"] in {"ONE_TO_MANY", "ONE_TO_ONE"}:
+            field_name = f"{parent}_id"
+            relationship.update({"fk_entity": child, "fk_field": field_name})
+            self._add_field(child, {
+                "name": field_name, "type": "foreign_key", "nullable": not relationship["child_required"],
+                "description": f"Reference to {parent}.", "properties": {}, "origin": "RELATIONSHIP",
+                "references": f"{parent}.id",
+            }, requirement_id, errors)
+            self.entities[child]["relations"][parent] = {
+                "name": parent, "target_entity": parent,
+                "cardinality": "ONE_TO_ONE" if relationship["type"] == "ONE_TO_ONE" else "MANY_TO_ONE",
+                "required": relationship["child_required"], "fk_field": field_name, "sources": [requirement_id],
+            }
+            return
+
+        association = _association_entity_key(parent, child)
+        relationship["association_entity"] = association
+        if association not in self.entities:
+            self.entities[association] = {
+                "key": association, "table": association, "description": f"Association between {parent} and {child}.",
+                "requirement_ids": [], "fields": {}, "relations": {},
+            }
+            self._add_field(association, {
+                "name": "id", "type": "uuid", "nullable": False,
+                "description": "Compiler-provided stable primary key.", "properties": {"format": "uuid"},
+                "origin": "SYSTEM", "references": None,
+            }, requirement_id, errors, trace=False)
+        self._link_entity(requirement_id, association)
+        for target in (parent, child):
+            name = f"{target}_id"
+            self._add_field(association, {
+                "name": name, "type": "foreign_key", "nullable": False, "description": f"Reference to {target}.",
+                "properties": {}, "origin": "RELATIONSHIP", "references": f"{target}.id",
+            }, requirement_id, errors)
+            self.entities[association]["relations"][target] = {
+                "name": target, "target_entity": target, "cardinality": "MANY_TO_ONE", "required": True,
+                "fk_field": name, "sources": [requirement_id],
+            }
+        self._add_constraint(
+            "COMPOSITE_UNIQUE", [f"{association}.{parent}_id", f"{association}.{child}_id"],
+            "Association pair must be unique.", "DATABASE", requirement_id, origin="RELATIONSHIP",
+        )
+
+    def _add_constraint(
+        self,
+        constraint_type: str,
+        fields: list[str],
+        description: str,
+        enforcement: str,
+        requirement_id: str,
+        *,
+        origin: str,
+    ) -> None:
+        identity = {"type": constraint_type, "fields": fields, "enforcement": enforcement, "description": description}
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:12]
+        constraint_id = f"constraint_{constraint_type.lower()}_{digest}"
+        constraint = self.constraints.setdefault(constraint_id, {
+            "id": constraint_id, "type": constraint_type, "fields": list(fields), "description": description,
+            "enforcement": enforcement, "origin": origin, "requirement_ids": [], "sources": [],
+        })
+        if requirement_id != "SYSTEM":
+            _append_unique(constraint["requirement_ids"], requirement_id)
+            _append_unique(constraint["sources"], requirement_id)
+            self.requirement_constraint_links.setdefault(requirement_id, set()).add(constraint_id)
+
+    def _field_exists(self, reference: str) -> bool:
+        entity, separator, name = reference.partition(".")
+        return bool(separator and entity in self.entities and name in self.entities[entity]["fields"])
+
+    def _record_unresolved(self, kind: str, requirement_id: str, description: str) -> None:
+        self.unresolved.append({"kind": kind, "requirement_id": requirement_id, "description": description})
+
+
 class DatabaseSchemaPass:
-    """Discover per-node facts and deterministically reduce them into one schema."""
+    """Compile an ER-oriented schema through four isolated semantic passes."""
 
     def __init__(self, model: StructuredModel, artifact_root: Path) -> None:
         self._model = model
         self._artifact_root = artifact_root.expanduser().resolve()
+        self._database_root = self._artifact_root.parent / "database"
         self._log = SynchronousLog("DatabaseSchemaPass", workspace_root=self._artifact_root.parents[1])
-        retry_text = os.environ.get("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", "2")
-        try:
-            self._retry_count = max(0, min(int(retry_text), 10))
-        except ValueError:
-            self._retry_count = 2
-        batch_size_text = os.environ.get("ARC_DATABASE_BATCH_SIZE", "8")
-        try:
-            self._batch_size = max(1, min(int(batch_size_text), 32))
-        except ValueError:
-            self._batch_size = 8
+        self._retry_count = _bounded_env_int("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", 2, 0, 10)
         self._trace_enabled = _enabled_env_flag("ARC_DATABASE_TRACE", default=True)
+        self._model_trace_files = _enabled_env_flag("ARC_MODEL_TRACE_FILES", default=False)
+        self._trace_run_id = str(time.time_ns())
 
     def compile(
         self,
@@ -182,588 +705,1113 @@ class DatabaseSchemaPass:
         resume: bool = False,
     ) -> DatabasePassResult:
         nodes = requirement_ir.get("nodes", {})
-        waves = _ordered_waves(
-            requirement_ir.get("atomic_units", []),
-            dependency_graph or {},
-        )
+        requirements = [
+            node_id
+            for wave in _ordered_waves(requirement_ir.get("atomic_units", []), dependency_graph or {})
+            for node_id in wave
+        ]
         effective_dependencies = (dependency_graph or {}).get("atomic_dependencies", {})
+        states = {node_id: "DISCOVERED" for node_id in requirements}
         errors: list[str] = []
-        node_states: dict[str, str] = {}
         cache_paths: dict[str, str] = {}
-        accumulator = _SchemaAccumulator(errors, self._trace)
-
-        for wave in waves:
-            analysis_nodes: list[dict[str, Any]] = []
-            for node_id in wave:
+        pass_artifacts: dict[str, str] = {}
+        state = DatabaseSchemaState()
+        for node_id in requirements:
+            state.ensure_requirement(node_id)
+        passes: list[tuple[str, str, str, dict[str, Any], str, Callable[..., None]]] = [
+            ("pass1_entities", ENTITY_PROMPT_VERSION, "arc_database_entities", ENTITY_DECISION_SCHEMA, ENTITY_INSTRUCTIONS, state.apply_entities),
+            ("pass2_fields", FIELD_PROMPT_VERSION, "arc_database_fields", FIELD_DECISION_SCHEMA, FIELD_INSTRUCTIONS, state.apply_fields),
+            ("pass3_relationships", RELATIONSHIP_PROMPT_VERSION, "arc_database_relationships", RELATIONSHIP_DECISION_SCHEMA, RELATIONSHIP_INSTRUCTIONS, state.apply_relationships),
+            ("pass4_constraints", CONSTRAINT_PROMPT_VERSION, "arc_database_constraints", CONSTRAINT_DECISION_SCHEMA, CONSTRAINT_INSTRUCTIONS, state.apply_constraints),
+        ]
+        for phase, prompt_version, schema_name, output_schema, instructions, apply_decision in passes:
+            self._trace(f"PASS_START phase={phase} requirements={len(requirements)}")
+            for node_id in requirements:
                 node = nodes.get(node_id)
                 if not isinstance(node, dict):
                     errors.append(_format_error("ARC2101", "Atomic requirement is missing from Requirement IR.", node_id=node_id))
-                    node_states[node_id] = "FAILED"
+                    states[node_id] = "FAILED"
+                    break
+                if phase == "pass3_relationships" and len(state.related_entity_keys(node_id)) < 2:
+                    states[node_id] = "RELATIONSHIPS_RESOLVED"
                     continue
-                analysis_node = dict(node)
-                analysis_node["dependencies"] = effective_dependencies.get(
-                    node_id,
-                    node.get("dependencies", []),
+                decision = self._run_unit(
+                    phase=phase,
+                    prompt_version=prompt_version,
+                    schema_name=schema_name,
+                    output_schema=output_schema,
+                    instructions=instructions,
+                    node_id=node_id,
+                    context=self._context_for(
+                        phase, node_id, node, nodes, state, effective_dependencies
+                    ),
+                    resume=resume,
+                    errors=errors,
+                    cache_paths=cache_paths,
                 )
-                analysis_nodes.append(analysis_node)
+                if decision is None:
+                    states[node_id] = "FAILED"
+                    break
+                before = len(errors)
+                apply_decision(node_id, decision, errors)
+                if len(errors) != before:
+                    states[node_id] = "FAILED"
+                    break
+                states[node_id] = {
+                    "pass1_entities": "ENTITIES_DISCOVERED",
+                    "pass2_fields": "FIELDS_DISCOVERED",
+                    "pass3_relationships": "RELATIONSHIPS_RESOLVED",
+                    "pass4_constraints": "CONSTRAINTS_RESOLVED",
+                }[phase]
+                self._trace(
+                    f"DECISION_APPLIED phase={phase} requirement={node_id} "
+                    f"state={states[node_id]}"
+                )
+            if phase == "pass4_constraints" and not errors:
+                state.add_static_constraints()
+            pass_artifacts[phase] = self._write_pass_artifact(phase, state)
+            self._trace(f"PASS_COMPLETED phase={phase} requirements={len(requirements)}")
+            if errors:
+                return DatabasePassResult(
+                    state.to_schema(status="PROPOSED"), states, errors, cache_paths, pass_artifacts
+                )
 
-            known_entities = sorted({
-                entity
-                for node in analysis_nodes
-                for entity in accumulator.known_entities_for(node)
-            })
-            wave_results: dict[str, dict[str, Any]] = {}
-            for batch in _batches(analysis_nodes, self._batch_size):
-                requirement_ids = [str(node["id"]) for node in batch]
-                context = {
-                    "known_entities": known_entities,
-                    "requirements": [self._node_context(node, nodes) for node in batch],
-                }
-                input_hash = _stable_hash({"prompt_version": PROMPT_VERSION, "context": context})
-                cache_path = self._cache_path(requirement_ids)
-                for node_id in requirement_ids:
-                    cache_paths[node_id] = str(cache_path)
-                facts_by_node = self._read_cached_facts(cache_path, input_hash, requirement_ids) if resume else None
-                if facts_by_node is not None:
-                    self._trace(
-                        "CACHE_HIT "
-                        f"batch={','.join(requirement_ids)} path={cache_path.name}"
-                    )
-                if facts_by_node is None:
-                    facts_by_node = self._generate_facts(requirement_ids, context, errors)
-                    if facts_by_node is not None:
-                        write_json_atomic(
-                            cache_path,
-                            {
-                                "schema_version": 1,
-                                "prompt_version": PROMPT_VERSION,
-                                "input_sha256": input_hash,
-                                "items": [facts_by_node[node_id] for node_id in requirement_ids],
-                            },
-                        )
-                if facts_by_node is None:
-                    node_states.update({node_id: "FAILED" for node_id in requirement_ids})
-                    continue
-                wave_results.update(facts_by_node)
-
-            for node_id in sorted(wave_results):
-                before_errors = len(errors)
-                accumulator.apply(node_id, wave_results[node_id])
-                node_states[node_id] = "FAILED" if len(errors) > before_errors else "SCHEMA_ANALYZED"
-
-        schema = accumulator.finish()
+        # Idempotent: Pass 4's checkpoint and the final schema contain the
+        # same compiler-derived structural constraints.
+        state.add_static_constraints()
+        schema = state.to_schema(status="RESOLVED")
+        errors.extend(validate_database_schema(schema, expected_requirement_ids=set(requirements)))
+        errors.extend(
+            _format_error("ARC2250", f"Unresolved schema decision: {item['description']}", node_id=item["requirement_id"])
+            for item in state.unresolved
+        )
         schema["status"] = "RESOLVED" if not errors else "PROPOSED"
-        return DatabasePassResult(schema, node_states, errors, cache_paths)
+        states.update({node_id: "SCHEMA_ANALYZED" if not errors else "FAILED" for node_id in requirements})
+        return DatabasePassResult(schema, states, errors, cache_paths, pass_artifacts)
 
-    def _generate_facts(
+    def _context_for(
         self,
-        requirement_ids: list[str],
+        phase: str,
+        node_id: str,
+        node: dict[str, Any],
+        nodes: dict[str, Any],
+        state: DatabaseSchemaState,
+        effective_dependencies: dict[str, Any],
+    ) -> dict[str, Any]:
+        requirement = _node_context(
+            node,
+            nodes,
+            effective_dependencies.get(node_id, node.get("dependencies", [])),
+        )
+        if phase == "pass1_entities":
+            return {"requirement": requirement, "existing_entities": state.entity_headers()}
+        if phase == "pass2_fields":
+            return {"requirement": requirement, "related_entities": state.schema_slice(node_id)["entities"]}
+        if phase == "pass3_relationships":
+            schema_slice = state.schema_slice(node_id)
+            return {
+                "requirement": requirement,
+                "related_entities": schema_slice["entities"],
+                "existing_relationships": schema_slice["relationships"],
+            }
+        return {"requirement": requirement, "schema": state.schema_slice(node_id)}
+
+    def _run_unit(
+        self,
+        *,
+        phase: str,
+        prompt_version: str,
+        schema_name: str,
+        output_schema: dict[str, Any],
+        instructions: str,
+        node_id: str,
         context: dict[str, Any],
+        resume: bool,
         errors: list[str],
-    ) -> dict[str, dict[str, Any]] | None:
-        validation_feedback: list[str] = []
+        cache_paths: dict[str, str],
+    ) -> dict[str, Any] | None:
+        input_hash = _stable_hash({"prompt_version": prompt_version, "context": context})
+        cache_path = self._database_root / "decisions" / phase / f"{_safe_name(node_id)}.json"
+        cache_paths[f"{phase}:{node_id}"] = str(cache_path)
+        cached_feedback: list[str] = []
+        if resume:
+            cached = read_json(cache_path, {})
+            decision = cached.get("decision")
+            decision, normalization_notes = _normalize_decision_context(phase, decision, context)
+            for note in normalization_notes:
+                self._trace(f"CACHE_NORMALIZED phase={phase} requirement={node_id} action={note}")
+            cached_errors = _validate_decision_shape(phase, node_id, decision)
+            cached_errors.extend(_validate_decision_context(phase, decision, context))
+            if cached.get("input_sha256") == input_hash and not cached_errors:
+                self._trace(f"CACHE_HIT phase={phase} requirement={node_id}")
+                return decision
+            if cached.get("input_sha256") == input_hash and cached_errors:
+                cached_feedback = cached_errors
+                self._trace(
+                    f"CACHE_REJECTED phase={phase} requirement={node_id} "
+                    f"errors={'; '.join(cached_errors)}"
+                )
+
+        feedback: list[str] = cached_feedback
         for attempt in range(self._retry_count + 1):
-            request_payload = dict(context)
-            if validation_feedback:
-                request_payload["previous_validation_errors"] = validation_feedback
+            payload = copy.deepcopy(context)
+            if feedback:
+                payload["previous_validation_errors"] = feedback
+            trace_path = self._database_root / "model_traces" / phase / (
+                f"{_safe_name(node_id)}-{self._trace_run_id}-attempt-{attempt + 1}.json"
+            )
+            trace = {
+                "schema_version": 1,
+                "phase": phase,
+                "requirement_id": node_id,
+                "attempt": attempt + 1,
+                "prompt_version": prompt_version,
+                "input_payload": payload,
+                "output_schema": output_schema,
+                "status": "REQUESTED",
+            }
+            self._write_trace(trace_path, trace)
+            started_at = time.monotonic()
             self._trace(
-                "MODEL_CALL "
-                f"attempt={attempt + 1}/{self._retry_count + 1} "
-                f"batch={','.join(requirement_ids)} "
-                f"known_entities={','.join(context.get('known_entities', [])) or '-'}"
+                f"MODEL_REQUEST phase={phase} requirement={node_id} "
+                f"attempt={attempt + 1}/{self._retry_count + 1} schema={schema_name}"
+            )
+            self._trace(
+                f"MODEL_INPUT phase={phase} requirement={node_id} attempt={attempt + 1}\n"
+                + json.dumps(
+                    {
+                        "schema_name": schema_name,
+                        "instructions": instructions,
+                        "input_payload": payload,
+                        "output_schema": output_schema,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
             )
             try:
-                payload = self._model.generate_json(
-                    schema_name="arc_database_facts",
-                    instructions=DATABASE_FACT_INSTRUCTIONS,
-                    input_payload=request_payload,
-                    output_schema=DATABASE_FACTS_SCHEMA,
+                decision = self._model.generate_json(
+                    schema_name=schema_name,
+                    instructions=instructions,
+                    input_payload=payload,
+                    output_schema=output_schema,
                 )
             except Exception as exc:
-                validation_feedback = [f"Model call failed: {describe_model_error(exc)}"]
-                self._trace("MODEL_ERROR " + validation_feedback[0])
-                if attempt >= self._retry_count:
-                    errors.append(
-                        _format_error(
-                            "ARC2102",
-                            validation_feedback[0],
-                            node_id=", ".join(requirement_ids),
-                        )
-                    )
-                    return None
-                continue
-            self._trace_json(
-                "MODEL_RESULT "
-                f"attempt={attempt + 1} batch={','.join(requirement_ids)}",
-                payload,
-            )
-            validation_feedback = _validate_batch_payload(requirement_ids, payload)
-            if not validation_feedback:
-                return {item["requirement_id"]: item for item in payload["items"]}
-            self._trace("MODEL_VALIDATION_ERROR " + "; ".join(validation_feedback))
-            if attempt >= self._retry_count:
-                errors.append(
-                    _format_error(
-                        "ARC2103",
-                        "Invalid database facts: " + "; ".join(validation_feedback),
-                    )
+                duration_ms = round((time.monotonic() - started_at) * 1000)
+                feedback = [f"Model call failed: {describe_model_error(exc)}"]
+                trace.update({"status": "TRANSPORT_ERROR", "error": feedback[0]})
+                self._trace(
+                    f"MODEL_ERROR phase={phase} requirement={node_id} "
+                    f"attempt={attempt + 1} duration_ms={duration_ms} error={feedback[0]}"
                 )
-                return None
+            else:
+                duration_ms = round((time.monotonic() - started_at) * 1000)
+                self._trace(
+                    f"MODEL_OUTPUT phase={phase} requirement={node_id} "
+                    f"attempt={attempt + 1} duration_ms={duration_ms}\n"
+                    + json.dumps(decision, ensure_ascii=False, indent=2, sort_keys=True)
+                )
+                decision, normalization_notes = _normalize_decision_context(
+                    phase, decision, context
+                )
+                for note in normalization_notes:
+                    self._trace(
+                        f"MODEL_NORMALIZED phase={phase} requirement={node_id} "
+                        f"action={note}"
+                    )
+                feedback = _validate_decision_shape(phase, node_id, decision)
+                feedback.extend(_validate_decision_context(phase, decision, context))
+                trace.update({
+                    "status": "VALIDATION_ERROR" if feedback else "ACCEPTED",
+                    "output": decision,
+                    "validation_errors": feedback,
+                })
+                if not feedback:
+                    write_json_atomic(cache_path, {
+                        "schema_version": 1,
+                        "prompt_version": prompt_version,
+                        "input_sha256": input_hash,
+                        "decision": decision,
+                    })
+                    self._write_trace(trace_path, trace)
+                    self._trace(
+                        f"MODEL_ACCEPTED phase={phase} requirement={node_id} "
+                        f"attempt={attempt + 1} duration_ms={duration_ms}"
+                    )
+                    return decision
+            self._write_trace(trace_path, trace)
+            self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
+        errors.append(_format_error("ARC2103", f"{phase} failed: {'; '.join(feedback)}", node_id=node_id))
         return None
+
+    def _write_pass_artifact(self, phase: str, state: DatabaseSchemaState) -> str:
+        path = self._database_root / f"{phase}.json"
+        write_json_atomic(path, state.to_schema(status="PROPOSED"))
+        return str(path)
+
+    def _write_trace(self, path: Path, payload: dict[str, Any]) -> None:
+        if self._model_trace_files:
+            write_json_atomic(path, payload)
 
     def _trace(self, message: str) -> None:
         if self._trace_enabled:
             self._log.info(message)
 
-    def _trace_json(self, heading: str, payload: dict[str, Any]) -> None:
-        if self._trace_enabled:
-            self._log.info(heading + "\n" + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
-    @staticmethod
-    def _node_context(
-        node: dict[str, Any],
-        nodes: dict[str, Any],
-    ) -> dict[str, Any]:
-        ancestors: list[dict[str, str]] = []
-        parent_id = node.get("parent_id")
-        while isinstance(parent_id, str) and parent_id:
-            parent = nodes.get(parent_id)
-            if not isinstance(parent, dict):
-                break
-            ancestors.append(
-                {
-                    "id": parent_id,
-                    "name": str(parent.get("name", "")),
-                    "description": str(parent.get("description", "")),
-                }
+def schema_for_requirement(schema: dict[str, Any], requirement_id: str) -> dict[str, Any]:
+    """Query final Schema IR through its explicit requirement traceability index."""
+
+    traceability = schema.get("traceability", {}).get("requirements", {})
+    links = traceability.get(requirement_id, {}) if isinstance(traceability, dict) else {}
+    entity_keys = set(links.get("entities", []))
+    field_refs = set(links.get("fields", []))
+    relationship_ids = set(links.get("relationships", []))
+    constraint_ids = set(links.get("constraints", []))
+    fields: list[dict[str, Any]] = []
+    for entity in schema.get("entities", []):
+        entity_key = str(entity.get("key", ""))
+        for field_item in entity.get("fields", []):
+            reference = f"{entity_key}.{field_item.get('name', '')}"
+            if reference in field_refs:
+                fields.append({"ref": reference, **copy.deepcopy(field_item)})
+    return {
+        "requirement_id": requirement_id,
+        "entities": [copy.deepcopy(item) for item in schema.get("entities", []) if item.get("key") in entity_keys],
+        "fields": sorted(fields, key=lambda item: item["ref"]),
+        "relationships": [
+            copy.deepcopy(item) for item in schema.get("relationships", []) if item.get("id") in relationship_ids
+        ],
+        "constraints": [
+            copy.deepcopy(item) for item in schema.get("constraints", []) if item.get("id") in constraint_ids
+        ],
+    }
+
+
+def database_structure(schema: dict[str, Any]) -> dict[str, Any]:
+    """Project the internal Schema IR to the compact persisted database structure."""
+
+    entities: list[dict[str, Any]] = []
+    for entity in schema.get("entities", []):
+        fields: list[dict[str, Any]] = []
+        for field_item in entity.get("fields", []):
+            field = {
+                "name": field_item.get("name"),
+                "type": field_item.get("type"),
+                "nullable": field_item.get("nullable"),
+                "description": field_item.get("description", ""),
+                "properties": copy.deepcopy(field_item.get("properties", {})),
+            }
+            if field_item.get("references") is not None:
+                field["references"] = field_item["references"]
+            fields.append(field)
+        entities.append({
+            "key": entity.get("key"),
+            "description": entity.get("description", ""),
+            "fields": fields,
+        })
+
+    relationships = [
+        {
+            key: copy.deepcopy(item[key])
+            for key in (
+                "parent", "child", "type", "child_required", "fk_entity", "fk_field",
+                "association_entity", "description",
             )
-            parent_id = parent.get("parent_id")
-        ancestors.reverse()
-        return {
-            "requirement_id": str(node.get("id", "")),
-            "name": str(node.get("name", "")),
-            "description": str(node.get("description", "")),
-            "scenarios": node.get("scenarios", []),
-            "dependencies": node.get("dependencies", []),
-            "ancestors": ancestors,
+            if item.get(key) is not None
+        }
+        for item in schema.get("relationships", [])
+    ]
+    constraints = [
+        {
+            key: copy.deepcopy(item[key])
+            for key in ("type", "fields", "description", "enforcement")
+            if key in item
+        }
+        for item in schema.get("constraints", [])
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": schema.get("status", "PROPOSED"),
+        "entities": entities,
+        "relationships": relationships,
+        "constraints": constraints,
+    }
+
+
+def database_traceability(schema: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
+    """Project provenance to requirement -> entity -> field names."""
+
+    raw = schema.get("traceability", {}).get("requirements", {})
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, dict[str, list[str]]] = {}
+    for requirement_id, links in sorted(raw.items()):
+        if not isinstance(links, dict):
+            continue
+        entity_fields: dict[str, set[str]] = {
+            str(entity): set() for entity in links.get("entities", [])
+        }
+        for reference in links.get("fields", []):
+            entity, separator, field_name = str(reference).partition(".")
+            if separator and entity and field_name:
+                entity_fields.setdefault(entity, set()).add(field_name)
+        result[str(requirement_id)] = {
+            entity: sorted(fields) for entity, fields in sorted(entity_fields.items())
+        }
+    return result
+
+
+def hydrate_database_schema(
+    structure: dict[str, Any],
+    traceability: dict[str, dict[str, list[str]]],
+) -> dict[str, Any]:
+    """Restore internal compatibility metadata from compact persisted artifacts."""
+
+    schema = copy.deepcopy(structure)
+    field_requirements: dict[str, list[str]] = {}
+    entity_requirements: dict[str, list[str]] = {}
+    internal_links: dict[str, dict[str, list[str]]] = {}
+    for requirement_id, entities in sorted(traceability.items()):
+        if not isinstance(entities, dict):
+            continue
+        fields: list[str] = []
+        for entity_key, names in sorted(entities.items()):
+            entity_requirements.setdefault(entity_key, []).append(requirement_id)
+            for name in names if isinstance(names, list) else []:
+                reference = f"{entity_key}.{name}"
+                fields.append(reference)
+                field_requirements.setdefault(reference, []).append(requirement_id)
+        internal_links[requirement_id] = {
+            "entities": sorted(entities),
+            "fields": sorted(fields),
+            "relationships": [],
+            "constraints": [],
         }
 
-    def _cache_path(self, requirement_ids: list[str]) -> Path:
-        label = "-".join(requirement_ids)
-        safe_label = re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("._")[:48] or "batch"
-        suffix = hashlib.sha256(label.encode("utf-8")).hexdigest()[:10]
-        return self._artifact_root / "database_facts" / f"{safe_label}-{suffix}.json"
-
-    @staticmethod
-    def _read_cached_facts(
-        path: Path,
-        input_hash: str,
-        requirement_ids: list[str],
-    ) -> dict[str, dict[str, Any]] | None:
-        cached = read_json(path, {})
-        payload = {"items": cached.get("items")}
-        if cached.get("input_sha256") != input_hash or _validate_batch_payload(requirement_ids, payload):
-            return None
-        return {item["requirement_id"]: item for item in payload["items"]}
-
-
-class _SchemaAccumulator:
-    def __init__(self, errors: list[str], trace: Callable[[str], None]) -> None:
-        self._entities: dict[str, dict[str, Any]] = {}
-        self._errors = errors
-        self._trace = trace
-
-    @property
-    def entity_keys(self) -> list[str]:
-        return sorted(self._entities)
-
-    def known_entities_for(self, node: dict[str, Any], limit: int = 64) -> list[str]:
-        """Return a bounded symbol slice relevant to one requirement."""
-
-        dependencies = set(node.get("dependencies", []))
-        searchable = " ".join(
-            (
-                str(node.get("name", "")),
-                str(node.get("description", "")),
-                json.dumps(node.get("scenarios", []), ensure_ascii=False),
+    entity_map = {str(item.get("key")): item for item in schema.get("entities", []) if isinstance(item, dict)}
+    for entity_key, entity in entity_map.items():
+        sources = sorted(set(entity_requirements.get(entity_key, [])))
+        entity.update({
+            "name": entity_key,
+            "table": entity_key,
+            "sources": sources,
+            "requirement_ids": sources,
+            "relations": [],
+            "indexes": [],
+            "checks": [],
+        })
+        for field_item in entity.get("fields", []):
+            name = str(field_item.get("name", ""))
+            reference = f"{entity_key}.{name}"
+            field_sources = sorted(set(field_requirements.get(reference, [])))
+            origin = "SYSTEM" if name == "id" else (
+                "RELATIONSHIP" if field_item.get("references") is not None else "REQUIREMENT"
             )
-        ).lower()
-        ranked: list[tuple[int, str]] = []
-        for key, entity in self._entities.items():
-            score = 0
-            if set(entity["sources"]) & dependencies:
-                score += 2
-            terms = {key, key.replace("_", " "), *key.split("_")}
-            if any(term and term in searchable for term in terms):
-                score += 1
-            if score:
-                ranked.append((-score, key))
-        return [key for _, key in sorted(ranked)[:limit]]
-
-    def apply(self, node_id: str, payload: dict[str, Any]) -> None:
-        for observation in payload["entities"]:
-            if observation["persistence"] != "REQUIRED":
-                continue
-            key = observation["key"]
-            entity = self._entities.setdefault(
-                key,
-                {
-                    "key": key,
-                    "table": key,
-                    "sources": [],
-                    "fields": {},
-                    "indexes": {},
-                    "checks": {},
-                    "relations": {},
-                },
-            )
-            _append_unique(entity["sources"], node_id)
-            relation_fields = {
-                _relation_field_name(relation): str(relation["name"])
-                for relation in observation["relations"]
-            }
-            for raw_field in observation["fields"]:
-                relation_name = relation_fields.get(raw_field["name"])
-                if relation_name is not None:
-                    self._trace(
-                        "FK_REFERENCE_NORMALIZED "
-                        f"field={key}.{raw_field['name']} relation={relation_name}"
-                    )
-                    continue
-                self._merge_field(entity, raw_field, node_id)
-            for raw_index in observation["indexes"]:
-                fields = tuple(raw_index["fields"])
-                index_key = (fields, raw_index["unique"])
-                index = entity["indexes"].setdefault(
-                    index_key,
-                    {"fields": list(fields), "unique": raw_index["unique"], "sources": []},
-                )
-                _append_unique(index["sources"], node_id)
-            for raw_check in observation["checks"]:
-                check_key = (raw_check["field"], raw_check["kind"], raw_check["value"])
-                check = entity["checks"].setdefault(
-                    check_key,
-                    {**raw_check, "sources": []},
-                )
-                _append_unique(check["sources"], node_id)
-            for raw_relation in observation["relations"]:
-                relation_key = (raw_relation["name"], raw_relation["target_entity"], raw_relation["cardinality"])
-                relation = entity["relations"].setdefault(
-                    relation_key,
-                    {**raw_relation, "sources": []},
-                )
-                relation["required"] = relation["required"] or raw_relation["required"]
-                _append_unique(relation["sources"], node_id)
-
-    def _merge_field(self, entity: dict[str, Any], raw_field: dict[str, Any], node_id: str) -> None:
-        name = raw_field["name"]
-        existing = entity["fields"].get(name)
-        if existing is None:
-            entity["fields"][name] = {
-                **raw_field,
-                "required": raw_field["required"] or name == "id",
-                "unique": raw_field["unique"] or name == "id",
+            field_item.update({
+                "logical_type": field_item.get("type"),
+                "required": not bool(field_item.get("nullable")),
+                "unique": name == "id",
+                "case_insensitive": False,
                 "primary_key": name == "id",
-                "sources": [node_id],
-            }
-            return
-        if existing["type"] != raw_field["type"]:
-            self._errors.append(
-                _format_error(
-                    "ARC2201",
-                    f"Conflicting types for {entity['key']}.{name}: {existing['type']} vs {raw_field['type']}.",
-                    node_id=node_id,
-                )
-            )
-            return
-        existing["required"] = existing["required"] or raw_field["required"]
-        existing["unique"] = existing["unique"] or raw_field["unique"]
-        existing["case_insensitive"] = existing["case_insensitive"] or raw_field["case_insensitive"]
-        _append_unique(existing["sources"], node_id)
+                "origin": origin,
+                "requirement_ids": field_sources,
+                "sources": field_sources,
+            })
+            for kind, value in sorted(field_item.get("properties", {}).items()):
+                if kind in CHECK_KINDS:
+                    entity["checks"].append({
+                        "field": name,
+                        "kind": kind,
+                        "value": str(value),
+                        "sources": field_sources,
+                    })
 
-    def finish(self) -> dict[str, Any]:
-        for key, entity in sorted(self._entities.items()):
-            if "id" not in entity["fields"]:
-                entity["fields"]["id"] = {
-                    "name": "id",
-                    "type": "string",
-                    "required": True,
+    relationships: list[dict[str, Any]] = []
+    for item in schema.get("relationships", []):
+        relationship = copy.deepcopy(item)
+        relationship_id = _relationship_id(
+            str(relationship.get("parent", "")),
+            str(relationship.get("child", "")),
+            str(relationship.get("type", "")),
+        )
+        fk_ref = f"{relationship.get('fk_entity')}.{relationship.get('fk_field')}"
+        requirement_ids = sorted(set(field_requirements.get(fk_ref, [])))
+        if relationship.get("type") == "MANY_TO_MANY":
+            association = str(relationship.get("association_entity", ""))
+            requirement_ids = sorted(set(entity_requirements.get(association, [])))
+        relationship.update({"id": relationship_id, "requirement_ids": requirement_ids})
+        relationships.append(relationship)
+        for requirement_id in requirement_ids:
+            internal_links[requirement_id]["relationships"].append(relationship_id)
+        fk_entity = entity_map.get(str(relationship.get("fk_entity", "")))
+        if fk_entity is not None and relationship.get("fk_field"):
+            target = str(relationship.get("parent", ""))
+            fk_entity["relations"].append({
+                "name": target,
+                "target_entity": target,
+                "cardinality": "ONE_TO_ONE" if relationship.get("type") == "ONE_TO_ONE" else "MANY_TO_ONE",
+                "required": bool(relationship.get("child_required")),
+                "fk_field": relationship["fk_field"],
+                "sources": requirement_ids,
+            })
+    schema["relationships"] = relationships
+
+    # Association entities do not have a single relationship-level FK slot;
+    # restore their logical relations directly from each persisted FK field.
+    for entity_key, entity in entity_map.items():
+        known_targets = {str(item.get("target_entity", "")) for item in entity["relations"]}
+        for field_item in entity.get("fields", []):
+            target = str(field_item.get("references", "")).partition(".")[0]
+            if not target or target in known_targets:
+                continue
+            entity["relations"].append({
+                "name": target,
+                "target_entity": target,
+                "cardinality": "MANY_TO_ONE",
+                "required": not bool(field_item.get("nullable")),
+                "fk_field": field_item.get("name"),
+                "sources": list(field_item.get("sources", [])),
+            })
+            known_targets.add(target)
+
+    constraints: list[dict[str, Any]] = []
+    for item in schema.get("constraints", []):
+        constraint = copy.deepcopy(item)
+        identity = {key: constraint.get(key) for key in ("type", "fields", "enforcement", "description")}
+        digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:12]
+        constraint_id = f"constraint_{str(constraint.get('type', '')).lower()}_{digest}"
+        requirement_ids = sorted({
+            requirement_id
+            for reference in constraint.get("fields", [])
+            for requirement_id in field_requirements.get(str(reference), [])
+        })
+        origin = "SYSTEM" if constraint.get("type") in {"PRIMARY_KEY", "FOREIGN_KEY"} else "REQUIREMENT"
+        constraint.update({
+            "id": constraint_id,
+            "origin": origin,
+            "requirement_ids": requirement_ids,
+            "sources": requirement_ids,
+        })
+        constraints.append(constraint)
+        for requirement_id in requirement_ids:
+            internal_links[requirement_id]["constraints"].append(constraint_id)
+        refs = constraint.get("fields", [])
+        if constraint.get("type") in {"UNIQUE", "COMPOSITE_UNIQUE"} and refs:
+            entity_key = str(refs[0]).partition(".")[0]
+            if entity_key in entity_map and all(str(ref).startswith(f"{entity_key}.") for ref in refs):
+                entity_map[entity_key]["indexes"].append({
+                    "fields": [str(ref).partition(".")[2] for ref in refs],
                     "unique": True,
-                    "case_insensitive": False,
-                    "description": "Compiler-provided stable primary key.",
-                    "primary_key": True,
-                    "sources": list(entity["sources"]),
-                }
-            for relation in entity["relations"].values():
-                target = relation["target_entity"]
-                if target not in self._entities:
-                    self._errors.append(
-                        _format_error(
-                            "ARC2202",
-                            f"Unresolved database relation: {key}.{relation['name']} -> {target}.",
-                            node_id=relation["sources"][0] if relation["sources"] else None,
-                        )
-                    )
-                    continue
-                field_name = _relation_field_name(relation)
-                if field_name in entity["fields"]:
-                    legacy_type = entity["fields"][field_name]["type"]
-                    self._trace(
-                        "FK_REFERENCE_NORMALIZED "
-                        f"field={key}.{field_name} "
-                        f"relation={relation['name']} "
-                        f"legacy_type={legacy_type}"
-                    )
-                    del entity["fields"][field_name]
-        entities = []
-        for key in sorted(self._entities):
-            entity = self._entities[key]
-            entities.append(
-                {
-                    "key": key,
-                    "table": entity["table"],
-                    "sources": sorted(entity["sources"]),
-                    "fields": [entity["fields"][name] for name in sorted(entity["fields"])],
-                    "indexes": _logical_indexes(entity),
-                    "checks": [entity["checks"][check] for check in sorted(entity["checks"])],
-                    "relations": [entity["relations"][relation] for relation in sorted(entity["relations"])],
-                }
-            )
-        return {
-            "schema_version": 1,
-            "status": "PROPOSED",
-            "entities": entities,
-        }
+                    "sources": requirement_ids,
+                })
+    schema["constraints"] = constraints
+    schema["traceability"] = {"requirements": internal_links}
+    schema["unresolved"] = []
+    return schema
 
 
-def _validate_facts_payload(node_id: str, payload: dict[str, Any]) -> list[str]:
-    errors: list[str] = []
-    if payload.get("requirement_id") != node_id:
-        errors.append("requirement_id does not match target")
-    entities = payload.get("entities")
-    if not isinstance(entities, list):
-        return [*errors, "entities must be an array"]
-    seen_entities: set[str] = set()
-    for entity_index, entity in enumerate(entities):
-        prefix = f"entities[{entity_index}]"
-        if not isinstance(entity, dict):
-            errors.append(f"{prefix} must be an object")
-            continue
-        key = entity.get("key")
-        if not isinstance(key, str) or not IDENTIFIER_PATTERN.fullmatch(key):
-            errors.append(f"{prefix}.key must be snake_case")
-        elif key in seen_entities:
-            errors.append(f"duplicate entity key: {key}")
-        else:
-            seen_entities.add(key)
-        if entity.get("persistence") not in PERSISTENCE_VALUES:
-            errors.append(f"{prefix}.persistence is invalid")
-        fields = entity.get("fields")
-        indexes = entity.get("indexes")
-        checks = entity.get("checks")
-        relations = entity.get("relations")
-        if not all(isinstance(value, list) for value in (fields, indexes, checks, relations)):
-            errors.append(f"{prefix} fields/indexes/checks/relations must be arrays")
-            continue
-        field_names: set[str] = set()
-        for field_index, raw_field in enumerate(fields):
-            field_prefix = f"{prefix}.fields[{field_index}]"
-            if not isinstance(raw_field, dict):
-                errors.append(f"{field_prefix} must be an object")
-                continue
-            name = raw_field.get("name")
-            if not isinstance(name, str) or not IDENTIFIER_PATTERN.fullmatch(name):
-                errors.append(f"{field_prefix}.name must be snake_case")
-            elif name in field_names:
-                errors.append(f"duplicate field: {key}.{name}")
-            else:
-                field_names.add(name)
-            if raw_field.get("type") not in FIELD_TYPES:
-                errors.append(f"{field_prefix}.type is invalid")
-            for boolean_name in ("required", "unique", "case_insensitive"):
-                if not isinstance(raw_field.get(boolean_name), bool):
-                    errors.append(f"{field_prefix}.{boolean_name} must be boolean")
-            if not isinstance(raw_field.get("description"), str):
-                errors.append(f"{field_prefix}.description must be a string")
-        relation_names, derived_relation_fields = _relation_reference_names(relations)
-        if relation_names & field_names:
-            errors.append(f"{prefix} relation name conflicts with a scalar field")
-        valid_index_references = field_names | relation_names | derived_relation_fields
-        for raw_index in indexes:
-            if not isinstance(raw_index, dict) or not isinstance(raw_index.get("fields"), list):
-                errors.append(f"{prefix} contains an invalid index")
-                continue
-            if not raw_index["fields"] or any(name not in valid_index_references for name in raw_index["fields"]):
-                errors.append(f"{prefix} index references an unknown field")
-            if not isinstance(raw_index.get("unique"), bool):
-                errors.append(f"{prefix} index unique must be boolean")
-        for raw_check in checks:
-            if not isinstance(raw_check, dict) or raw_check.get("field") not in field_names:
-                errors.append(f"{prefix} check references an unknown field")
-                continue
-            if raw_check.get("kind") not in CHECK_KINDS or not isinstance(raw_check.get("value"), str):
-                errors.append(f"{prefix} contains an invalid check")
-            else:
-                field = next(
-                    (
-                        item
-                        for item in fields
-                        if isinstance(item, dict) and item.get("name") == raw_check.get("field")
-                    ),
-                    {},
-                )
-                if not _check_matches_type(str(field.get("type", "")), str(raw_check["kind"])):
-                    errors.append(f"{prefix} check kind is incompatible with its field type")
-        for raw_relation in relations:
-            if not isinstance(raw_relation, dict):
-                errors.append(f"{prefix} contains an invalid relation")
-                continue
-            relation_name = raw_relation.get("name")
-            if not isinstance(relation_name, str) or not IDENTIFIER_PATTERN.fullmatch(relation_name):
-                errors.append(f"{prefix} relation name must be snake_case")
-            elif relation_name.endswith("_id"):
-                errors.append(f"{prefix} relation name must be logical, not a physical *_id field")
-            target = raw_relation.get("target_entity")
-            if not isinstance(target, str) or not IDENTIFIER_PATTERN.fullmatch(target):
-                errors.append(f"{prefix} relation target must be snake_case")
-            if raw_relation.get("cardinality") not in CARDINALITIES:
-                errors.append(f"{prefix} relation cardinality is invalid")
-            if not isinstance(raw_relation.get("required"), bool):
-                errors.append(f"{prefix} relation required must be boolean")
-    return errors
+def validate_database_structure(structure: dict[str, Any]) -> list[str]:
+    """Validate the compact on-disk database structure."""
+
+    if not isinstance(structure, dict):
+        return ["database structure must be a JSON object"]
+    if structure.get("schema_version") != SCHEMA_VERSION:
+        return [f"schema_version must be {SCHEMA_VERSION}"]
+    if structure.get("status") != "RESOLVED":
+        return ["schema status must be RESOLVED"]
+    allowed_top = {"schema_version", "status", "entities", "relationships", "constraints"}
+    if set(structure) - allowed_top:
+        return ["database structure contains compiler metadata"]
+    hydrated = hydrate_database_schema(structure, {})
+    errors = validate_database_schema(hydrated)
+    return [
+        error for error in errors
+        if "requirement traceability" not in error
+        and "relationship has no requirement traceability" not in error
+    ]
 
 
-def _validate_batch_payload(requirement_ids: list[str], payload: dict[str, Any]) -> list[str]:
-    if not isinstance(payload, dict):
-        return ["response must be an object"]
-    items = payload.get("items")
-    if not isinstance(items, list):
-        return ["items must be an array"]
-
-    expected = set(requirement_ids)
-    returned: set[str] = set()
-    errors: list[str] = []
-    for index, item in enumerate(items):
-        if not isinstance(item, dict):
-            errors.append(f"items[{index}] must be an object")
-            continue
-        node_id = str(item.get("requirement_id", ""))
-        if node_id not in expected:
-            errors.append(f"unexpected requirement_id: {node_id}")
-            continue
-        if node_id in returned:
-            errors.append(f"duplicate requirement_id: {node_id}")
-            continue
-        returned.add(node_id)
-        errors.extend(f"{node_id}: {error}" for error in _validate_facts_payload(node_id, item))
-
-    missing = sorted(expected - returned)
-    if missing:
-        errors.append("missing requirement_id: " + ", ".join(missing))
-    return errors
-
-
-def validate_database_schema(schema: dict[str, Any]) -> list[str]:
-    """Validate a persisted logical database schema before a later pass reuses it."""
+def validate_database_schema(
+    schema: dict[str, Any],
+    *,
+    expected_requirement_ids: set[str] | None = None,
+) -> list[str]:
+    """Statically validate a final Stage 1 schema without modifying it."""
 
     if not isinstance(schema, dict):
         return ["schema must be a JSON object"]
-    if schema.get("schema_version") != 1:
-        return ["schema_version must be 1"]
+    if schema.get("schema_version") == 1:
+        return _validate_legacy_database_schema(schema)
+    if schema.get("schema_version") != SCHEMA_VERSION:
+        return [f"schema_version must be 1 or {SCHEMA_VERSION}"]
+    if schema.get("status") != "RESOLVED":
+        return ["schema status must be RESOLVED"]
+    if schema.get("unresolved"):
+        return ["schema contains unresolved decisions"]
+    entities = schema.get("entities")
+    relationships = schema.get("relationships")
+    constraints = schema.get("constraints")
+    traceability_container = schema.get("traceability")
+    traceability = traceability_container.get("requirements") if isinstance(traceability_container, dict) else None
+    if not isinstance(entities, list) or not isinstance(relationships, list) or not isinstance(constraints, list):
+        return ["entities, relationships, and constraints must be arrays"]
+    if not isinstance(traceability, dict):
+        return ["traceability.requirements must be an object"]
+
+    errors: list[str] = []
+    entity_map: dict[str, dict[str, Any]] = {}
+    field_refs: set[str] = set()
+    for entity in entities:
+        if not isinstance(entity, dict):
+            errors.append("entity must be an object")
+            continue
+        key = str(entity.get("key", ""))
+        if not IDENTIFIER_PATTERN.fullmatch(key) or key in entity_map:
+            errors.append(f"invalid or duplicate entity key: {key}")
+            continue
+        entity_map[key] = entity
+        fields = entity.get("fields")
+        if not isinstance(fields, list):
+            errors.append(f"entity fields must be an array: {key}")
+            continue
+        names: set[str] = set()
+        for field_item in fields:
+            name = str(field_item.get("name", "")) if isinstance(field_item, dict) else ""
+            if not IDENTIFIER_PATTERN.fullmatch(name) or name in names:
+                errors.append(f"invalid or duplicate field: {key}.{name}")
+                continue
+            names.add(name)
+            field_refs.add(f"{key}.{name}")
+            if field_item.get("type") not in FIELD_TYPES:
+                errors.append(f"invalid field type: {key}.{name}")
+            if field_item.get("origin") not in FIELD_ORIGINS:
+                errors.append(f"invalid field origin: {key}.{name}")
+            if not isinstance(field_item.get("nullable"), bool):
+                errors.append(f"invalid nullable flag: {key}.{name}")
+            errors.extend(_field_property_errors(key, field_item))
+        if "id" not in names:
+            errors.append(f"entity has no id field: {key}")
+        else:
+            id_field = next(item for item in fields if isinstance(item, dict) and item.get("name") == "id")
+            if id_field.get("type") != "uuid" or not id_field.get("primary_key") or id_field.get("origin") != "SYSTEM":
+                errors.append(f"entity id is not a compiler-provided uuid primary key: {key}")
+    for entity_key, entity in entity_map.items():
+        for field_item in entity.get("fields", []):
+            reference = field_item.get("references")
+            if reference is not None and reference not in field_refs:
+                errors.append(f"foreign key target does not exist: {entity_key}.{field_item.get('name')} -> {reference}")
+            if reference is not None and (field_item.get("type") != "foreign_key" or field_item.get("origin") != "RELATIONSHIP"):
+                errors.append(f"invalid foreign key field: {entity_key}.{field_item.get('name')}")
+
+    relationship_ids: set[str] = set()
+    for relationship in relationships:
+        relationship_id = str(relationship.get("id", "")) if isinstance(relationship, dict) else ""
+        if not relationship_id or relationship_id in relationship_ids:
+            errors.append(f"invalid or duplicate relationship id: {relationship_id}")
+            continue
+        relationship_ids.add(relationship_id)
+        if relationship.get("parent") not in entity_map or relationship.get("child") not in entity_map:
+            errors.append(f"relationship endpoint does not exist: {relationship_id}")
+        if relationship.get("type") not in RELATIONSHIP_TYPES:
+            errors.append(f"invalid relationship type: {relationship_id}")
+        if relationship.get("fk_entity") is not None and f"{relationship.get('fk_entity')}.{relationship.get('fk_field')}" not in field_refs:
+            errors.append(f"relationship foreign key does not exist: {relationship_id}")
+        if relationship.get("type") == "MANY_TO_MANY" and relationship.get("association_entity") not in entity_map:
+            errors.append(f"relationship association entity does not exist: {relationship_id}")
+        if relationship.get("type") in {"ONE_TO_ONE", "ONE_TO_MANY"}:
+            expected_ref = f"{relationship.get('parent')}.id"
+            fk_entity = entity_map.get(str(relationship.get("fk_entity")), {})
+            fk = next(
+                (item for item in fk_entity.get("fields", []) if item.get("name") == relationship.get("fk_field")),
+                {},
+            )
+            if relationship.get("fk_entity") != relationship.get("child") or fk.get("references") != expected_ref:
+                errors.append(f"relationship is not lowered on the child side: {relationship_id}")
+        if not relationship.get("requirement_ids"):
+            errors.append(f"relationship has no requirement traceability: {relationship_id}")
+
+    constraint_ids: set[str] = set()
+    for constraint in constraints:
+        constraint_id = str(constraint.get("id", "")) if isinstance(constraint, dict) else ""
+        if not constraint_id or constraint_id in constraint_ids:
+            errors.append(f"invalid or duplicate constraint id: {constraint_id}")
+            continue
+        constraint_ids.add(constraint_id)
+        if constraint.get("type") not in CONSTRAINT_TYPES or constraint.get("enforcement") not in ENFORCEMENT_VALUES:
+            errors.append(f"invalid constraint: {constraint_id}")
+        constraint_fields = constraint.get("fields", [])
+        if not isinstance(constraint_fields, list):
+            errors.append(f"constraint fields must be an array: {constraint_id}")
+            constraint_fields = []
+        elif any(reference not in field_refs for reference in constraint_fields):
+            errors.append(f"constraint references an unknown field: {constraint_id}")
+        if constraint.get("type") == "UNIQUE" and len(constraint_fields) != 1:
+            errors.append(f"UNIQUE constraint must reference one field: {constraint_id}")
+        if constraint.get("type") == "COMPOSITE_UNIQUE" and len(constraint_fields) < 2:
+            errors.append(f"COMPOSITE_UNIQUE constraint must reference multiple fields: {constraint_id}")
+
+    if expected_requirement_ids is not None:
+        if expected_requirement_ids - set(traceability):
+            errors.append("missing requirement traceability: " + ", ".join(sorted(expected_requirement_ids - set(traceability))))
+        if set(traceability) - expected_requirement_ids:
+            errors.append("unexpected requirement traceability: " + ", ".join(sorted(set(traceability) - expected_requirement_ids)))
+    for requirement_id, links in traceability.items():
+        if not isinstance(links, dict):
+            errors.append(f"invalid requirement traceability: {requirement_id}")
+            continue
+        if any(key not in entity_map for key in links.get("entities", [])):
+            errors.append(f"traceability references an unknown entity: {requirement_id}")
+        if any(ref not in field_refs for ref in links.get("fields", [])):
+            errors.append(f"traceability references an unknown field: {requirement_id}")
+        if any(value not in relationship_ids for value in links.get("relationships", [])):
+            errors.append(f"traceability references an unknown relationship: {requirement_id}")
+        if any(value not in constraint_ids for value in links.get("constraints", [])):
+            errors.append(f"traceability references an unknown constraint: {requirement_id}")
+    return errors
+
+
+def _validate_legacy_database_schema(schema: dict[str, Any]) -> list[str]:
+    """Keep --skip-database compatible with schema_version 1 artifacts."""
+
+    if schema.get("status") != "RESOLVED":
+        return ["schema status must be RESOLVED"]
     entities = schema.get("entities")
     if not isinstance(entities, list):
         return ["entities must be an array"]
-
     errors: list[str] = []
-    entity_keys: set[str] = set()
-    for index, entity in enumerate(entities):
-        prefix = f"entities[{index}]"
+    keys: set[str] = set()
+    for entity in entities:
+        key = str(entity.get("key", "")) if isinstance(entity, dict) else ""
+        if not IDENTIFIER_PATTERN.fullmatch(key) or key in keys:
+            errors.append(f"invalid or duplicate entity key: {key}")
+        keys.add(key)
+    for entity in entities:
         if not isinstance(entity, dict):
-            errors.append(f"{prefix} must be an object")
+            errors.append("entity must be an object")
             continue
-        key = entity.get("key")
-        if not isinstance(key, str) or not IDENTIFIER_PATTERN.fullmatch(key):
-            errors.append(f"{prefix}.key must be snake_case")
-        elif key in entity_keys:
-            errors.append(f"duplicate entity key: {key}")
-        else:
-            entity_keys.add(key)
-
-    for index, entity in enumerate(entities):
-        prefix = f"entities[{index}]"
-        if not isinstance(entity, dict):
+        key = str(entity.get("key", ""))
+        fields, relations = entity.get("fields"), entity.get("relations")
+        if not isinstance(fields, list) or not isinstance(relations, list):
+            errors.append(f"invalid entity members: {key}")
             continue
-        fields = entity.get("fields")
-        indexes = entity.get("indexes")
-        checks = entity.get("checks")
-        relations = entity.get("relations")
-        if not all(isinstance(value, list) for value in (fields, indexes, checks, relations)):
-            errors.append(f"{prefix} fields/indexes/checks/relations must be arrays")
-            continue
-
-        field_names: set[str] = set()
-        field_types: dict[str, str] = {}
-        for field_index, raw_field in enumerate(fields):
-            field_prefix = f"{prefix}.fields[{field_index}]"
-            if not isinstance(raw_field, dict):
-                errors.append(f"{field_prefix} must be an object")
-                continue
-            name = raw_field.get("name")
-            if not isinstance(name, str) or not IDENTIFIER_PATTERN.fullmatch(name):
-                errors.append(f"{field_prefix}.name must be snake_case")
-                continue
-            if name in field_names:
-                errors.append(f"duplicate field: {entity.get('key', '?')}.{name}")
-                continue
-            field_names.add(name)
-            field_type = raw_field.get("type")
-            if field_type not in FIELD_TYPES:
-                errors.append(f"{field_prefix}.type is invalid")
-            else:
-                field_types[name] = field_type
-
-        relation_names: set[str] = set()
-        for relation_index, relation in enumerate(relations):
-            relation_prefix = f"{prefix}.relations[{relation_index}]"
-            if not isinstance(relation, dict):
-                errors.append(f"{relation_prefix} must be an object")
-                continue
-            name = relation.get("name")
-            target = relation.get("target_entity")
-            if not isinstance(name, str) or not IDENTIFIER_PATTERN.fullmatch(name) or name.endswith("_id"):
-                errors.append(f"{relation_prefix}.name must be a logical snake_case name")
-            elif name in relation_names or name in field_names:
-                errors.append(f"duplicate or conflicting relation: {entity.get('key', '?')}.{name}")
-            else:
-                relation_names.add(name)
-            if not isinstance(target, str) or target not in entity_keys:
-                errors.append(f"{relation_prefix}.target_entity must reference an entity")
-            if relation.get("cardinality") not in CARDINALITIES:
-                errors.append(f"{relation_prefix}.cardinality is invalid")
-            if not isinstance(relation.get("required"), bool):
-                errors.append(f"{relation_prefix}.required must be boolean")
-
-        for raw_index in indexes:
-            if not isinstance(raw_index, dict) or not isinstance(raw_index.get("fields"), list):
-                errors.append(f"{prefix} contains an invalid index")
-                continue
-            if not raw_index["fields"] or any(
-                name not in field_names | relation_names for name in raw_index["fields"]
-            ):
-                errors.append(f"{prefix} index references an unknown logical field")
-            if not isinstance(raw_index.get("unique"), bool):
-                errors.append(f"{prefix} index unique must be boolean")
-
-        for raw_check in checks:
-            if not isinstance(raw_check, dict) or raw_check.get("field") not in field_names:
-                errors.append(f"{prefix} check references an unknown scalar field")
-                continue
-            kind = raw_check.get("kind")
-            if kind not in CHECK_KINDS or not isinstance(raw_check.get("value"), str):
-                errors.append(f"{prefix} contains an invalid check")
-            elif not _check_matches_type(field_types.get(str(raw_check["field"]), ""), str(kind)):
-                errors.append(f"{prefix} check kind is incompatible with its field type")
+        names = [str(item.get("name", "")) for item in fields if isinstance(item, dict)]
+        if len(names) != len(set(names)) or any(not IDENTIFIER_PATTERN.fullmatch(name) for name in names):
+            errors.append(f"invalid or duplicate field: {key}")
+        for relation in relations:
+            if not isinstance(relation, dict) or relation.get("target_entity") not in keys:
+                errors.append(f"invalid relation target: {key}")
     return errors
+
+
+def _field_property_errors(entity_key: str, field_item: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    name = str(field_item.get("name", ""))
+    field_type = field_item.get("type")
+    properties = field_item.get("properties")
+    if not isinstance(properties, dict):
+        return [f"field properties must be an object: {entity_key}.{name}"]
+    unknown = set(properties) - {
+        "min_length", "max_length", "pattern", "enum", "format", "minimum", "maximum", "date_past",
+        "date_future", "default",
+    }
+    if unknown:
+        errors.append(f"unknown field properties: {entity_key}.{name} -> {', '.join(sorted(unknown))}")
+    active = {key for key, value in properties.items() if value is not None and value is not False}
+    if active & {"min_length", "max_length", "pattern"} and field_type != "string":
+        errors.append(f"string property used on non-string field: {entity_key}.{name}")
+    if "format" in active and field_type not in {"string", "uuid", "date", "datetime"}:
+        errors.append(f"format property used on incompatible field: {entity_key}.{name}")
+    if active & {"minimum", "maximum"} and field_type not in {"integer", "number"}:
+        errors.append(f"numeric property used on non-numeric field: {entity_key}.{name}")
+    if active & {"date_past", "date_future"} and field_type not in {"date", "datetime"}:
+        errors.append(f"date property used on non-date field: {entity_key}.{name}")
+    if "enum" in active and field_type != "string":
+        errors.append(f"enum property used on non-string field: {entity_key}.{name}")
+    if properties.get("min_length") is not None and properties.get("max_length") is not None:
+        if properties["min_length"] > properties["max_length"]:
+            errors.append(f"invalid length range: {entity_key}.{name}")
+    if properties.get("minimum") is not None and properties.get("maximum") is not None:
+        if properties["minimum"] > properties["maximum"]:
+            errors.append(f"invalid numeric range: {entity_key}.{name}")
+    return errors
+
+
+def _validate_decision_shape(phase: str, node_id: str, decision: Any) -> list[str]:
+    if not isinstance(decision, dict):
+        return ["decision must be an object"]
+    errors: list[str] = []
+    if decision.get("requirement_id") != node_id:
+        errors.append("requirement_id does not match target")
+    required_arrays = {
+        "pass1_entities": ("reuse_entities", "new_entities", "unresolved_entities"),
+        "pass2_fields": ("entities",),
+        "pass3_relationships": ("relationships", "unresolved_relationships"),
+        "pass4_constraints": ("constraints",),
+    }[phase]
+    errors.extend(f"{key} must be an array" for key in required_arrays if not isinstance(decision.get(key), list))
+    if errors:
+        return errors
+    if phase == "pass1_entities":
+        if any(not isinstance(value, str) for value in decision["reuse_entities"]):
+            errors.append("Pass 1 reuse_entities contains a non-string value")
+        for item in decision["new_entities"]:
+            if not isinstance(item, dict) or not isinstance(item.get("key"), str) or not isinstance(item.get("description"), str):
+                errors.append("Pass 1 new_entities contains an invalid entity")
+        for item in decision["unresolved_entities"]:
+            if not isinstance(item, dict):
+                errors.append("Pass 1 unresolved_entities contains a non-object")
+                continue
+            candidates = item.get("candidate_entities")
+            if (
+                not isinstance(item.get("concept"), str)
+                or not isinstance(item.get("reason"), str)
+                or not isinstance(candidates, list)
+                or len(candidates) < 2
+                or any(not isinstance(value, str) for value in candidates)
+            ):
+                errors.append("Pass 1 unresolved entity must name a concept, reason, and at least two candidates")
+    elif phase == "pass2_fields":
+        for item in decision["entities"]:
+            if not isinstance(item, dict) or not isinstance(item.get("entity"), str):
+                errors.append("Pass 2 contains an invalid entity decision")
+                continue
+            if not isinstance(item.get("reuse_fields"), list) or not isinstance(item.get("new_fields"), list):
+                errors.append("Pass 2 field lists must be arrays")
+                continue
+            if any(not isinstance(value, str) for value in item["reuse_fields"]):
+                errors.append("Pass 2 reuse_fields contains a non-string value")
+            for field_item in item["new_fields"]:
+                if not isinstance(field_item, dict):
+                    errors.append("Pass 2 new_fields contains a non-object")
+                    continue
+                if field_item.get("type") not in FIELD_TYPES - {"uuid", "foreign_key"}:
+                    errors.append("Pass 2 new field has an invalid type")
+                if not isinstance(field_item.get("name"), str) or not isinstance(field_item.get("nullable"), bool):
+                    errors.append("Pass 2 new field has an invalid name or nullable flag")
+                if not isinstance(field_item.get("properties"), dict):
+                    errors.append("Pass 2 new field properties must be an object")
+                    continue
+                errors.extend(
+                    f"Pass 2 invalid field properties: {error}"
+                    for error in _field_property_errors(
+                        "decision",
+                        {
+                            "name": field_item.get("name"),
+                            "type": field_item.get("type"),
+                            "nullable": field_item.get("nullable"),
+                            "properties": _compact_properties(field_item.get("properties")),
+                        },
+                    )
+                )
+    elif phase == "pass3_relationships":
+        for item in decision["relationships"]:
+            if not isinstance(item, dict):
+                errors.append("Pass 3 relationships contains a non-object")
+                continue
+            if item.get("type") not in RELATIONSHIP_TYPES or not isinstance(item.get("child_required"), bool):
+                errors.append("Pass 3 relationship has invalid cardinality or required flag")
+            if not isinstance(item.get("parent"), str) or not isinstance(item.get("child"), str):
+                errors.append("Pass 3 relationship has invalid endpoints")
+        for item in decision["unresolved_relationships"]:
+            if not isinstance(item, dict):
+                errors.append("Pass 3 unresolved_relationships contains a non-object")
+                continue
+            entities = item.get("entities")
+            candidates = item.get("candidate_types")
+            if (
+                not isinstance(item.get("reason"), str)
+                or not isinstance(entities, list)
+                or len(entities) != 2
+                or any(not isinstance(value, str) for value in entities)
+                or not isinstance(candidates, list)
+                or len(candidates) < 2
+                or any(value not in RELATIONSHIP_TYPES for value in candidates)
+            ):
+                errors.append("Pass 3 unresolved relationship must name two entities, a reason, and at least two cardinalities")
+    else:
+        for item in decision["constraints"]:
+            if not isinstance(item, dict):
+                errors.append("Pass 4 constraints contains a non-object")
+                continue
+            if item.get("type") not in {"UNIQUE", "COMPOSITE_UNIQUE", "CHECK", "APPLICATION_RULE"}:
+                errors.append("Pass 4 constraint has an invalid type")
+            if item.get("enforcement") not in ENFORCEMENT_VALUES:
+                errors.append("Pass 4 constraint has invalid enforcement")
+            if not isinstance(item.get("fields"), list) or any(not isinstance(value, str) for value in item.get("fields", [])):
+                errors.append("Pass 4 constraint fields must be a string array")
+    return errors
+
+
+def _validate_decision_context(
+    phase: str,
+    decision: Any,
+    context: dict[str, Any],
+) -> list[str]:
+    """Reject structurally valid decisions that contradict their supplied slice."""
+
+    if not isinstance(decision, dict):
+        return []
+    errors: list[str] = []
+    if phase == "pass1_entities":
+        existing = {
+            _normalize_identifier(str(item.get("key", "")))
+            for item in context.get("existing_entities", [])
+            if isinstance(item, dict)
+        }
+        reused = {
+            _normalize_identifier(str(value))
+            for value in decision.get("reuse_entities", [])
+            if isinstance(value, str)
+        }
+        if reused - existing:
+            errors.append("Pass 1 reuses unknown entities: " + ", ".join(sorted(reused - existing)))
+        for item in decision.get("unresolved_entities", []):
+            if not isinstance(item, dict):
+                continue
+            candidates = {
+                _normalize_identifier(str(value))
+                for value in item.get("candidate_entities", [])
+                if isinstance(value, str)
+            }
+            if candidates - existing:
+                errors.append(
+                    "Pass 1 unresolved decision names unknown candidates: "
+                    + ", ".join(sorted(candidates - existing))
+                )
+        return errors
+
+    related_entities = context.get("related_entities")
+    if phase in {"pass2_fields", "pass3_relationships"} and not isinstance(related_entities, list):
+        return []
+    related_by_key = {
+        _normalize_identifier(str(item.get("key", ""))): item
+        for item in related_entities or []
+        if isinstance(item, dict)
+    }
+    related = set(related_by_key)
+
+    if phase == "pass2_fields":
+        entities = decision.get("entities")
+        if not isinstance(entities, list):
+            return []
+        actual = {
+            _normalize_identifier(str(item.get("entity", "")))
+            for item in entities
+            if isinstance(item, dict)
+        }
+        if related - actual:
+            errors.append("Pass 2 omitted related entities: " + ", ".join(sorted(related - actual)))
+        if actual - related:
+            errors.append(
+                "Pass 2 referenced entities outside its supplied slice: "
+                + ", ".join(sorted(actual - related))
+            )
+        for item in entities:
+            if not isinstance(item, dict):
+                continue
+            key = _normalize_identifier(str(item.get("entity", "")))
+            known_fields = {
+                _normalize_identifier(str(field_item.get("name", "")))
+                for field_item in related_by_key.get(key, {}).get("fields", [])
+                if isinstance(field_item, dict)
+            }
+            reused = {
+                _normalize_identifier(str(value))
+                for value in item.get("reuse_fields", [])
+                if isinstance(value, str)
+            }
+            if reused - known_fields:
+                errors.append(
+                    f"Pass 2 reuses unknown fields on {key}: "
+                    + ", ".join(sorted(reused - known_fields))
+                )
+            new_names = {
+                _normalize_identifier(str(field_item.get("name", "")))
+                for field_item in item.get("new_fields", [])
+                if isinstance(field_item, dict)
+            }
+            forbidden = {name for name in new_names if name == "id" or name.endswith("_id")}
+            if forbidden:
+                errors.append(
+                    f"Pass 2 cannot create system or foreign-key fields on {key}: "
+                    + ", ".join(sorted(forbidden))
+                )
+            if new_names & known_fields:
+                errors.append(
+                    f"Pass 2 redeclares existing fields on {key}; use reuse_fields: "
+                    + ", ".join(sorted(new_names & known_fields))
+                )
+        return errors
+
+    if phase == "pass3_relationships":
+        seen: dict[tuple[str, str], str] = {}
+        for item in decision.get("relationships", []):
+            if not isinstance(item, dict):
+                continue
+            parent = _normalize_identifier(str(item.get("parent", "")))
+            child = _normalize_identifier(str(item.get("child", "")))
+            relationship_type = str(item.get("type", ""))
+            if parent not in related or child not in related or parent == child:
+                errors.append(f"Pass 3 relationship is outside its supplied slice: {parent} -> {child}")
+                continue
+            pair = (parent, child)
+            if pair in seen and seen[pair] != relationship_type:
+                errors.append(f"Pass 3 emits conflicting cardinalities: {parent} -> {child}")
+            seen[pair] = relationship_type
+        for existing in context.get("existing_relationships", []):
+            if not isinstance(existing, dict):
+                continue
+            pair = (str(existing.get("parent", "")), str(existing.get("child", "")))
+            if pair in seen and seen[pair] != existing.get("type"):
+                errors.append(f"Pass 3 conflicts with an existing relationship: {pair[0]} -> {pair[1]}")
+        return errors
+
+    if phase == "pass4_constraints":
+        known_fields = {
+            f"{entity.get('key')}.{field_item.get('name')}"
+            for entity in context.get("schema", {}).get("entities", [])
+            if isinstance(entity, dict)
+            for field_item in entity.get("fields", [])
+            if isinstance(field_item, dict)
+        }
+        for item in decision.get("constraints", []):
+            if not isinstance(item, dict):
+                continue
+            references = {str(value) for value in item.get("fields", [])}
+            if references - known_fields:
+                errors.append(
+                    "Pass 4 references unknown fields: "
+                    + ", ".join(sorted(references - known_fields))
+                )
+    return errors
+
+
+def _normalize_decision_context(
+    phase: str,
+    decision: Any,
+    context: dict[str, Any],
+) -> tuple[Any, list[str]]:
+    """Repair omissions and repetitions whose meaning is deterministic."""
+
+    if phase != "pass2_fields" or not isinstance(decision, dict):
+        return decision, []
+    entities = decision.get("entities")
+    related_entities = context.get("related_entities")
+    if (
+        not isinstance(entities, list)
+        or not isinstance(related_entities, list)
+        or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("entity"), str)
+            or not isinstance(item.get("reuse_fields"), list)
+            or not isinstance(item.get("new_fields"), list)
+            for item in entities
+        )
+    ):
+        return decision, []
+
+    normalized = copy.deepcopy(decision)
+    grouped: dict[str, dict[str, Any]] = {}
+    notes: list[str] = []
+    for item in normalized["entities"]:
+        key = _normalize_identifier(item["entity"])
+        target = grouped.get(key)
+        if target is None:
+            target = {"entity": key, "reuse_fields": [], "new_fields": []}
+            grouped[key] = target
+        else:
+            notes.append(f"merged_repeated_entity:{key}")
+        for field_name in item["reuse_fields"]:
+            if field_name not in target["reuse_fields"]:
+                target["reuse_fields"].append(field_name)
+        for field_item in item["new_fields"]:
+            if field_item not in target["new_fields"]:
+                target["new_fields"].append(field_item)
+
+    expected = [
+        _normalize_identifier(str(item.get("key", "")))
+        for item in related_entities
+        if isinstance(item, dict)
+    ]
+    for key in expected:
+        if key not in grouped:
+            grouped[key] = {"entity": key, "reuse_fields": [], "new_fields": []}
+            notes.append(f"completed_missing_entity:{key}")
+    ordered_keys = expected + sorted(set(grouped) - set(expected))
+    normalized["entities"] = [grouped[key] for key in ordered_keys]
+    return normalized, notes
+
+
+def _node_context(
+    node: dict[str, Any],
+    nodes: dict[str, Any],
+    effective_dependencies: Any,
+) -> dict[str, Any]:
+    ancestors: list[dict[str, str]] = []
+    parent_id = node.get("parent_id")
+    while isinstance(parent_id, str) and parent_id:
+        parent = nodes.get(parent_id)
+        if not isinstance(parent, dict):
+            break
+        ancestors.append({
+            "id": parent_id,
+            "name": str(parent.get("name", "")),
+            "description": str(parent.get("description", "")),
+        })
+        parent_id = parent.get("parent_id")
+    ancestors.reverse()
+    return {
+        "requirement_id": str(node.get("id", "")),
+        "name": str(node.get("name", "")),
+        "description": str(node.get("description", "")),
+        "scenarios": copy.deepcopy(node.get("scenarios", [])),
+        "dependencies": copy.deepcopy(effective_dependencies),
+        "ancestors": ancestors,
+    }
+
+
+def _compact_properties(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: copy.deepcopy(value)
+        for key, value in raw.items()
+        if value is not None and not (key in {"date_past", "date_future"} and value is False)
+    }
+
+
+def _merge_properties(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+    entity: str,
+    field_name: str,
+    requirement_id: str,
+    errors: list[str],
+) -> None:
+    for key, value in _compact_properties(incoming).items():
+        if key in existing and existing[key] != value:
+            errors.append(_format_error("ARC2228", f"Conflicting field property: {entity}.{field_name}.{key}.", node_id=requirement_id))
+        else:
+            existing[key] = copy.deepcopy(value)
+
+
+def _normalize_identifier(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+
+
+def _relationship_id(parent: str, child: str, relationship_type: str) -> str:
+    return f"relationship_{parent}_{child}_{relationship_type.lower()}"
+
+
+def _association_entity_key(parent: str, child: str) -> str:
+    return f"{parent}_{child}_association"
+
+
+def _safe_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._") or "requirement"
 
 
 def _stable_hash(payload: dict[str, Any]) -> str:
@@ -774,6 +1822,7 @@ def _stable_hash(payload: dict[str, Any]) -> str:
 def _append_unique(values: list[str], value: str) -> None:
     if value not in values:
         values.append(value)
+        values.sort()
 
 
 def _format_error(code: str, message: str, *, node_id: str | None = None) -> str:
@@ -781,33 +1830,26 @@ def _format_error(code: str, message: str, *, node_id: str | None = None) -> str
 
 
 def _ordered_waves(atomic_ids: Any, dependency_graph: dict[str, Any]) -> list[list[str]]:
-    """Return deterministic dependency waves without losing unscheduled nodes."""
-
-    declared = [str(node_id) for node_id in atomic_ids if str(node_id)] if isinstance(atomic_ids, list) else []
-    declared_set = set(declared)
-    ordered: list[list[str]] = []
+    declared = {str(item) for item in atomic_ids if str(item)} if isinstance(atomic_ids, list) else set()
+    result: list[list[str]] = []
     seen: set[str] = set()
-    waves = dependency_graph.get("implementation_waves", [])
-    if isinstance(waves, list):
-        for wave in waves:
-            if not isinstance(wave, list):
-                continue
-            current = [
-                node_id
-                for node_id in sorted(str(item) for item in wave)
-                if node_id in declared_set and node_id not in seen
-            ]
-            if current:
-                ordered.append(current)
-                seen.update(current)
-    remaining = sorted(declared_set - seen)
-    if remaining:
-        ordered.append(remaining)
-    return ordered
+    for raw_wave in dependency_graph.get("implementation_waves", []):
+        if not isinstance(raw_wave, list):
+            continue
+        wave = sorted(({str(item) for item in raw_wave} & declared) - seen)
+        if wave:
+            result.append(wave)
+            seen.update(wave)
+    if declared - seen:
+        result.append(sorted(declared - seen))
+    return result
 
 
-def _batches(nodes: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
-    return [nodes[index:index + size] for index in range(0, len(nodes), size)]
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(int(os.environ.get(name, str(default))), maximum))
+    except ValueError:
+        return default
 
 
 def _enabled_env_flag(name: str, *, default: bool) -> bool:
@@ -817,34 +1859,22 @@ def _enabled_env_flag(name: str, *, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off", ""}
 
 
-def _relation_field_name(relation: dict[str, Any]) -> str:
-    name = str(relation["name"])
-    return name if name.endswith("_id") else f"{name}_id"
-
-
-def _relation_reference_names(relations: list[Any]) -> tuple[set[str], set[str]]:
-    names = {str(relation.get("name", "")) for relation in relations if isinstance(relation, dict)}
-    return names - {""}, {_relation_field_name(relation) for relation in relations if isinstance(relation, dict)}
-
-
-def _logical_indexes(entity: dict[str, Any]) -> list[dict[str, Any]]:
-    relations = {str(relation["name"]): relation for relation in entity["relations"].values()}
-    physical_aliases = {_relation_field_name(relation): name for name, relation in relations.items()}
-    merged: dict[tuple[tuple[str, ...], bool], dict[str, Any]] = {}
-    for index in entity["indexes"].values():
-        fields = tuple(physical_aliases.get(field, field) for field in index["fields"])
-        key = (fields, index["unique"])
-        result = merged.setdefault(key, {"fields": list(fields), "unique": index["unique"], "sources": []})
-        for source in index["sources"]:
-            _append_unique(result["sources"], source)
-    return [merged[key] for key in sorted(merged)]
-
-
-def _check_matches_type(field_type: str, kind: str) -> bool:
-    if kind in {"min_length", "max_length", "pattern"}:
-        return field_type == "string"
-    if kind in {"date_past", "date_future"}:
-        return field_type in {"date", "datetime"}
-    if kind in {"minimum", "maximum"}:
-        return field_type in {"integer", "number"}
-    return True
+__all__ = [
+    "CONSTRAINT_DECISION_SCHEMA",
+    "CONSTRAINT_INSTRUCTIONS",
+    "DatabasePassResult",
+    "DatabaseSchemaPass",
+    "DatabaseSchemaState",
+    "ENTITY_DECISION_SCHEMA",
+    "ENTITY_INSTRUCTIONS",
+    "FIELD_DECISION_SCHEMA",
+    "FIELD_INSTRUCTIONS",
+    "RELATIONSHIP_DECISION_SCHEMA",
+    "RELATIONSHIP_INSTRUCTIONS",
+    "database_structure",
+    "database_traceability",
+    "hydrate_database_schema",
+    "schema_for_requirement",
+    "validate_database_structure",
+    "validate_database_schema",
+]

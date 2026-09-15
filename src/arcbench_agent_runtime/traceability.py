@@ -18,6 +18,7 @@ TABLE_NAMES = (
     "call_edges",
     "node_states",
     "node_contracts",
+    "database_schema",
 )
 
 
@@ -147,7 +148,7 @@ class TraceabilityStore:
                 write_json_atomic(path, {})
         self.events.notify_traceability_changed("traceability_store_initialized")
 
-    def export_snapshot(self) -> dict[str, list[dict[str, Any]]]:
+    def export_snapshot(self) -> dict[str, Any]:
         return {
             "requirements": self.list_requirements(),
             "scenarios": self.list_scenarios(),
@@ -156,7 +157,22 @@ class TraceabilityStore:
             "call_edges": self.list_call_edges(),
             "node_states": self.list_node_states(),
             "node_contracts": self.list_node_contracts(),
+            "database_schema": self.read_database_schema_links(),
         }
+
+    def store_database_schema_links(
+        self,
+        links: dict[str, dict[str, list[str]]],
+    ) -> None:
+        """Replace the compact requirement-to-entity-field index."""
+
+        self._write_table("database_schema", links)
+        self.events.notify_traceability_changed("database_schema_traceability_updated")
+
+    def read_database_schema_links(self) -> dict[str, dict[str, list[str]]]:
+        """Read requirement-to-entity-field links for the database schema."""
+
+        return self._read_table("database_schema")
 
     def store_requirement_tree(self, requirement_tree: dict[str, Any]) -> None:
         """Persist a nested ARC requirements tree into current-state tables.

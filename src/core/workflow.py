@@ -91,8 +91,8 @@ class ARCWorkflowManager:
             runtime.events.mark_run_completed("ARC compilation completed.")
             await self._log("Compiler", "Compilation finished successfully.")
         elif result.ok:
-            runtime.events.mark_run_paused("ARC Design IR completed; remaining passes are pending.")
-            await self._log("Compiler", "Compilation paused after the implemented DESIGN pass.", "warning")
+            runtime.events.mark_run_paused("ARC compilation paused after the latest enabled pass.")
+            await self._log("Compiler", "Compilation paused after the latest enabled pass.", "warning")
         else:
             runtime.events.mark_run_failed("ARC compiler pass failed.")
             await self._log("Compiler", "Compilation failed; inspect the compiler log.", "error")

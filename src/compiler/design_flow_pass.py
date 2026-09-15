@@ -437,7 +437,7 @@ class _FlowState:
         entity_name = str(operation.get("entity", ""))
         entity = self._database.get(entity_name, {})
         database_fields = {
-            str(field.get("name")): field
+            str(field.get("name")): {**field, "type": _design_field_type(field.get("type"))}
             for field in entity.get("fields", [])
             if field.get("name")
         }
@@ -598,8 +598,7 @@ class DesignPass:
         self._retry_count = _bounded_env_int("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", 2, 0, 10)
         self._retry_backoff = _bounded_env_float("ARC_MODEL_RETRY_BACKOFF_SECONDS", 1.0, 0.0, 30.0)
         self._trace_enabled = _enabled_env_flag("ARC_DESIGN_TRACE", default=True)
-        self._trace_payloads = _enabled_env_flag("ARC_DESIGN_TRACE_PAYLOADS", default=False)
-        self._model_trace_files = _enabled_env_flag("ARC_MODEL_TRACE_FILES", default=True)
+        self._model_trace_files = _enabled_env_flag("ARC_MODEL_TRACE_FILES", default=False)
         self._model_trace_run_id = str(time.time_ns())
 
     def compile(
@@ -914,6 +913,21 @@ class DesignPass:
                 f"MODEL_CALL phase={phase} attempt={attempt + 1}/{self._retry_count + 1} "
                 f"batch={','.join(requirement_ids)} request_chars={request_chars}"
             )
+            self._trace(
+                f"MODEL_INPUT phase={phase} attempt={attempt + 1} "
+                f"batch={','.join(requirement_ids)}\n"
+                + json.dumps(
+                    {
+                        "schema_name": schema_name,
+                        "instructions": instructions,
+                        "input_payload": request_payload,
+                        "output_schema": output_schema,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             started = time.perf_counter()
             transport_failed = False
             try:
@@ -933,6 +947,11 @@ class DesignPass:
             else:
                 elapsed = time.perf_counter() - started
                 raw_payload = copy.deepcopy(payload)
+                self._trace(
+                    f"MODEL_OUTPUT phase={phase} attempt={attempt + 1} "
+                    f"batch={','.join(requirement_ids)} seconds={elapsed:.1f}\n"
+                    + json.dumps(raw_payload, ensure_ascii=False, indent=2, sort_keys=True)
+                )
                 payload, events = _normalize_payload(payload)
                 feedback = _validate_batch(requirement_ids, payload, validate_item)
                 trace.update({
@@ -1101,6 +1120,12 @@ def _types_assignable(source: str, target: str) -> bool:
     return source == target or (source == "integer" and target == "number")
 
 
+def _design_field_type(database_type: Any) -> str:
+    """Project database-only logical types into Design IR scalar types."""
+
+    return "string" if database_type in {"uuid", "foreign_key"} else str(database_type)
+
+
 def _module_header(module: dict[str, Any]) -> dict[str, Any]:
     return {
         key: copy.deepcopy(module.get(key))
@@ -1128,11 +1153,12 @@ def _module_database_contract(module: dict[str, Any], schema: dict[str, Any]) ->
             "fields": [
                 {
                     "name": field.get("name"),
-                    "type": field.get("type"),
+                    "type": _design_field_type(field.get("type")),
                     "required": bool(field.get("required")),
                     "primary_key": bool(field.get("primary_key")),
                 }
                 for field in entity.get("fields", [])
+                if field.get("origin") != "RELATIONSHIP" and field.get("type") != "foreign_key"
             ],
             "relations": [
                 {
@@ -1500,11 +1526,27 @@ def _database_slice(schema: dict[str, Any], node_ids: list[str], dependencies: d
     related = set(node_ids)
     for node_id in node_ids:
         related.update(_dependency_closure(node_id, dependencies))
-    return [
-        copy.deepcopy(entity)
-        for entity in schema.get("entities", [])
-        if related.intersection(entity.get("sources", []))
-    ]
+    result: list[dict[str, Any]] = []
+    for entity in schema.get("entities", []):
+        if not related.intersection(entity.get("sources", [])):
+            continue
+        projected = copy.deepcopy(entity)
+        relation_aliases = {
+            str(relation.get("fk_field")): str(relation.get("name"))
+            for relation in projected.get("relations", [])
+            if relation.get("fk_field") and relation.get("name")
+        }
+        projected["fields"] = [
+            field
+            for field in projected.get("fields", [])
+            if field.get("origin") != "RELATIONSHIP" and field.get("type") != "foreign_key"
+        ]
+        for field in projected.get("fields", []):
+            field["type"] = _design_field_type(field.get("type"))
+        for index in projected.get("indexes", []):
+            index["fields"] = [relation_aliases.get(str(name), str(name)) for name in index.get("fields", [])]
+        result.append(projected)
+    return result
 
 
 def _requirement_domains(schema: dict[str, Any], node_id: str, dependencies: dict[str, Any]) -> list[str]:
