@@ -39,7 +39,7 @@ def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
 ENTITY_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["requirement_id", "reuse_entities", "new_entities", "unresolved_entities"],
+    "required": ["requirement_id", "reuse_entities", "new_entities"],
     "properties": {
         "requirement_id": {"type": "string"},
         "reuse_entities": {"type": "array", "items": {"type": "string"}},
@@ -48,18 +48,6 @@ ENTITY_DECISION_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object", "additionalProperties": False, "required": ["key", "description"],
                 "properties": {"key": {"type": "string"}, "description": {"type": "string"}},
-            },
-        },
-        "unresolved_entities": {
-            "type": "array",
-            "items": {
-                "type": "object", "additionalProperties": False,
-                "required": ["concept", "candidate_entities", "reason"],
-                "properties": {
-                    "concept": {"type": "string"},
-                    "candidate_entities": {"type": "array", "items": {"type": "string"}, "minItems": 2},
-                    "reason": {"type": "string"},
-                },
             },
         },
     },
@@ -120,7 +108,7 @@ FIELD_DECISION_SCHEMA: dict[str, Any] = {
 
 RELATIONSHIP_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
-    "required": ["requirement_id", "relationships", "unresolved_relationships"],
+    "required": ["requirement_id", "relationships"],
     "properties": {
         "requirement_id": {"type": "string"},
         "relationships": {
@@ -132,21 +120,6 @@ RELATIONSHIP_DECISION_SCHEMA: dict[str, Any] = {
                     "parent": {"type": "string"}, "child": {"type": "string"},
                     "type": {"type": "string", "enum": sorted(RELATIONSHIP_TYPES)},
                     "child_required": {"type": "boolean"}, "description": {"type": "string"},
-                },
-            },
-        },
-        "unresolved_relationships": {
-            "type": "array",
-            "items": {
-                "type": "object", "additionalProperties": False,
-                "required": ["entities", "candidate_types", "reason"],
-                "properties": {
-                    "entities": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2},
-                    "candidate_types": {
-                        "type": "array", "items": {"type": "string", "enum": sorted(RELATIONSHIP_TYPES)},
-                        "minItems": 2,
-                    },
-                    "reason": {"type": "string"},
                 },
             },
         },
@@ -180,21 +153,19 @@ be introduced. Existing entities are compiler symbols: reuse them when their mea
 relationships, constraints, APIs, modules, or SQL. Entity keys are singular snake_case. Case-only name differences
 are the same symbol. Terms explicitly paired by the requirement, such as "journey/train", are aliases: reuse the
 existing entity whose description matches. UI selection, page context, form state, and other transient nouns are
-not database entities and must not be reported as unresolved. Use unresolved_entities only when one persistent
-concept has at least two existing candidate entities and the requirement cannot choose between them; include both
-candidates. Include every persistent entity used by the requirement.
+not database entities. Include every persistent entity used by the requirement. When wording permits several names,
+choose the existing entity whose persistent meaning best matches the requirement. If none matches, introduce one
+concise entity. Do not emit alternatives or unresolved decisions.
 
 Return exactly one JSON object with these keys and no others:
 - requirement_id: copy the supplied requirement.requirement_id exactly.
 - reuse_entities: array of existing entity keys; use [] when none.
 - new_entities: array of {"key": singular_snake_case, "description": string}; use [] when none.
-- unresolved_entities: array of {"concept": string, "candidate_entities": [at least two existing keys],
-  "reason": string}; use [] unless there is a real choice between existing entities.
 
 Valid output example:
-{"requirement_id":"REQ-3.2","reuse_entities":["traveler","train_service"],"new_entities":[{"key":"booking","description":"A confirmed booking."}],"unresolved_entities":[]}
+{"requirement_id":"REQ-3.2","reuse_entities":["traveler","train_service"],"new_entities":[{"key":"booking","description":"A confirmed booking."}]}
 Valid empty output example:
-{"requirement_id":"REQ-4.1","reuse_entities":[],"new_entities":[],"unresolved_entities":[]}
+{"requirement_id":"REQ-4.1","reuse_entities":[],"new_entities":[]}
 """
 
 FIELD_INSTRUCTIONS = """You are Pass 2, FIELD_DISCOVERY, of a database schema compiler.
@@ -228,21 +199,20 @@ entities, fields, foreign keys, constraints, APIs, modules, or SQL. The compiler
 The input may contain existing_relationships. Do not contradict their cardinality; repeat the same declaration
 only when this requirement also establishes or relies on that persistent relationship so traceability is retained.
 Do not infer a relationship merely because two entities appear together. A read-only requirement, transient
-selection context, or explicit statement that no record is created means no new relationship; return an empty
-relationship list without an unresolved explanation. Use unresolved_relationships only when the requirement needs
-a persistent relationship but at least two different cardinalities remain plausible; include both candidates.
+selection context, or explicit statement that no record is created means no new relationship. If the requirement
+creates or persistently associates records, choose the narrowest cardinality supported by the behavior. A child row
+that stores its parent's identity is normally child_required=true. Return an empty relationship list when no
+persistent association is established. Do not emit alternatives or unresolved decisions.
 
 Return exactly one JSON object with these keys and no others:
 - requirement_id: copy the supplied requirement.requirement_id exactly.
 - relationships: array of {"parent": entity key, "child": entity key, "type": "ONE_TO_ONE" |
   "ONE_TO_MANY" | "MANY_TO_MANY", "child_required": boolean, "description": string}.
-- unresolved_relationships: array of {"entities": [exactly two entity keys], "candidate_types": [at least two
-  relationship types], "reason": string}. Use it only for a real cardinality ambiguity.
 
 Valid output example:
-{"requirement_id":"REQ-3.2","relationships":[{"parent":"traveler","child":"booking","type":"ONE_TO_MANY","child_required":true,"description":"A traveler may own many bookings."}],"unresolved_relationships":[]}
+{"requirement_id":"REQ-3.2","relationships":[{"parent":"traveler","child":"booking","type":"ONE_TO_MANY","child_required":true,"description":"A traveler may own many bookings."}]}
 Valid no-relationship output example:
-{"requirement_id":"REQ-3.1","relationships":[],"unresolved_relationships":[]}
+{"requirement_id":"REQ-3.1","relationships":[]}
 """
 
 CONSTRAINT_INSTRUCTIONS = """You are Pass 4, CONSTRAINT_RESOLUTION, of a database schema compiler.
@@ -288,7 +258,6 @@ class DatabaseSchemaState:
         self.requirement_field_links: dict[str, set[str]] = {}
         self.requirement_relationship_links: dict[str, set[str]] = {}
         self.requirement_constraint_links: dict[str, set[str]] = {}
-        self.unresolved: list[dict[str, str]] = []
 
     def entity_headers(self) -> list[dict[str, str]]:
         return [{"key": item["key"], "description": item["description"]} for item in self._ordered_entities()]
@@ -337,13 +306,6 @@ class DatabaseSchemaState:
                     "origin": "SYSTEM", "references": None,
                 }, requirement_id, errors, trace=False)
             self._link_entity(requirement_id, key)
-        for item in decision.get("unresolved_entities", []):
-            candidates = ", ".join(str(value) for value in item.get("candidate_entities", []))
-            self._record_unresolved(
-                "UNRESOLVED_ENTITY",
-                requirement_id,
-                f"{item.get('concept', '')}: {item.get('reason', '')} (candidates: {candidates})",
-            )
 
     def apply_fields(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
         related = set(self.related_entity_keys(requirement_id))
@@ -421,14 +383,6 @@ class DatabaseSchemaState:
                         self._link_field(requirement_id, association, f"{target}_id")
             _append_unique(relationship["requirement_ids"], requirement_id)
             self.requirement_relationship_links.setdefault(requirement_id, set()).add(relationship_id)
-        for item in decision.get("unresolved_relationships", []):
-            entities = " -> ".join(str(value) for value in item.get("entities", []))
-            candidates = ", ".join(str(value) for value in item.get("candidate_types", []))
-            self._record_unresolved(
-                "UNRESOLVED_RELATIONSHIP",
-                requirement_id,
-                f"{entities}: {item.get('reason', '')} (candidate types: {candidates})",
-            )
 
     def apply_constraints(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
         allowed = set(self.related_entity_keys(requirement_id))
@@ -512,7 +466,6 @@ class DatabaseSchemaState:
             "relationships": [copy.deepcopy(self.relationships[key]) for key in sorted(self.relationships)],
             "constraints": [copy.deepcopy(self.constraints[key]) for key in sorted(self.constraints)],
             "traceability": {"requirements": traceability},
-            "unresolved": copy.deepcopy(self.unresolved),
         }
 
     def _ordered_entities(self) -> list[dict[str, Any]]:
@@ -677,10 +630,6 @@ class DatabaseSchemaState:
         entity, separator, name = reference.partition(".")
         return bool(separator and entity in self.entities and name in self.entities[entity]["fields"])
 
-    def _record_unresolved(self, kind: str, requirement_id: str, description: str) -> None:
-        self.unresolved.append({"kind": kind, "requirement_id": requirement_id, "description": description})
-
-
 class DatabaseSchemaPass:
     """Compile an ER-oriented schema through four isolated semantic passes."""
 
@@ -776,10 +725,6 @@ class DatabaseSchemaPass:
         state.add_static_constraints()
         schema = state.to_schema(status="RESOLVED")
         errors.extend(validate_database_schema(schema, expected_requirement_ids=set(requirements)))
-        errors.extend(
-            _format_error("ARC2250", f"Unresolved schema decision: {item['description']}", node_id=item["requirement_id"])
-            for item in state.unresolved
-        )
         schema["status"] = "RESOLVED" if not errors else "PROPOSED"
         states.update({node_id: "SCHEMA_ANALYZED" if not errors else "FAILED" for node_id in requirements})
         return DatabasePassResult(schema, states, errors, cache_paths, pass_artifacts)
@@ -1199,7 +1144,6 @@ def hydrate_database_schema(
                 })
     schema["constraints"] = constraints
     schema["traceability"] = {"requirements": internal_links}
-    schema["unresolved"] = []
     return schema
 
 
@@ -1233,14 +1177,10 @@ def validate_database_schema(
 
     if not isinstance(schema, dict):
         return ["schema must be a JSON object"]
-    if schema.get("schema_version") == 1:
-        return _validate_legacy_database_schema(schema)
     if schema.get("schema_version") != SCHEMA_VERSION:
-        return [f"schema_version must be 1 or {SCHEMA_VERSION}"]
+        return [f"schema_version must be {SCHEMA_VERSION}"]
     if schema.get("status") != "RESOLVED":
         return ["schema status must be RESOLVED"]
-    if schema.get("unresolved"):
-        return ["schema contains unresolved decisions"]
     entities = schema.get("entities")
     relationships = schema.get("relationships")
     constraints = schema.get("constraints")
@@ -1363,39 +1303,6 @@ def validate_database_schema(
     return errors
 
 
-def _validate_legacy_database_schema(schema: dict[str, Any]) -> list[str]:
-    """Keep --skip-database compatible with schema_version 1 artifacts."""
-
-    if schema.get("status") != "RESOLVED":
-        return ["schema status must be RESOLVED"]
-    entities = schema.get("entities")
-    if not isinstance(entities, list):
-        return ["entities must be an array"]
-    errors: list[str] = []
-    keys: set[str] = set()
-    for entity in entities:
-        key = str(entity.get("key", "")) if isinstance(entity, dict) else ""
-        if not IDENTIFIER_PATTERN.fullmatch(key) or key in keys:
-            errors.append(f"invalid or duplicate entity key: {key}")
-        keys.add(key)
-    for entity in entities:
-        if not isinstance(entity, dict):
-            errors.append("entity must be an object")
-            continue
-        key = str(entity.get("key", ""))
-        fields, relations = entity.get("fields"), entity.get("relations")
-        if not isinstance(fields, list) or not isinstance(relations, list):
-            errors.append(f"invalid entity members: {key}")
-            continue
-        names = [str(item.get("name", "")) for item in fields if isinstance(item, dict)]
-        if len(names) != len(set(names)) or any(not IDENTIFIER_PATTERN.fullmatch(name) for name in names):
-            errors.append(f"invalid or duplicate field: {key}")
-        for relation in relations:
-            if not isinstance(relation, dict) or relation.get("target_entity") not in keys:
-                errors.append(f"invalid relation target: {key}")
-    return errors
-
-
 def _field_property_errors(entity_key: str, field_item: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     name = str(field_item.get("name", ""))
@@ -1436,9 +1343,9 @@ def _validate_decision_shape(phase: str, node_id: str, decision: Any) -> list[st
     if decision.get("requirement_id") != node_id:
         errors.append("requirement_id does not match target")
     required_arrays = {
-        "pass1_entities": ("reuse_entities", "new_entities", "unresolved_entities"),
+        "pass1_entities": ("reuse_entities", "new_entities"),
         "pass2_fields": ("entities",),
-        "pass3_relationships": ("relationships", "unresolved_relationships"),
+        "pass3_relationships": ("relationships",),
         "pass4_constraints": ("constraints",),
     }[phase]
     errors.extend(f"{key} must be an array" for key in required_arrays if not isinstance(decision.get(key), list))
@@ -1450,19 +1357,6 @@ def _validate_decision_shape(phase: str, node_id: str, decision: Any) -> list[st
         for item in decision["new_entities"]:
             if not isinstance(item, dict) or not isinstance(item.get("key"), str) or not isinstance(item.get("description"), str):
                 errors.append("Pass 1 new_entities contains an invalid entity")
-        for item in decision["unresolved_entities"]:
-            if not isinstance(item, dict):
-                errors.append("Pass 1 unresolved_entities contains a non-object")
-                continue
-            candidates = item.get("candidate_entities")
-            if (
-                not isinstance(item.get("concept"), str)
-                or not isinstance(item.get("reason"), str)
-                or not isinstance(candidates, list)
-                or len(candidates) < 2
-                or any(not isinstance(value, str) for value in candidates)
-            ):
-                errors.append("Pass 1 unresolved entity must name a concept, reason, and at least two candidates")
     elif phase == "pass2_fields":
         for item in decision["entities"]:
             if not isinstance(item, dict) or not isinstance(item.get("entity"), str):
@@ -1505,22 +1399,6 @@ def _validate_decision_shape(phase: str, node_id: str, decision: Any) -> list[st
                 errors.append("Pass 3 relationship has invalid cardinality or required flag")
             if not isinstance(item.get("parent"), str) or not isinstance(item.get("child"), str):
                 errors.append("Pass 3 relationship has invalid endpoints")
-        for item in decision["unresolved_relationships"]:
-            if not isinstance(item, dict):
-                errors.append("Pass 3 unresolved_relationships contains a non-object")
-                continue
-            entities = item.get("entities")
-            candidates = item.get("candidate_types")
-            if (
-                not isinstance(item.get("reason"), str)
-                or not isinstance(entities, list)
-                or len(entities) != 2
-                or any(not isinstance(value, str) for value in entities)
-                or not isinstance(candidates, list)
-                or len(candidates) < 2
-                or any(value not in RELATIONSHIP_TYPES for value in candidates)
-            ):
-                errors.append("Pass 3 unresolved relationship must name two entities, a reason, and at least two cardinalities")
     else:
         for item in decision["constraints"]:
             if not isinstance(item, dict):
@@ -1558,19 +1436,6 @@ def _validate_decision_context(
         }
         if reused - existing:
             errors.append("Pass 1 reuses unknown entities: " + ", ".join(sorted(reused - existing)))
-        for item in decision.get("unresolved_entities", []):
-            if not isinstance(item, dict):
-                continue
-            candidates = {
-                _normalize_identifier(str(value))
-                for value in item.get("candidate_entities", [])
-                if isinstance(value, str)
-            }
-            if candidates - existing:
-                errors.append(
-                    "Pass 1 unresolved decision names unknown candidates: "
-                    + ", ".join(sorted(candidates - existing))
-                )
         return errors
 
     related_entities = context.get("related_entities")
