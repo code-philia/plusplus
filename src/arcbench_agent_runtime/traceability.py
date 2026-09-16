@@ -192,6 +192,23 @@ class TraceabilityStore:
             }
         return result
 
+    def merge_design_links(self, links: dict[str, dict[str, list[str]]]) -> None:
+        """Merge compact requirement-to-design links into requirement rows."""
+
+        requirements = self._read_table("requirements")
+        for requirement_id, design_links in sorted(links.items()):
+            row = requirements.get(requirement_id)
+            if not isinstance(row, dict):
+                row = {"req_id": requirement_id, "id": requirement_id}
+            row["design"] = {
+                key: sorted({str(value) for value in values if str(value).strip()})
+                for key, values in sorted(design_links.items())
+                if key in {"api_ids", "module_ids"} and isinstance(values, list)
+            }
+            requirements[requirement_id] = row
+        self._write_table("requirements", requirements)
+        self.events.notify_traceability_changed("design_links_merged")
+
     def store_requirement_tree(self, requirement_tree: dict[str, Any]) -> None:
         """Persist a nested ARC requirements tree into current-state tables.
 
@@ -233,6 +250,8 @@ class TraceabilityStore:
             existing = existing_requirements.get(req_id)
             if isinstance(existing, dict) and isinstance(existing.get("database"), dict):
                 requirements[req_id]["database"] = existing["database"]
+            if isinstance(existing, dict) and isinstance(existing.get("design"), dict):
+                requirements[req_id]["design"] = existing["design"]
             for scenario in node_scenarios:
                 scenario_id = str(scenario.get("id") or scenario.get("scenario_id") or "").strip()
                 if not scenario_id:
@@ -308,6 +327,8 @@ class TraceabilityStore:
         }
         if isinstance(current.get("database"), dict):
             row["database"] = current["database"]
+        if isinstance(current.get("design"), dict):
+            row["design"] = current["design"]
         self._upsert_row(
             "requirements",
             normalized_req_id,
