@@ -98,7 +98,7 @@ class Compiler:
                 validation_errors = validate_database_schema(reusable_schema)
             else:
                 validation_errors = validate_database_structure(existing_schema or {})
-                links = self._runtime.traceability.read_database_schema_links()
+                links = self._runtime.traceability.read_database_schema_links_from_requirements()
                 reusable_schema = hydrate_database_schema(existing_schema or {}, links)
                 if not validation_errors:
                     validation_errors = validate_database_schema(
@@ -177,10 +177,7 @@ class Compiler:
             structure = database_structure(database.schema)
             links = database_traceability(database.schema)
             artifacts.update(artifact_store.write_database(schema=structure))
-            self._runtime.traceability.store_database_schema_links(links)
-            artifacts["database_traceability"] = str(
-                self._runtime.traceability.table_path("database_schema")
-            )
+            self._runtime.traceability.merge_database_schema_links(links)
             database_status = "COMPLETED" if database.ok else "FAILED"
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,

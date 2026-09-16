@@ -18,7 +18,6 @@ TABLE_NAMES = (
     "call_edges",
     "node_states",
     "node_contracts",
-    "database_schema",
 )
 
 
@@ -157,22 +156,41 @@ class TraceabilityStore:
             "call_edges": self.list_call_edges(),
             "node_states": self.list_node_states(),
             "node_contracts": self.list_node_contracts(),
-            "database_schema": self.read_database_schema_links(),
         }
 
-    def store_database_schema_links(
+    def merge_database_schema_links(
         self,
         links: dict[str, dict[str, list[str]]],
     ) -> None:
-        """Replace the compact requirement-to-entity-field index."""
+        """Merge compact database links into the corresponding requirement rows."""
 
-        self._write_table("database_schema", links)
-        self.events.notify_traceability_changed("database_schema_traceability_updated")
+        requirements = self._read_table("requirements")
+        for requirement_id, entity_fields in sorted(links.items()):
+            row = requirements.get(requirement_id)
+            if not isinstance(row, dict):
+                row = {"req_id": requirement_id, "id": requirement_id}
+            row["database"] = {
+                str(entity): sorted({str(field) for field in fields})
+                for entity, fields in sorted(entity_fields.items())
+                if isinstance(fields, list)
+            }
+            requirements[requirement_id] = row
+        self._write_table("requirements", requirements)
+        self.events.notify_traceability_changed("database_schema_links_merged")
 
-    def read_database_schema_links(self) -> dict[str, dict[str, list[str]]]:
-        """Read requirement-to-entity-field links for the database schema."""
+    def read_database_schema_links_from_requirements(self) -> dict[str, dict[str, list[str]]]:
+        """Read database links embedded in the requirement traceability table."""
 
-        return self._read_table("database_schema")
+        result: dict[str, dict[str, list[str]]] = {}
+        for requirement_id, row in self._read_table("requirements").items():
+            if not isinstance(row, dict) or not isinstance(row.get("database"), dict):
+                continue
+            result[str(requirement_id)] = {
+                str(entity): [str(field) for field in fields if str(field).strip()]
+                for entity, fields in row["database"].items()
+                if isinstance(fields, list)
+            }
+        return result
 
     def store_requirement_tree(self, requirement_tree: dict[str, Any]) -> None:
         """Persist a nested ARC requirements tree into current-state tables.
@@ -182,6 +200,7 @@ class TraceabilityStore:
         SDK calls and by git history.
         """
 
+        existing_requirements = self._read_table("requirements")
         requirements: dict[str, Any] = {}
         scenarios: dict[str, Any] = {}
 
@@ -211,6 +230,9 @@ class TraceabilityStore:
                 "dependencies": _as_str_list(node.get("dependencies")),
                 "source": dict(node.get("source")) if isinstance(node.get("source"), dict) else None,
             }
+            existing = existing_requirements.get(req_id)
+            if isinstance(existing, dict) and isinstance(existing.get("database"), dict):
+                requirements[req_id]["database"] = existing["database"]
             for scenario in node_scenarios:
                 scenario_id = str(scenario.get("id") or scenario.get("scenario_id") or "").strip()
                 if not scenario_id:
@@ -271,21 +293,25 @@ class TraceabilityStore:
         if not normalized_req_id:
             raise ValueError("req_id is required")
         normalized_scenarios = [dict(item) for item in _as_list(scenarios) if isinstance(item, dict)]
+        current = self.get_requirement(normalized_req_id) or {}
+        row = {
+            "req_id": normalized_req_id,
+            "type": str(type or "ATOMIC").strip().upper(),
+            "name": str(name or "").strip(),
+            "description": str(description or "").strip(),
+            "visual_reference": _as_str_list(visual_reference),
+            "scenarios": normalized_scenarios,
+            "parent_id": _as_optional_str(parent_id),
+            "children_ids": _as_str_list(children_ids),
+            "dependencies": _as_str_list(dependencies),
+            "source": dict(source) if isinstance(source, dict) else None,
+        }
+        if isinstance(current.get("database"), dict):
+            row["database"] = current["database"]
         self._upsert_row(
             "requirements",
             normalized_req_id,
-            {
-                "req_id": normalized_req_id,
-                "type": str(type or "ATOMIC").strip().upper(),
-                "name": str(name or "").strip(),
-                "description": str(description or "").strip(),
-                "visual_reference": _as_str_list(visual_reference),
-                "scenarios": normalized_scenarios,
-                "parent_id": _as_optional_str(parent_id),
-                "children_ids": _as_str_list(children_ids),
-                "dependencies": _as_str_list(dependencies),
-                "source": dict(source) if isinstance(source, dict) else None,
-            },
+            row,
         )
         scenarios_table = self._read_table("scenarios")
         for scenario_id, scenario in list(scenarios_table.items()):
