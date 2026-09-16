@@ -91,7 +91,12 @@ class Model:
         input_payload: dict[str, Any],
         output_schema: dict[str, Any],
     ) -> dict[str, Any]:
-        user_input = json.dumps(input_payload, ensure_ascii=False, separators=(",", ":"))
+        markdown_context = input_payload.get("context_markdown")
+        user_input = (
+            markdown_context
+            if set(input_payload) == {"context_markdown"} and isinstance(markdown_context, str)
+            else json.dumps(input_payload, ensure_ascii=False, separators=(",", ":"))
+        )
         body = {
             "model": self.model,
             "messages": [
