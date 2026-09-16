@@ -1,6 +1,4 @@
 docs/*
-!docs/compiler-migration-baseline.md
-!docs/guide.md
 dist
 workspace
 AGENTS.md
