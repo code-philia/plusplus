@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -11,6 +10,7 @@ from .artifacts import CompilerArtifactStore
 from .database_pass import (
     DatabasePassResult,
     DatabaseSchemaPass,
+    database_artifact_tables,
     database_structure,
     database_traceability,
     hydrate_database_schema,
@@ -88,18 +88,15 @@ class Compiler:
 
         if request.skip_database:
             await self._log("Compiler", "Skipping DATABASE_SCHEMA pass; reusing existing database schema.")
-            existing_schema, read_error = artifact_store.read_database()
+            existing_structure, read_error = artifact_store.read_database()
             if read_error:
                 validation_errors = [read_error]
-                reusable_schema = existing_schema or {}
-            elif isinstance(existing_schema, dict) and "traceability" in existing_schema:
-                # Read schema_version 1 and early schema_version 2 artifacts during migration.
-                reusable_schema = existing_schema
-                validation_errors = validate_database_schema(reusable_schema)
+                reusable_schema = {}
             else:
-                validation_errors = validate_database_structure(existing_schema or {})
+                structure = existing_structure or {}
+                validation_errors = validate_database_structure(structure)
                 links = self._runtime.traceability.read_database_schema_links_from_requirements()
-                reusable_schema = hydrate_database_schema(existing_schema or {}, links)
+                reusable_schema = hydrate_database_schema(structure, links)
                 if not validation_errors:
                     validation_errors = validate_database_schema(
                         reusable_schema,
@@ -127,10 +124,8 @@ class Compiler:
                 node_states={node_id: "SCHEMA_REUSED" for node_id in atomic_ids},
             )
             states.update(database.node_states)
-            artifacts["database_schema"] = str(artifact_store.root / "database_schema.json")
-            artifacts["database_traceability"] = str(
-                self._runtime.traceability.table_path("database_schema")
-            )
+            artifacts["database_schema"] = str(artifact_store.database_root / "database_schema.json")
+            artifacts["database_relationships"] = str(artifact_store.database_root / "relationships.json")
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
@@ -166,8 +161,9 @@ class Compiler:
 
         if database is None:
             database_pass = DatabaseSchemaPass(model, artifact_store.root)
-            database = await asyncio.to_thread(
-                database_pass.compile,
+            # Stage 1 is deliberately synchronous: each database pass and each
+            # requirement completes before the next one starts.
+            database = database_pass.compile(
                 frontend.requirement_ir,
                 frontend.dependency_graph,
                 resume=request.resume,
@@ -176,8 +172,6 @@ class Compiler:
             artifacts.update(database.pass_artifacts)
             structure = database_structure(database.schema)
             links = database_traceability(database.schema)
-            artifacts.update(artifact_store.write_database(schema=structure))
-            self._runtime.traceability.merge_database_schema_links(links)
             database_status = "COMPLETED" if database.ok else "FAILED"
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
@@ -200,6 +194,12 @@ class Compiler:
                     failed_nodes=failed_nodes,
                     artifacts=artifacts,
                 )
+            entities, relationships = database_artifact_tables(structure)
+            artifacts.update(artifact_store.write_database(
+                entities=entities,
+                relationships=relationships,
+            ))
+            self._runtime.traceability.merge_database_schema_links(links)
 
         # ===================================================================
         #                    Compiler Design Pass

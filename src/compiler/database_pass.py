@@ -5,22 +5,19 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from arcbench_agent_runtime.jsonio import read_json, write_json_atomic
+from arcbench_agent_runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 
 from .model_client import StructuredModel, describe_model_error
 
 
 SCHEMA_VERSION = 2
-ENTITY_PROMPT_VERSION = "database-entities-v3"
-FIELD_PROMPT_VERSION = "database-fields-v3"
-RELATIONSHIP_PROMPT_VERSION = "database-relationships-v3"
-CONSTRAINT_PROMPT_VERSION = "database-constraints-v2"
 
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 FIELD_TYPES = {"string", "integer", "number", "boolean", "date", "datetime", "json", "uuid", "foreign_key"}
@@ -690,12 +687,11 @@ class DatabaseSchemaPass:
     def __init__(self, model: StructuredModel, artifact_root: Path) -> None:
         self._model = model
         self._artifact_root = artifact_root.expanduser().resolve()
-        self._database_root = self._artifact_root.parent / "database"
-        self._log = SynchronousLog("DatabaseSchemaPass", workspace_root=self._artifact_root.parents[1])
+        arc_root = self._artifact_root.parent if self._artifact_root.name == "compiler" else self._artifact_root
+        self._database_root = arc_root / "database"
+        self._log = SynchronousLog("DatabaseSchemaPass", workspace_root=arc_root.parent)
         self._retry_count = _bounded_env_int("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", 2, 0, 10)
         self._trace_enabled = _enabled_env_flag("ARC_DATABASE_TRACE", default=True)
-        self._model_trace_files = _enabled_env_flag("ARC_MODEL_TRACE_FILES", default=False)
-        self._trace_run_id = str(time.time_ns())
 
     def compile(
         self,
@@ -704,6 +700,7 @@ class DatabaseSchemaPass:
         *,
         resume: bool = False,
     ) -> DatabasePassResult:
+        shutil.rmtree(self._database_root, ignore_errors=True)
         nodes = requirement_ir.get("nodes", {})
         requirements = [
             node_id
@@ -718,13 +715,13 @@ class DatabaseSchemaPass:
         state = DatabaseSchemaState()
         for node_id in requirements:
             state.ensure_requirement(node_id)
-        passes: list[tuple[str, str, str, dict[str, Any], str, Callable[..., None]]] = [
-            ("pass1_entities", ENTITY_PROMPT_VERSION, "arc_database_entities", ENTITY_DECISION_SCHEMA, ENTITY_INSTRUCTIONS, state.apply_entities),
-            ("pass2_fields", FIELD_PROMPT_VERSION, "arc_database_fields", FIELD_DECISION_SCHEMA, FIELD_INSTRUCTIONS, state.apply_fields),
-            ("pass3_relationships", RELATIONSHIP_PROMPT_VERSION, "arc_database_relationships", RELATIONSHIP_DECISION_SCHEMA, RELATIONSHIP_INSTRUCTIONS, state.apply_relationships),
-            ("pass4_constraints", CONSTRAINT_PROMPT_VERSION, "arc_database_constraints", CONSTRAINT_DECISION_SCHEMA, CONSTRAINT_INSTRUCTIONS, state.apply_constraints),
+        passes: list[tuple[str, str, dict[str, Any], str, Callable[..., None]]] = [
+            ("pass1_entities", "arc_database_entities", ENTITY_DECISION_SCHEMA, ENTITY_INSTRUCTIONS, state.apply_entities),
+            ("pass2_fields", "arc_database_fields", FIELD_DECISION_SCHEMA, FIELD_INSTRUCTIONS, state.apply_fields),
+            ("pass3_relationships", "arc_database_relationships", RELATIONSHIP_DECISION_SCHEMA, RELATIONSHIP_INSTRUCTIONS, state.apply_relationships),
+            ("pass4_constraints", "arc_database_constraints", CONSTRAINT_DECISION_SCHEMA, CONSTRAINT_INSTRUCTIONS, state.apply_constraints),
         ]
-        for phase, prompt_version, schema_name, output_schema, instructions, apply_decision in passes:
+        for phase, schema_name, output_schema, instructions, apply_decision in passes:
             self._trace(f"PASS_START phase={phase} requirements={len(requirements)}")
             for node_id in requirements:
                 node = nodes.get(node_id)
@@ -737,7 +734,6 @@ class DatabaseSchemaPass:
                     continue
                 decision = self._run_unit(
                     phase=phase,
-                    prompt_version=prompt_version,
                     schema_name=schema_name,
                     output_schema=output_schema,
                     instructions=instructions,
@@ -745,9 +741,7 @@ class DatabaseSchemaPass:
                     context=self._context_for(
                         phase, node_id, node, nodes, state, effective_dependencies
                     ),
-                    resume=resume,
                     errors=errors,
-                    cache_paths=cache_paths,
                 )
                 if decision is None:
                     states[node_id] = "FAILED"
@@ -769,7 +763,8 @@ class DatabaseSchemaPass:
                 )
             if phase == "pass4_constraints" and not errors:
                 state.add_static_constraints()
-            pass_artifacts[phase] = self._write_pass_artifact(phase, state)
+            artifact_name, artifact_path = self._write_pass_artifact(phase, state)
+            pass_artifacts[artifact_name] = artifact_path
             self._trace(f"PASS_COMPLETED phase={phase} requirements={len(requirements)}")
             if errors:
                 return DatabasePassResult(
@@ -820,57 +815,18 @@ class DatabaseSchemaPass:
         self,
         *,
         phase: str,
-        prompt_version: str,
         schema_name: str,
         output_schema: dict[str, Any],
         instructions: str,
         node_id: str,
         context: dict[str, Any],
-        resume: bool,
         errors: list[str],
-        cache_paths: dict[str, str],
     ) -> dict[str, Any] | None:
-        input_hash = _stable_hash({"prompt_version": prompt_version, "context": context})
-        cache_path = self._database_root / "decisions" / phase / f"{_safe_name(node_id)}.json"
-        cache_paths[f"{phase}:{node_id}"] = str(cache_path)
-        cached_feedback: list[str] = []
-        if resume:
-            cached = read_json(cache_path, {})
-            decision = cached.get("decision")
-            decision, normalization_notes = _normalize_decision_context(phase, decision, context)
-            for note in normalization_notes:
-                self._trace(f"CACHE_NORMALIZED phase={phase} requirement={node_id} action={note}")
-            cached_errors = _validate_decision_shape(phase, node_id, decision)
-            cached_errors.extend(_validate_decision_context(phase, decision, context))
-            if cached.get("input_sha256") == input_hash and not cached_errors:
-                self._trace(f"CACHE_HIT phase={phase} requirement={node_id}")
-                return decision
-            if cached.get("input_sha256") == input_hash and cached_errors:
-                cached_feedback = cached_errors
-                self._trace(
-                    f"CACHE_REJECTED phase={phase} requirement={node_id} "
-                    f"errors={'; '.join(cached_errors)}"
-                )
-
-        feedback: list[str] = cached_feedback
+        feedback: list[str] = []
         for attempt in range(self._retry_count + 1):
             payload = copy.deepcopy(context)
             if feedback:
                 payload["previous_validation_errors"] = feedback
-            trace_path = self._database_root / "model_traces" / phase / (
-                f"{_safe_name(node_id)}-{self._trace_run_id}-attempt-{attempt + 1}.json"
-            )
-            trace = {
-                "schema_version": 1,
-                "phase": phase,
-                "requirement_id": node_id,
-                "attempt": attempt + 1,
-                "prompt_version": prompt_version,
-                "input_payload": payload,
-                "output_schema": output_schema,
-                "status": "REQUESTED",
-            }
-            self._write_trace(trace_path, trace)
             started_at = time.monotonic()
             self._trace(
                 f"MODEL_REQUEST phase={phase} requirement={node_id} "
@@ -900,7 +856,6 @@ class DatabaseSchemaPass:
             except Exception as exc:
                 duration_ms = round((time.monotonic() - started_at) * 1000)
                 feedback = [f"Model call failed: {describe_model_error(exc)}"]
-                trace.update({"status": "TRANSPORT_ERROR", "error": feedback[0]})
                 self._trace(
                     f"MODEL_ERROR phase={phase} requirement={node_id} "
                     f"attempt={attempt + 1} duration_ms={duration_ms} error={feedback[0]}"
@@ -922,37 +877,35 @@ class DatabaseSchemaPass:
                     )
                 feedback = _validate_decision_shape(phase, node_id, decision)
                 feedback.extend(_validate_decision_context(phase, decision, context))
-                trace.update({
-                    "status": "VALIDATION_ERROR" if feedback else "ACCEPTED",
-                    "output": decision,
-                    "validation_errors": feedback,
-                })
                 if not feedback:
-                    write_json_atomic(cache_path, {
-                        "schema_version": 1,
-                        "prompt_version": prompt_version,
-                        "input_sha256": input_hash,
-                        "decision": decision,
-                    })
-                    self._write_trace(trace_path, trace)
                     self._trace(
                         f"MODEL_ACCEPTED phase={phase} requirement={node_id} "
                         f"attempt={attempt + 1} duration_ms={duration_ms}"
                     )
                     return decision
-            self._write_trace(trace_path, trace)
             self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
         errors.append(_format_error("ARC2103", f"{phase} failed: {'; '.join(feedback)}", node_id=node_id))
         return None
 
-    def _write_pass_artifact(self, phase: str, state: DatabaseSchemaState) -> str:
-        path = self._database_root / f"{phase}.json"
-        write_json_atomic(path, state.to_schema(status="PROPOSED"))
-        return str(path)
-
-    def _write_trace(self, path: Path, payload: dict[str, Any]) -> None:
-        if self._model_trace_files:
-            write_json_atomic(path, payload)
+    def _write_pass_artifact(self, phase: str, state: DatabaseSchemaState) -> tuple[str, str]:
+        structure = database_structure(state.to_schema(status="PROPOSED"))
+        entities, relationships = database_artifact_tables(structure)
+        if phase in {"pass1_entities", "pass2_fields"}:
+            path = self._database_root / "database_schema.json"
+            if phase == "pass1_entities":
+                entities = {
+                    entity_id: {**entity, "fields": []}
+                    for entity_id, entity in entities.items()
+                }
+            write_json_atomic(path, entities)
+            return "database_schema", str(path)
+        if phase == "pass3_relationships":
+            path = self._database_root / "relationships.json"
+            write_json_atomic(path, relationships)
+            return "database_relationships", str(path)
+        path = self._database_root / "database_schema.json"
+        write_json_atomic(path, entities)
+        return "database_schema", str(path)
 
     def _trace(self, message: str) -> None:
         if self._trace_enabled:
@@ -1037,6 +990,43 @@ def database_structure(schema: dict[str, Any]) -> dict[str, Any]:
         "relationships": relationships,
         "constraints": constraints,
     }
+
+
+def database_artifact_tables(
+    structure: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Build a JSON ER graph with inline constraints and separate relationship edges."""
+
+    entities: dict[str, dict[str, Any]] = {}
+    for item in structure.get("entities", []):
+        entity = copy.deepcopy(item)
+        entity_id = str(entity.pop("key", "")).strip()
+        if entity_id:
+            entities[entity_id] = entity
+    fields_by_reference = {
+        f"{entity_id}.{field.get('name', '')}": field
+        for entity_id, entity in entities.items()
+        for field in entity.get("fields", [])
+        if isinstance(field, dict) and field.get("name")
+    }
+    for item in structure.get("constraints", []):
+        constraint = {"kind": "CONSTRAINT", **copy.deepcopy(item)}
+        references = [str(value) for value in constraint.get("fields", [])]
+        if len(references) == 1 and references[0] in fields_by_reference:
+            constraint.pop("fields", None)
+            fields_by_reference[references[0]].setdefault("constraints", []).append(constraint)
+            continue
+        owner = next(
+            (reference.partition(".")[0] for reference in references if reference.partition(".")[0] in entities),
+            next(iter(entities), ""),
+        )
+        if owner:
+            entities[owner].setdefault("constraints", []).append(constraint)
+    relationships = [
+        {"kind": "RELATIONSHIP", **copy.deepcopy(item)}
+        for item in structure.get("relationships", [])
+    ]
+    return dict(sorted(entities.items())), relationships
 
 
 def database_traceability(schema: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
@@ -1810,15 +1800,6 @@ def _association_entity_key(parent: str, child: str) -> str:
     return f"{parent}_{child}_association"
 
 
-def _safe_name(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._") or "requirement"
-
-
-def _stable_hash(payload: dict[str, Any]) -> str:
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _append_unique(values: list[str], value: str) -> None:
     if value not in values:
         values.append(value)
@@ -1872,6 +1853,7 @@ __all__ = [
     "RELATIONSHIP_DECISION_SCHEMA",
     "RELATIONSHIP_INSTRUCTIONS",
     "database_structure",
+    "database_artifact_tables",
     "database_traceability",
     "hydrate_database_schema",
     "schema_for_requirement",

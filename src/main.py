@@ -133,7 +133,7 @@ def build_compile_parser(subparsers) -> None:
     parser.add_argument(
         "--skip-database",
         action="store_true",
-        help="Reuse <output-dir>/.arc/compiler/database_schema.json and start at DESIGN",
+        help="Reuse <output-dir>/.arc/database/{database_schema,relationships}.json and start at DESIGN",
     )
     parser.add_argument(
         "--retry-failed",
