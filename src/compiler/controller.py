@@ -7,7 +7,7 @@ from typing import Awaitable, Callable
 from arcbench_agent_runtime.runtime import AgentRuntime
 
 from .artifacts import CompilerArtifactStore
-from .database_pass import (
+from .database_stage import (
     DatabasePassResult,
     DatabaseSchemaPass,
     database_artifact_tables,
@@ -17,8 +17,8 @@ from .database_pass import (
     validate_database_schema,
     validate_database_structure,
 )
-from .design_pass import DesignPass, database_hash, design_hash
-from .frontend import RequirementFrontend
+from .design_stage import DesignPass, design_traceability
+from .frontend_stage import RequirementFrontend
 from .model_client import Model, ModelConfigurationError, StructuredModel
 from .models import CompilationRequest, CompilationResult
 
@@ -43,7 +43,7 @@ class Compiler:
     async def compile(self, request: CompilationRequest) -> CompilationResult:
 
         # ===================================================================
-        #                    Compiler Frontend Pass
+        #                    Compiler Frontend Stage
         # ===================================================================
 
         await self._log("Compiler", "Running deterministic FRONTEND pass.")
@@ -83,7 +83,7 @@ class Compiler:
             )
 
         # ===================================================================
-        #                    Compiler Database Pass
+        #                    Compiler Database Stage
         # ===================================================================
 
         if request.skip_database:
@@ -160,10 +160,10 @@ class Compiler:
             )
 
         if database is None:
-            database_pass = DatabaseSchemaPass(model, artifact_store.root)
+            database_stage = DatabaseSchemaPass(model, artifact_store.root)
             # Stage 1 is deliberately synchronous: each database pass and each
             # requirement completes before the next one starts.
-            database = database_pass.compile(
+            database = database_stage.compile(
                 frontend.requirement_ir,
                 frontend.dependency_graph,
                 resume=request.resume,
@@ -202,29 +202,32 @@ class Compiler:
             self._runtime.traceability.merge_database_schema_links(links)
 
         # ===================================================================
-        #                    Compiler Design Pass
+        #                    Compiler Design Stage
         # ===================================================================
 
-        await self._log(
-            "Compiler",
-            "Running REQUIREMENT_CONTRACT, MODULE_CALL_TREE, and FLOW_BINDING passes.",
-        )
-        design_pass = DesignPass(model, artifact_store.root)
-        design = await asyncio.to_thread(
-            design_pass.compile,
+        design_stage = DesignPass(model, artifact_store.root)
+        if design_stage.stop_after == "API":
+            design_message = (
+                "Running REQUIREMENT CONTRACT and REQUIREMENT TO API passes; "
+                "Stage 2 stops after API generation."
+            )
+        elif design_stage.stop_after == "FUNC":
+            design_message = (
+                "Running REQUIREMENT CONTRACT, REQUIREMENT TO API, and API TO FUNC decomposition; "
+                "Stage 2 stops after direct FUNC generation."
+            )
+        else:
+            design_message = (
+                "Running REQUIREMENT CONTRACT, REQUIREMENT TO API, and full top-down MODULE DECOMPOSITION passes."
+            )
+        await self._log("Compiler", design_message)
+        # Stage 2 keeps contract generation and module materialization serial.
+        design = design_stage.compile(
             frontend.requirement_ir,
             frontend.dependency_graph,
             database.schema,
-            resume=request.resume,
         )
         states.update(design.node_states)
-        artifacts.update(
-            artifact_store.write_design(
-                design_ir=design.design_ir,
-                design_sha256=design_hash(design.design_ir) if design.ok else None,
-                database_sha256=database_hash(database.schema) if design.ok else None,
-            )
-        )
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
@@ -248,24 +251,15 @@ class Compiler:
                 artifacts=artifacts,
             )
 
-        await self._log(
-            "Compiler",
-            "Design IR completed and frozen; lowering, implementation, and acceptance passes are pending.",
-            "warning",
-        )
-        return CompilationResult(
-            ok=True,
-            complete=False,
-            root_id=root_id,
-            states=states,
-            artifacts=artifacts,
-        )
+        artifacts.update(artifact_store.write_design(design_ir=design.design_ir))
+        self._runtime.traceability.merge_design_links(design_traceability(design.design_ir))
 
-        await self._log(
-            "Compiler",
-            "Database schema completed; the DESIGN pass is currently disabled.",
-            "warning",
-        )
+        final_message = {
+            "API": "Stage 2 API boundary completed; FUNC and DB generation was intentionally skipped.",
+            "FUNC": "Stage 2 FUNC boundary completed; direct FUNC modules were generated and deeper decomposition was intentionally skipped.",
+            "MODULES": "Design IR completed; lowering, implementation, and acceptance passes are pending.",
+        }[design_stage.stop_after]
+        await self._log("Compiler", final_message, "warning")
         return CompilationResult(
             ok=True,
             complete=False,
