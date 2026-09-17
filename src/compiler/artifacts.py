@@ -8,6 +8,18 @@ from typing import Any
 
 from arcbench_agent_runtime.jsonio import write_json_atomic
 
+from .design_projection import (
+    project_api_contracts,
+    project_api_modules,
+    project_backend_module,
+)
+from .frontend_design import validate_frontend_design_minimum
+from .frontend_ir import (
+    FRONTEND_DESIGN_TABLE_SCHEMAS,
+    FRONTEND_IR_SCHEMA_VERSION,
+    schema_shape_errors,
+)
+
 
 class CompilerArtifactStore:
     """Persist compact, stage-owned JSON symbol tables."""
@@ -19,7 +31,10 @@ class CompilerArtifactStore:
         self.preprocessing_root = self.root / "preprocessing"
         self.database_root = self.root / "database"
         self.design_root = self.root / "design"
+        self.backend_design_root = self.design_root / "backend"
+        self.frontend_design_root = self.design_root / "frontend"
         self.backend_root = self.root / "backend"
+        self.frontend_root = self.root / "frontend"
 
     def write_preprocessing(
         self,
@@ -158,48 +173,33 @@ class CompilerArtifactStore:
         ]
         modules = [item for item in design_ir.get("modules", []) if isinstance(item, dict)]
 
-        def compact_field(field: dict[str, Any]) -> dict[str, Any]:
-            return {
-                key: copy.deepcopy(field[key])
-                for key in ("semantic_id", "name", "type", "required")
-                if key in field
-            }
-
-        def compact_effect(effect: dict[str, Any]) -> dict[str, Any]:
-            return {
-                key: copy.deepcopy(effect[key])
-                for key in ("id", "operation", "target", "fields", "action")
-                if effect.get(key) is not None
-            }
-
-        def compact_module(module: dict[str, Any]) -> dict[str, Any]:
-            return {
-                "id": str(module.get("id", "")),
-                "spec": str(module.get("spec", "")),
-                "inputs": [compact_field(item) for item in module.get("inputs", []) if isinstance(item, dict)],
-                "outputs": [compact_field(item) for item in module.get("outputs", []) if isinstance(item, dict)],
-                "effects": [compact_effect(item) for item in module.get("effects", []) if isinstance(item, dict)],
-                "callers": sorted({str(value) for value in module.get("callers", []) if str(value)}),
-                "callees": list(dict.fromkeys(str(value) for value in module.get("callees", []) if str(value))),
-            }
-
         tables = {
             "design_requirement_contracts": (self.design_root / "requirement_contracts.json", requirements),
+            "design_api_contracts": (
+                self.design_root / "api_contracts.json",
+                project_api_contracts(design_ir),
+            ),
             "design_api_modules": (
-                self.design_root / "api_modules.json",
-                [compact_module(item) for item in modules if item.get("kind") == "API"],
+                self.backend_design_root / "api_modules.json",
+                project_api_modules(design_ir),
             ),
             "design_function_modules": (
-                self.design_root / "function_modules.json",
-                [compact_module(item) for item in modules if item.get("kind") == "FUNC"],
+                self.backend_design_root / "function_modules.json",
+                [project_backend_module(item) for item in modules if item.get("kind") == "FUNC"],
             ),
             "design_db_modules": (
-                self.design_root / "db_modules.json",
-                [compact_module(item) for item in modules if item.get("kind") == "DB"],
+                self.backend_design_root / "db_modules.json",
+                [project_backend_module(item) for item in modules if item.get("kind") == "DB"],
             ),
         }
         for path, values in tables.values():
             write_json_atomic(path, values)
+        for legacy_path in (
+            self.design_root / "api_modules.json",
+            self.design_root / "function_modules.json",
+            self.design_root / "db_modules.json",
+        ):
+            legacy_path.unlink(missing_ok=True)
         return {name: str(path) for name, (path, _) in tables.items()}
 
     def read_design(
@@ -207,13 +207,14 @@ class CompilerArtifactStore:
         *,
         expected_requirement_ids: set[str] | None = None,
     ) -> tuple[dict[str, Any] | None, str | None]:
-        """Read and validate the four persisted Design symbol tables."""
+        """Read and validate the shared contracts and Backend module tables."""
 
         table_paths = {
             "contracts": self.design_root / "requirement_contracts.json",
-            "API": self.design_root / "api_modules.json",
-            "FUNC": self.design_root / "function_modules.json",
-            "DB": self.design_root / "db_modules.json",
+            "api_contracts": self.design_root / "api_contracts.json",
+            "API": self.backend_design_root / "api_modules.json",
+            "FUNC": self.backend_design_root / "function_modules.json",
+            "DB": self.backend_design_root / "db_modules.json",
         }
         for path in table_paths.values():
             if not path.is_file():
@@ -244,10 +245,67 @@ class CompilerArtifactStore:
             extra = sorted(set(contracts) - expected_requirement_ids)
             return None, f"Design requirements do not match current requirements; missing={missing}, extra={extra}"
 
+        api_contracts: dict[str, dict[str, Any]] = {}
+        api_contract_keys = {"id", "spec", "inputs", "outputs", "effects"}
+        for index, item in enumerate(tables["api_contracts"]):
+            if not isinstance(item, dict):
+                return None, (
+                    "API contract must be an object: "
+                    f"{table_paths['api_contracts']}[{index}]"
+                )
+            if set(item) != api_contract_keys:
+                return None, (
+                    "API contract must contain only shared interface fields "
+                    f"{sorted(api_contract_keys)}: {table_paths['api_contracts']}[{index}]"
+                )
+            api_id = str(item.get("id", "")).strip()
+            parts = api_id.split("::", 1)
+            if len(parts) != 2 or not parts[0] or not parts[1].startswith("API."):
+                return None, f"Invalid API contract id: {api_id!r}"
+            if parts[0] not in contracts:
+                return None, f"API contract {api_id} has no requirement contract"
+            if api_id in api_contracts:
+                return None, f"Duplicate API contract id: {api_id}"
+            if not isinstance(item.get("spec"), str):
+                return None, f"API contract {api_id} spec must be a string"
+            for field_name in ("inputs", "outputs", "effects"):
+                if not isinstance(item.get(field_name), list):
+                    return None, f"API contract {api_id} field {field_name} must be a list"
+            api_contracts[api_id] = copy.deepcopy(item)
+
+        api_modules: list[dict[str, Any]] = []
+        api_module_ids: set[str] = set()
+        api_module_keys = {"id", "callers", "callees"}
+        for index, item in enumerate(tables["API"]):
+            if not isinstance(item, dict):
+                return None, f"API module must be an object: {table_paths['API']}[{index}]"
+            if set(item) != api_module_keys:
+                return None, (
+                    "API module must contain only Backend graph fields "
+                    f"{sorted(api_module_keys)}: {table_paths['API']}[{index}]"
+                )
+            api_id = str(item.get("id", "")).strip()
+            if api_id in api_module_ids:
+                return None, f"Duplicate API module id: {api_id}"
+            if api_id not in api_contracts:
+                return None, f"API module {api_id} has no shared API contract"
+            if not isinstance(item.get("callers"), list) or not isinstance(item.get("callees"), list):
+                return None, f"API module {api_id} callers/callees must be lists"
+            api_module_ids.add(api_id)
+            api_modules.append({**copy.deepcopy(api_contracts[api_id]), **copy.deepcopy(item)})
+        if api_module_ids != set(api_contracts):
+            missing_modules = sorted(set(api_contracts) - api_module_ids)
+            return None, f"Shared API contracts have no Backend API modules: {missing_modules}"
+
         modules: list[dict[str, Any]] = []
         module_by_id: dict[str, dict[str, Any]] = {}
+        module_tables = {
+            "API": api_modules,
+            "FUNC": tables["FUNC"],
+            "DB": tables["DB"],
+        }
         for kind in ("API", "FUNC", "DB"):
-            for index, item in enumerate(tables[kind]):
+            for index, item in enumerate(module_tables[kind]):
                 if not isinstance(item, dict):
                     return None, f"{kind} module must be an object: {table_paths[kind]}[{index}]"
                 module_id = str(item.get("id", "")).strip()
@@ -321,6 +379,77 @@ class CompilerArtifactStore:
             for requirement_id, contract in sorted(contracts.items())
         ]
         return {"requirements": requirements, "modules": modules}, None
+
+    def write_frontend_design(
+        self,
+        *,
+        frontend_ir: dict[str, Any],
+    ) -> dict[str, str]:
+        """Persist Frontend tables; requirement links remain in traceability."""
+
+        issues = validate_frontend_design_minimum(frontend_ir)
+        if issues:
+            raise ValueError(f"Cannot persist invalid Frontend Design IR: {issues[0].format()}")
+        tables = {
+            table_name: (
+                self.frontend_design_root / f"{table_name}.json",
+                copy.deepcopy(frontend_ir[table_name]),
+            )
+            for table_name in FRONTEND_DESIGN_TABLE_SCHEMAS
+        }
+        for path, values in tables.values():
+            write_json_atomic(path, values)
+        (self.frontend_design_root / "requirement_links.json").unlink(missing_ok=True)
+        return {
+            f"frontend_design_{table_name}": str(path)
+            for table_name, (path, _) in tables.items()
+        }
+
+    def read_frontend_design(
+        self,
+        *,
+        requirement_links: list[dict[str, Any]],
+        expected_requirement_ids: set[str] | None = None,
+        backend_api_ids: set[str] | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Read Frontend tables and attach links owned by traceability."""
+
+        table_paths = {
+            table_name: self.frontend_design_root / f"{table_name}.json"
+            for table_name in FRONTEND_DESIGN_TABLE_SCHEMAS
+        }
+        for path in table_paths.values():
+            if not path.is_file():
+                return None, f"Frontend Design artifact does not exist: {path}"
+
+        tables: dict[str, list[Any]] = {}
+        for table_name, path in table_paths.items():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                return None, f"Cannot read Frontend Design artifact {path}: {exc}"
+            shape_errors = schema_shape_errors(
+                payload,
+                FRONTEND_DESIGN_TABLE_SCHEMAS[table_name],
+                path=f"$.{table_name}",
+            )
+            if shape_errors:
+                return None, f"Invalid Frontend Design artifact {path}: {shape_errors[0]}"
+            tables[table_name] = payload
+
+        frontend_ir = {
+            "schema_version": FRONTEND_IR_SCHEMA_VERSION,
+            **tables,
+            "requirement_links": copy.deepcopy(requirement_links),
+        }
+        issues = validate_frontend_design_minimum(
+            frontend_ir,
+            expected_requirement_ids=expected_requirement_ids,
+            backend_api_ids=backend_api_ids,
+        )
+        if issues:
+            return None, f"Frontend Design artifacts cannot be reused: {issues[0].format()}"
+        return frontend_ir, None
 
     def read_project_manifest(self) -> tuple[dict[str, Any] | None, str | None]:
         """Validate the project-initialization boundary before Skeleton starts."""
@@ -415,6 +544,37 @@ class CompilerArtifactStore:
             write_json_atomic(path, payloads[name])
         return {name: str(path) for name, path in paths.items()}
 
+    def write_frontend_symbol_registry(self, registry: dict[str, Any]) -> str:
+        path = self.frontend_root / "symbol_registry.json"
+        write_json_atomic(path, registry)
+        return str(path)
+
+    def write_frontend_file_registry(self, registry: dict[str, Any]) -> str:
+        path = self.frontend_root / "file_registry.json"
+        write_json_atomic(path, registry)
+        return str(path)
+
+    def write_frontend_lowering(
+        self,
+        *,
+        route_registry: dict[str, Any],
+        import_plan: dict[str, Any],
+        manifest: dict[str, Any],
+    ) -> dict[str, str]:
+        paths = {
+            "frontend_route_registry": self.frontend_root / "route_registry.json",
+            "frontend_import_plan": self.frontend_root / "import_plan.json",
+            "frontend_manifest": self.frontend_root / "manifest.json",
+        }
+        payloads = {
+            "frontend_route_registry": route_registry,
+            "frontend_import_plan": import_plan,
+            "frontend_manifest": manifest,
+        }
+        for name, path in paths.items():
+            write_json_atomic(path, payloads[name])
+        return {name: str(path) for name, path in paths.items()}
+
     def write_generated_sources(self, sources: dict[str, str]) -> dict[str, str]:
         """Atomically materialize compiler-planned source files inside the output workspace."""
 
@@ -428,7 +588,7 @@ class CompilerArtifactStore:
                 or path.is_absolute()
                 or "." in path.parts
                 or ".." in path.parts
-                or not normalized.endswith(".ts")
+                or not normalized.endswith((".ts", ".tsx"))
             ):
                 raise ValueError(f"Invalid generated source path: {relative!r}")
             target = (output_root / Path(normalized)).resolve()
@@ -437,6 +597,8 @@ class CompilerArtifactStore:
             if not (
                 normalized.startswith("backend/src/")
                 or normalized.startswith("shared/src/")
+                or normalized.startswith("frontend/src/")
+                or normalized == "frontend/vite.config.ts"
             ):
                 raise ValueError(f"Generated source is outside Stage 3 output roots: {relative!r}")
             target.parent.mkdir(parents=True, exist_ok=True)

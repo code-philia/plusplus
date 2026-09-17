@@ -240,6 +240,7 @@ class ProjectInitializer:
             self._remove_exact(frontend_src / relative)
         for directory in ("api", "app", "components", "pages"):
             (frontend_src / directory).mkdir(parents=True, exist_ok=True)
+        (frontend_src / "app" / "stores").mkdir(parents=True, exist_ok=True)
         self._write_text(
             frontend_src / "App.tsx",
             'export default function App() {\n  return <div id="arc-app" />;\n}\n',
@@ -403,6 +404,7 @@ class ProjectInitializer:
                 "runtime": "node",
                 "moduleSystem": "NodeNext",
                 "webFramework": "express",
+                "servesFrontendDist": True,
                 "validation": "zod",
                 "database": "sqlite",
                 "orm": "drizzle",
@@ -417,6 +419,13 @@ class ProjectInitializer:
             "layout": "npm-workspaces",
             "packageManager": "npm",
             "lockfile": "package-lock.json",
+            "deployment": {
+                "workingDirectory": "backend",
+                "startCommand": "npm run start",
+                "serverEntry": "backend/dist/server.js",
+                "frontendDist": "frontend/dist",
+                "spaFallback": "frontend/dist/index.html",
+            },
             "workspaces": {
                 "frontend": {"root": "frontend", "sourceRoot": "frontend/src"},
                 "backend": {
@@ -432,6 +441,8 @@ class ProjectInitializer:
             },
             "owners": {
                 "frontend/src/main.tsx": "PROJECT_INITIALIZER",
+                "frontend/src/App.tsx": "FRONTEND_SKELETON_COMPILER",
+                "frontend/vite.config.ts": "FRONTEND_SKELETON_COMPILER",
                 "shared/src/index.ts": "COMPILER",
                 "backend/src": "SKELETON_COMPILER",
                 "shared/src/contracts": "SKELETON_COMPILER",
@@ -439,6 +450,8 @@ class ProjectInitializer:
             "allowedOutputRoots": {
                 "skeleton": ["backend/src", "shared/src/contracts", "shared/src/index.ts"],
                 "frontendSkeleton": [
+                    "frontend/vite.config.ts",
+                    "frontend/src/App.tsx",
                     "frontend/src/app",
                     "frontend/src/api",
                     "frontend/src/components",
@@ -457,6 +470,12 @@ class ProjectInitializer:
 
     def _validate_manifest_paths(self, manifest: dict[str, Any]) -> None:
         values: list[str] = [str(manifest["lockfile"])]
+        deployment = manifest.get("deployment", {})
+        values.extend(
+            str(deployment[key])
+            for key in ("workingDirectory", "serverEntry", "frontendDist", "spaFallback")
+            if deployment.get(key)
+        )
         for workspace in manifest["workspaces"].values():
             values.extend(value for key, value in workspace.items() if key.endswith("Root") or key == "root")
         for roots in manifest["allowedOutputRoots"].values():
@@ -574,7 +593,7 @@ class ProjectInitializer:
                 "typecheck": (
                     "npm run build -w @arc/shared && tsc --noEmit -p tsconfig.json"
                 ),
-                "start": "node dist/server.js",
+                "start": "node ./dist/server.js",
                 "db:generate": "drizzle-kit generate",
                 "db:migrate": "drizzle-kit migrate",
             },

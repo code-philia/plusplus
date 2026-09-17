@@ -19,7 +19,19 @@ from .database_stage import (
     validate_database_structure,
 )
 from .design_stage import DesignPass, DesignPassResult, design_traceability
+from .design_projection import project_api_contracts
 from .file_planning import GlobalFilePlanner
+from .frontend_component_design import (
+    PageLayoutComponentPass,
+    finalize_frontend_design,
+    frontend_design_traceability,
+)
+from .frontend_design import RequirementUIScopePass
+from .frontend_lowering import (
+    FrontendFilePlanner,
+    FrontendGlobalSymbolPlanner,
+    FrontendSkeletonLowerer,
+)
 from .preprocessing_stage import RequirementPreprocessor
 from .model_client import Model, ModelConfigurationError, StructuredModel
 from .models import CompilationRequest, CompilationResult
@@ -28,6 +40,7 @@ from .project_build import ProjectBuilder
 from .project_initialization import ProjectInitializer
 from .skeleton_lowering import DatabaseSchemaLowerer, TypeLowerer
 from .symbol_planning import GlobalSymbolPlanner
+from .visual_reference import VisualReferenceAnalyzer, VisualReferenceResolver
 
 
 LogCallback = Callable[[str, str, str | None, str | None], Awaitable[None] | None]
@@ -52,8 +65,9 @@ class Compiler:
             "PREPROCESSING": 0,
             "DATABASE": 1,
             "DESIGN": 2,
-            "PROJECT": 3,
-            "SKELETON": 4,
+            "FRONTEND": 3,
+            "PROJECT": 4,
+            "SKELETON": 5,
         }
         start_from = str(request.start_from or "PREPROCESSING").strip().upper()
         if start_from not in stage_order:
@@ -62,6 +76,7 @@ class Compiler:
         start_rank = stage_order[start_from]
         database_reused = start_rank > stage_order["DATABASE"]
         design_reused = start_rank > stage_order["DESIGN"]
+        frontend_design_reused = start_rank > stage_order["FRONTEND"]
         project_reused = start_rank > stage_order["PROJECT"]
 
         # ===================================================================
@@ -280,11 +295,18 @@ class Compiler:
             states.update(design.node_states)
             for name, filename in (
                 ("design_requirement_contracts", "requirement_contracts.json"),
-                ("design_api_modules", "api_modules.json"),
-                ("design_function_modules", "function_modules.json"),
-                ("design_db_modules", "db_modules.json"),
+                ("design_api_contracts", "api_contracts.json"),
             ):
                 artifacts[name] = str(artifact_store.design_root / filename)
+            artifacts["design_api_modules"] = str(
+                artifact_store.backend_design_root / "api_modules.json"
+            )
+            artifacts["design_function_modules"] = str(
+                artifact_store.backend_design_root / "function_modules.json"
+            )
+            artifacts["design_db_modules"] = str(
+                artifact_store.backend_design_root / "db_modules.json"
+            )
             await self._log(
                 "Compiler",
                 f"START_PROBE stage={start_from} upstream=DESIGN source=.arc/design status=VALIDATED",
@@ -354,6 +376,193 @@ class Compiler:
             self._runtime.traceability.merge_design_links(design_traceability(design.design_ir))
 
         # ===================================================================
+        #                 Compiler Frontend Design Stage
+        # ===================================================================
+
+        backend_api_ids = {
+            str(module.get("id"))
+            for module in design.design_ir.get("modules", [])
+            if isinstance(module, dict)
+            and module.get("kind") == "API"
+            and str(module.get("id", "")).strip()
+        }
+        frontend_design_ir: dict[str, object] = {}
+        frontend_errors: list[str] = []
+
+        if frontend_design_reused:
+            await self._log(
+                "Compiler",
+                f"START_PROBE stage={start_from} upstream=FRONTEND_DESIGN "
+                "source=.arc/design/frontend status=VALIDATING",
+            )
+            reusable_frontend, read_error = artifact_store.read_frontend_design(
+                requirement_links=(
+                    self._runtime.traceability.read_frontend_design_links_from_requirements()
+                ),
+                expected_requirement_ids=set(atomic_ids),
+                backend_api_ids=backend_api_ids,
+            )
+            if read_error:
+                frontend_errors.append(f"ARC4150: Cannot reuse Frontend Design IR: {read_error}")
+            else:
+                frontend_design_ir = reusable_frontend or {}
+                for table_name in (
+                    "visual_references",
+                    "layouts",
+                    "pages",
+                    "components",
+                    "stores",
+                    "local_data_contracts",
+                    "composition_edges",
+                    "api_dependencies",
+                ):
+                    artifacts[f"frontend_design_{table_name}"] = str(
+                        artifact_store.frontend_design_root / f"{table_name}.json"
+                    )
+                await self._log(
+                    "Compiler",
+                    f"START_PROBE stage={start_from} upstream=FRONTEND_DESIGN "
+                    "source=.arc/design/frontend status=VALIDATED",
+                )
+        else:
+            try:
+                model = model or Model.from_env()
+            except ModelConfigurationError as exc:
+                frontend_errors.append(str(exc))
+            if model is None:
+                frontend_errors.append("ARC4120 UI_SCOPE_MODEL_FAILED: Frontend Design has no configured model.")
+
+        if not frontend_design_reused and not frontend_errors:
+            assert model is not None
+            await self._log(
+                "Compiler",
+                "Running VISUAL REFERENCE RESOLUTION and multimodal ANALYSIS serially.",
+            )
+            visual_resolution = VisualReferenceResolver().resolve(
+                request.requirement_path,
+                preprocessing.requirement_ir,
+            )
+            for issue in visual_resolution.errors:
+                await self._log(
+                    "Compiler",
+                    f"{issue.format()} Skipping this optional visual reference.",
+                    "warning",
+                )
+            if visual_resolution.references:
+                visual_analysis = VisualReferenceAnalyzer.from_env(artifact_store.root).analyze(
+                    visual_resolution.references
+                )
+                for issue in visual_analysis.errors:
+                    await self._log(
+                        "Compiler",
+                        f"{issue.format()} Skipping this optional visual analysis.",
+                        "warning",
+                    )
+                analyzed_visuals: list[dict[str, object]] = visual_analysis.references
+            else:
+                analyzed_visuals = []
+
+            if not frontend_errors:
+                await self._log(
+                    "Compiler",
+                    "Running REQUIREMENT UI SCOPE and Page/Layout/Store planning.",
+                )
+                ui_scope = RequirementUIScopePass(model, artifact_store.root).compile(
+                    preprocessing.requirement_ir,
+                    preprocessing.dependency_graph,
+                    design.design_ir,
+                    analyzed_visuals,
+                )
+                if not ui_scope.ok:
+                    frontend_errors.extend(ui_scope.errors)
+                    states.update(ui_scope.node_states)
+                else:
+                    await self._log(
+                        "Compiler",
+                        "Running PAGE/LAYOUT TO COMPONENT decomposition.",
+                    )
+                    components = PageLayoutComponentPass(
+                        model,
+                        artifact_store.root,
+                    ).compile(ui_scope.frontend_ir, design.design_ir)
+                    if not components.ok:
+                        frontend_errors.extend(components.errors)
+                    else:
+                        await self._log(
+                            "Compiler",
+                            "Finalizing Frontend Design indexes and best-effort API bindings.",
+                        )
+                        finalized = finalize_frontend_design(
+                            components.frontend_ir,
+                            design.design_ir,
+                        )
+                        if not finalized.ok:
+                            frontend_errors.extend(finalized.errors)
+                        else:
+                            frontend_design_ir = finalized.frontend_ir
+
+            if not frontend_errors:
+                try:
+                    artifacts.update(artifact_store.write_frontend_design(
+                        frontend_ir=frontend_design_ir,
+                    ))
+                except ValueError as exc:
+                    frontend_errors.append(f"ARC4150 DUAL_DESIGN_INVALID: {exc}")
+
+        if frontend_errors:
+            for node_id in atomic_ids:
+                states[node_id] = "FAILED"
+                self._runtime.traceability.upsert_node_state(
+                    node_id,
+                    "FAILED",
+                    "frontend_design",
+                )
+            for error in frontend_errors:
+                await self._log("Compiler", error, "error")
+            artifacts["processing_queue"] = artifact_store.write_pass_queue(
+                root_id=root_id,
+                node_states=states,
+                preprocessing_ok=True,
+                database_status="REUSED" if database_reused else "COMPLETED",
+                design_status="FAILED",
+            )
+            await self._log("Compiler", "FRONTEND_DESIGN pass failed.", "error")
+            return CompilationResult(
+                ok=False,
+                complete=False,
+                root_id=root_id,
+                states=states,
+                failed_nodes=atomic_ids,
+                artifacts=artifacts,
+            )
+
+        dual_design_state = (
+            "DUAL_DESIGN_REUSED" if frontend_design_reused else "DUAL_DESIGN_FROZEN"
+        )
+        for node_id in atomic_ids:
+            states[node_id] = dual_design_state
+            self._runtime.traceability.upsert_node_state(
+                node_id,
+                dual_design_state,
+                "frontend_design",
+            )
+        self._runtime.traceability.merge_frontend_design_links(
+            frontend_design_traceability(frontend_design_ir)
+        )
+        design_queue_status = dual_design_state
+        artifacts["processing_queue"] = artifact_store.write_pass_queue(
+            root_id=root_id,
+            node_states=states,
+            preprocessing_ok=True,
+            database_status="REUSED" if database_reused else "COMPLETED",
+            design_status=design_queue_status,
+        )
+        await self._log(
+            "Compiler",
+            f"{dual_design_state}: Backend Design IR and Frontend Design IR are validated and frozen.",
+        )
+
+        # ===================================================================
         #                    Project Initialization Stage
         # ===================================================================
 
@@ -394,7 +603,7 @@ class Compiler:
             node_states=states,
             preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
-            design_status="REUSED" if design_reused else "COMPLETED",
+            design_status=design_queue_status,
             project_status=("REUSED" if project_reused else "COMPLETED") if project_ok else "FAILED",
         )
         for error in project_errors:
@@ -433,7 +642,7 @@ class Compiler:
             node_states=states,
             preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
-            design_status="COMPLETED",
+            design_status=design_queue_status,
             project_status="COMPLETED",
             lowering_status="SYMBOLS_PLANNED" if symbol_planning.ok else "FAILED",
         )
@@ -473,7 +682,7 @@ class Compiler:
             node_states=states,
             preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
-            design_status="COMPLETED",
+            design_status=design_queue_status,
             project_status="COMPLETED",
             lowering_status="FILES_PLANNED" if file_planning.ok else "FAILED",
         )
@@ -516,7 +725,7 @@ class Compiler:
                 node_states=states,
                 preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
-                design_status="COMPLETED",
+                design_status=design_queue_status,
                 project_status="COMPLETED",
                 lowering_status="FAILED",
             )
@@ -534,7 +743,7 @@ class Compiler:
             node_states=states,
             preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
-            design_status="COMPLETED",
+            design_status=design_queue_status,
             project_status="COMPLETED",
             lowering_status="TYPES_GENERATED",
         )
@@ -566,7 +775,7 @@ class Compiler:
                 node_states=states,
                 preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
-                design_status="COMPLETED",
+                design_status=design_queue_status,
                 project_status="COMPLETED",
                 lowering_status="FAILED",
             )
@@ -584,7 +793,7 @@ class Compiler:
             node_states=states,
             preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
-            design_status="COMPLETED",
+            design_status=design_queue_status,
             project_status="COMPLETED",
             lowering_status="DATABASE_SCHEMA_LOWERED",
         )
@@ -620,7 +829,7 @@ class Compiler:
                 node_states=states,
                 preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
-                design_status="COMPLETED",
+                design_status=design_queue_status,
                 project_status="COMPLETED",
                 lowering_status="FAILED",
             )
@@ -638,7 +847,7 @@ class Compiler:
             node_states=states,
             preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
-            design_status="COMPLETED",
+            design_status=design_queue_status,
             project_status="COMPLETED",
             lowering_status="DB_MODULES_GENERATED",
         )
@@ -670,7 +879,7 @@ class Compiler:
                 node_states=states,
                 preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
-                design_status="COMPLETED",
+                design_status=design_queue_status,
                 project_status="COMPLETED",
                 lowering_status="FAILED",
             )
@@ -688,7 +897,7 @@ class Compiler:
             node_states=states,
             preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
-            design_status="COMPLETED",
+            design_status=design_queue_status,
             project_status="COMPLETED",
             lowering_status="FUNC_MODULES_GENERATED",
         )
@@ -720,7 +929,7 @@ class Compiler:
                 node_states=states,
                 preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
-                design_status="COMPLETED",
+                design_status=design_queue_status,
                 project_status="COMPLETED",
                 lowering_status="FAILED",
             )
@@ -738,7 +947,7 @@ class Compiler:
             node_states=states,
             preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
-            design_status="COMPLETED",
+            design_status=design_queue_status,
             project_status="COMPLETED",
             lowering_status="API_MODULES_GENERATED",
         )
@@ -783,7 +992,7 @@ class Compiler:
                 node_states=states,
                 preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
-                design_status="COMPLETED",
+                design_status=design_queue_status,
                 project_status="COMPLETED",
                 lowering_status="FAILED",
             )
@@ -801,7 +1010,7 @@ class Compiler:
             node_states=states,
             preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
-            design_status="COMPLETED",
+            design_status=design_queue_status,
             project_status="COMPLETED",
             lowering_status="BACKEND_MANIFEST_GENERATED",
         )
@@ -811,7 +1020,138 @@ class Compiler:
         )
 
         # ===================================================================
-        #            Skeleton Stage 3.1: Synchronous Build Acceptance
+        #              Skeleton Stage 3.2: Frontend Symbol Planning
+        # ===================================================================
+
+        await self._log(
+            "Compiler",
+            "Running deterministic FRONTEND_GLOBAL_SYMBOL_PLANNING over Frontend Design IR.",
+        )
+        frontend_symbols = FrontendGlobalSymbolPlanner(request.output_dir).plan(
+            frontend_design_ir,
+            project_api_contracts(design.design_ir),
+            symbol_planning.registry,
+        )
+        artifacts["frontend_symbol_registry"] = artifact_store.write_frontend_symbol_registry(
+            frontend_symbols.registry
+        )
+        for error in frontend_symbols.errors:
+            await self._log("Compiler", error, "error")
+        if not frontend_symbols.ok:
+            artifacts["processing_queue"] = artifact_store.write_pass_queue(
+                root_id=root_id,
+                node_states=states,
+                preprocessing_ok=True,
+                database_status="REUSED" if database_reused else "COMPLETED",
+                design_status=design_queue_status,
+                project_status="COMPLETED",
+                lowering_status="FAILED",
+            )
+            await self._log("Compiler", "FRONTEND_GLOBAL_SYMBOL_PLANNING pass failed.", "error")
+            return CompilationResult(
+                ok=False,
+                complete=False,
+                root_id=root_id,
+                states=states,
+                artifacts=artifacts,
+            )
+
+        # ===================================================================
+        #                Skeleton Stage 3.2: Frontend File Planning
+        # ===================================================================
+
+        await self._log(
+            "Compiler",
+            "Running deterministic FRONTEND_FILE_PLANNING over the Frontend Symbol Registry.",
+        )
+        frontend_files = FrontendFilePlanner(request.output_dir).plan(
+            frontend_design_ir,
+            frontend_symbols.registry,
+        )
+        artifacts["frontend_file_registry"] = artifact_store.write_frontend_file_registry(
+            frontend_files.registry
+        )
+        for error in frontend_files.errors:
+            await self._log("Compiler", error, "error")
+        if not frontend_files.ok:
+            artifacts["processing_queue"] = artifact_store.write_pass_queue(
+                root_id=root_id,
+                node_states=states,
+                preprocessing_ok=True,
+                database_status="REUSED" if database_reused else "COMPLETED",
+                design_status=design_queue_status,
+                project_status="COMPLETED",
+                lowering_status="FAILED",
+            )
+            await self._log("Compiler", "FRONTEND_FILE_PLANNING pass failed.", "error")
+            return CompilationResult(
+                ok=False,
+                complete=False,
+                root_id=root_id,
+                states=states,
+                artifacts=artifacts,
+            )
+
+        # ===================================================================
+        #             Skeleton Stage 3.2: Frontend Skeleton and Glue
+        # ===================================================================
+
+        await self._log(
+            "Compiler",
+            "Running deterministic FRONTEND_SKELETON_LOWERING for Props, Events, Stores, API Clients, UI modules, Routes, Barrels, and Imports.",
+        )
+        frontend_lowering = FrontendSkeletonLowerer().lower(
+            frontend_design_ir,
+            project_api_contracts(design.design_ir),
+            backend_glue.route_registry,
+            frontend_symbols.registry,
+            frontend_files.registry,
+            backend_port=request.web_port,
+        )
+        artifacts.update(
+            artifact_store.write_frontend_lowering(
+                route_registry=frontend_lowering.route_registry,
+                import_plan=frontend_lowering.import_plan,
+                manifest=frontend_lowering.manifest,
+            )
+        )
+        for error in frontend_lowering.errors:
+            await self._log("Compiler", error, "error")
+        if not frontend_lowering.ok:
+            artifacts["processing_queue"] = artifact_store.write_pass_queue(
+                root_id=root_id,
+                node_states=states,
+                preprocessing_ok=True,
+                database_status="REUSED" if database_reused else "COMPLETED",
+                design_status=design_queue_status,
+                project_status="COMPLETED",
+                lowering_status="FAILED",
+            )
+            await self._log("Compiler", "FRONTEND_SKELETON_LOWERING pass failed.", "error")
+            return CompilationResult(
+                ok=False,
+                complete=False,
+                root_id=root_id,
+                states=states,
+                artifacts=artifacts,
+            )
+        artifacts.update(artifact_store.write_generated_sources(frontend_lowering.sources))
+        artifacts["processing_queue"] = artifact_store.write_pass_queue(
+            root_id=root_id,
+            node_states=states,
+            preprocessing_ok=True,
+            database_status="REUSED" if database_reused else "COMPLETED",
+            design_status=design_queue_status,
+            project_status="COMPLETED",
+            lowering_status="FRONTEND_MANIFEST_GENERATED",
+        )
+        await self._log(
+            "Compiler",
+            "Frontend Props/Event/Store/API Client skeletons, UI modules, Routes, Barrels, Import Plan, and Frontend Manifest generated.",
+        )
+
+        # ===================================================================
+        #               Skeleton: Synchronous Build Acceptance
         # ===================================================================
 
         await self._log(
@@ -827,9 +1167,9 @@ class Compiler:
                 node_states=states,
                 preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
-                design_status="COMPLETED",
+                design_status=design_queue_status,
                 project_status="COMPLETED",
-                lowering_status="BACKEND_BUILD_FAILED",
+                lowering_status="PROJECT_BUILD_FAILED",
             )
             await self._log("Compiler", "PROJECT_BUILD acceptance gate failed.", "error")
             return CompilationResult(
@@ -845,16 +1185,16 @@ class Compiler:
             node_states=states,
             preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
-            design_status="COMPLETED",
+            design_status=design_queue_status,
             project_status="COMPLETED",
-            lowering_status="BACKEND_BUILD_SUCCEEDED",
+            lowering_status="PROJECT_BUILD_SUCCEEDED",
         )
         await self._log("Compiler", "PROJECT_BUILD acceptance gate completed successfully.")
 
         final_message = {
-            "API": "Stage 2 API boundary completed; Backend Manifest generated and project build passed over the partial Design IR; later passes are pending.",
-            "FUNC": "Stage 2 FUNC boundary completed; Backend Manifest generated and project build passed over the partial Design IR; later passes are pending.",
-            "MODULES": "Whole-program backend Skeleton and Backend Manifest generated; project build passed and later passes are pending.",
+            "API": "Stage 2 API boundary frozen; Backend and Frontend Skeleton Manifests generated and project build passed over the partial Backend Design IR; later passes are pending.",
+            "FUNC": "Stage 2 FUNC boundary frozen; Backend and Frontend Skeleton Manifests generated and project build passed over the partial Backend Design IR; later passes are pending.",
+            "MODULES": "DUAL_DESIGN_FROZEN; Backend and Frontend Skeleton Manifests generated; project build passed and later passes are pending.",
         }[design_stop_after]
 
         await self._log("Compiler", final_message, "warning")
