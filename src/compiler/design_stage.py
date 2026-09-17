@@ -99,7 +99,7 @@ DECOMPOSED_MODULE_SCHEMA: dict[str, Any] = {
     "properties": {
         "kind": {"type": "string", "enum": ["FUNC", "DB"]},
         "name": {"type": "string", "maxLength": 64, "pattern": r"^[A-Za-z][A-Za-z0-9]*$"},
-        "spec": {"type": "string", "maxLength": 300},
+        "spec": {"type": "string"},
         "inputs": {"type": "array", "items": MODULE_INTERFACE_FIELD_SCHEMA},
         "outputs": {"type": "array", "items": MODULE_INTERFACE_FIELD_SCHEMA},
         "effects": {"type": "array", "items": MODULE_EFFECT_SCHEMA},
@@ -1044,18 +1044,7 @@ def _provider_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
 def _normalize_compatible_decision(phase: str, value: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """Repair semantically neutral model noise before strict validation."""
 
-    result = copy.deepcopy(value)
-    notes: list[str] = []
-    if phase != "module_decomposition":
-        return result, notes
-    for step in result.get("modules", []):
-        spec = str(step.get("spec", ""))
-        if len(spec) > 300:
-            step["spec"] = f"{spec[:297].rstrip()}..."
-            notes.append(
-                f"truncated display-only spec for module {step.get('name')} to 300 characters"
-            )
-    return result, notes
+    return copy.deepcopy(value), []
 
 
 def _module_decomposition_output_schema(parent: dict[str, Any]) -> dict[str, Any]:
