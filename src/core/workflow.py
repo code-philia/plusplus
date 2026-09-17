@@ -51,7 +51,7 @@ class ARCWorkflowManager:
         *,
         clear_all: bool = False,
         resume_from_queue: bool = False,
-        skip_database: bool = False,
+        start_from: str = "FRONTEND",
         retry_failed: bool = False,
         retry_node_ids: list[str] | None = None,
     ) -> dict[str, object]:
@@ -82,7 +82,7 @@ class ARCWorkflowManager:
                 app_type=self.app_type,
                 web_port=self.web_port,
                 resume=resume_from_queue,
-                skip_database=skip_database,
+                start_from=start_from,
                 retry_failed=retry_failed,
                 retry_node_ids=tuple(retry_node_ids or ()),
             )

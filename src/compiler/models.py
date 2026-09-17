@@ -14,7 +14,7 @@ class CompilationRequest:
     app_type: str = "web"
     web_port: int = 3301
     resume: bool = False
-    skip_database: bool = False
+    start_from: str = "FRONTEND"
     retry_failed: bool = False
     retry_node_ids: tuple[str, ...] = ()
 

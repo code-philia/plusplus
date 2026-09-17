@@ -31,7 +31,7 @@ class CompilationConfig:
     app_type: str = "web"
     web_port: int = 3301
     resume_from_queue: bool = False
-    skip_database: bool = False
+    start_from: str = "FRONTEND"
     retry_failed: bool = False
     retry_node_ids: list[str] | None = None
 
@@ -40,10 +40,10 @@ def _get_repo_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
-def _should_reset_debug_log(*, resume: bool, skip_database: bool) -> bool:
+def _should_reset_debug_log(*, resume: bool, start_from: str) -> bool:
     """Keep one continuous log when compilation reuses prior run artifacts."""
 
-    return not (resume or skip_database)
+    return not (resume or start_from != "FRONTEND")
 
 
 def _ensure_dotenv_loaded() -> None:
@@ -131,9 +131,12 @@ def build_compile_parser(subparsers) -> None:
         help="Resume from saved compilation queue",
     )
     parser.add_argument(
-        "--skip-database",
-        action="store_true",
-        help="Reuse <output-dir>/.arc/database/{database_schema,relationships}.json and start at DESIGN",
+        "--start-from",
+        choices=("frontend", "database", "design", "project", "skeleton"),
+        default="frontend",
+        help=(
+            "Debug probe: reuse validated artifacts before this stage and continue in the existing output directory"
+        ),
     )
     parser.add_argument(
         "--retry-failed",
@@ -157,8 +160,8 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     if args.clean and args.resume:
         print("Error: --clean and --resume are mutually exclusive")
         return 2
-    if args.clean and args.skip_database:
-        print("Error: --clean and --skip-database are mutually exclusive")
+    if args.clean and args.start_from != "frontend":
+        print("Error: --clean cannot be combined with --start-from after frontend")
         return 2
     if (args.retry_failed or args.retry) and not args.resume:
         print("Error: --retry-failed and --retry require --resume")
@@ -189,7 +192,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         app_type=normalized_app_type,
         web_port=args.port,
         resume_from_queue=args.resume,
-        skip_database=args.skip_database,
+        start_from=args.start_from.upper(),
         retry_failed=args.retry_failed,
         retry_node_ids=args.retry or None,
     )
@@ -200,7 +203,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         config.output_dir,
         reset_existing=_should_reset_debug_log(
             resume=config.resume_from_queue,
-            skip_database=config.skip_database,
+            start_from=config.start_from,
         ),
     )
     print_cli_startup(
@@ -228,7 +231,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         result = await workflow_manager.start_compilation(
             clear_all=False,
             resume_from_queue=config.resume_from_queue,
-            skip_database=config.skip_database,
+            start_from=config.start_from,
             retry_failed=config.retry_failed,
             retry_node_ids=config.retry_node_ids,
         )
