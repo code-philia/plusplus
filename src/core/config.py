@@ -122,10 +122,21 @@ def check_config() -> dict[str, Any]:
     # Check optional visual model
     visual_key = os.environ.get("VISUAL_API_KEY", "").strip()
     visual_model = os.environ.get("VISUAL_MODEL", "").strip()
-    if visual_key and not visual_model:
-        warnings.append("VISUAL_API_KEY is set but VISUAL_MODEL is empty")
-    elif visual_model and not visual_key:
-        warnings.append("VISUAL_MODEL is set but VISUAL_API_KEY is empty")
+    effective_visual_key = visual_key or os.environ.get("OPENAI_API_KEY", "").strip()
+    effective_visual_model = visual_model or os.environ.get("MODEL", "").strip()
+    if (visual_key or visual_model) and not effective_visual_key:
+        warnings.append("Visual analysis has no VISUAL_API_KEY or OPENAI_API_KEY")
+    if (visual_key or visual_model) and not effective_visual_model:
+        warnings.append("Visual analysis has no VISUAL_MODEL or MODEL")
+
+    visual_timeout = os.environ.get("ARC_VISUAL_TIMEOUT_SECONDS", "120").strip()
+    try:
+        if float(visual_timeout) <= 0:
+            warnings.append("ARC_VISUAL_TIMEOUT_SECONDS must be positive")
+    except ValueError:
+        warnings.append(
+            f"ARC_VISUAL_TIMEOUT_SECONDS must be numeric, got: {visual_timeout}"
+        )
 
     # Check debug flag
     debug = os.environ.get("ARC_DEBUG", "0").strip().lower()

@@ -132,7 +132,7 @@ def build_compile_parser(subparsers) -> None:
     )
     parser.add_argument(
         "--start-from",
-        choices=("preprocessing", "database", "design", "project", "skeleton"),
+        choices=("preprocessing", "database", "design", "frontend", "project", "skeleton"),
         default="preprocessing",
         help=(
             "Debug probe: reuse validated artifacts before this stage and continue in the existing output directory"

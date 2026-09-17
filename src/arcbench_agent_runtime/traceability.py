@@ -209,6 +209,68 @@ class TraceabilityStore:
         self._write_table("requirements", requirements)
         self.events.notify_traceability_changed("design_links_merged")
 
+    def merge_frontend_design_links(self, links: dict[str, dict[str, Any]]) -> None:
+        """Merge compact Requirement-to-Frontend-Design links into requirement rows."""
+
+        requirements = self._read_table("requirements")
+        allowed_keys = {
+            "layout_ids",
+            "page_ids",
+            "component_ids",
+            "store_ids",
+            "local_data_contract_ids",
+            "visual_reference_ids",
+        }
+        for requirement_id, frontend_links in sorted(links.items()):
+            row = requirements.get(requirement_id)
+            if not isinstance(row, dict):
+                row = {"req_id": requirement_id, "id": requirement_id}
+            frontend_design = {
+                key: sorted({str(value) for value in values if str(value).strip()})
+                for key, values in sorted(frontend_links.items())
+                if key in allowed_keys and isinstance(values, list)
+            }
+            frontend_design["ui_scope"] = str(
+                frontend_links.get("ui_scope", "NO_UI")
+            ).strip().upper()
+            row["frontend_design"] = frontend_design
+            requirements[requirement_id] = row
+        self._write_table("requirements", requirements)
+        self.events.notify_traceability_changed("frontend_design_links_merged")
+
+    def read_frontend_design_links_from_requirements(self) -> list[dict[str, Any]]:
+        """Rebuild the in-memory Frontend requirement links from traceability."""
+
+        result: list[dict[str, Any]] = []
+        symbol_keys = (
+            "layout_ids",
+            "page_ids",
+            "component_ids",
+            "store_ids",
+            "local_data_contract_ids",
+        )
+        for requirement_id, row in sorted(self._read_table("requirements").items()):
+            if not isinstance(row, dict):
+                continue
+            frontend = row.get("frontend_design")
+            if not isinstance(frontend, dict):
+                continue
+            symbol_ids = {
+                str(symbol_id).strip()
+                for key in symbol_keys
+                for symbol_id in _as_list(frontend.get(key))
+                if str(symbol_id).strip()
+            }
+            result.append({
+                "requirement_id": str(requirement_id),
+                "ui_scope": str(frontend.get("ui_scope", "NO_UI")).strip().upper(),
+                "symbol_ids": sorted(symbol_ids),
+                "visual_reference_ids": sorted(set(_as_str_list(
+                    frontend.get("visual_reference_ids")
+                ))),
+            })
+        return result
+
     def store_requirement_tree(self, requirement_tree: dict[str, Any]) -> None:
         """Persist a nested ARC requirements tree into current-state tables.
 
@@ -252,6 +314,8 @@ class TraceabilityStore:
                 requirements[req_id]["database"] = existing["database"]
             if isinstance(existing, dict) and isinstance(existing.get("design"), dict):
                 requirements[req_id]["design"] = existing["design"]
+            if isinstance(existing, dict) and isinstance(existing.get("frontend_design"), dict):
+                requirements[req_id]["frontend_design"] = existing["frontend_design"]
             for scenario in node_scenarios:
                 scenario_id = str(scenario.get("id") or scenario.get("scenario_id") or "").strip()
                 if not scenario_id:
@@ -329,6 +393,8 @@ class TraceabilityStore:
             row["database"] = current["database"]
         if isinstance(current.get("design"), dict):
             row["design"] = current["design"]
+        if isinstance(current.get("frontend_design"), dict):
+            row["frontend_design"] = current["frontend_design"]
         self._upsert_row(
             "requirements",
             normalized_req_id,
