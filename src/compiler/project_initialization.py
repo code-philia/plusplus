@@ -128,9 +128,10 @@ class ProjectInitializer:
             self._prepare_staging()
             self._run_official_initializers()
             self._normalize_workspace()
-            self._create_lockfile_and_install()
+            self._create_lockfile()
             self._validate_staged_project()
             self._promote()
+            self._install_promoted_workspace()
             artifacts = self._emit_manifests()
             self._cleanup_staging()
             return ProjectInitializationResult(ok=True, status=PROJECT_STATUS, artifacts=artifacts)
@@ -289,12 +290,33 @@ class ProjectInitializer:
         for lockfile in self.staged_project.glob("*/package-lock.json"):
             self._remove_exact(lockfile)
 
-    def _create_lockfile_and_install(self) -> None:
+    def _create_lockfile(self) -> None:
         self._run(
             ["npm", "install", "--package-lock-only", "--ignore-scripts"],
             cwd=self.staged_project,
         )
-        self._run(["npm", "ci"], cwd=self.staged_project)
+
+    def _install_promoted_workspace(self) -> None:
+        node_modules = self.output_root / "node_modules"
+        if node_modules.exists():
+            raise ProjectInitializationError(
+                "PROJECT_TARGET_CONFLICT",
+                f"Project target appeared during initialization: {node_modules}",
+            )
+        # npm workspace links are absolute junctions on Windows. They must be
+        # created after promotion or they continue pointing into .arc/staging.
+        self._promoted_targets.append(node_modules)
+        self._run(["npm", "ci"], cwd=self.output_root)
+
+        shared_link = node_modules / "@arc" / "shared"
+        expected_shared = (self.output_root / "shared").resolve()
+        actual_shared = shared_link.resolve()
+        if not shared_link.exists() or actual_shared != expected_shared:
+            raise ProjectInitializationError(
+                "PROJECT_INSTALL_FAILED",
+                "npm did not create a valid @arc/shared workspace link in the promoted project: "
+                f"expected {expected_shared}, resolved {actual_shared}.",
+            )
 
     def _validate_staged_project(self) -> None:
         expected = (
@@ -325,6 +347,12 @@ class ProjectInitializer:
             raise ProjectInitializationError(
                 "PROJECT_LOCKFILE_FAILED",
                 f"Expected exactly one root lockfile, found: {relative}",
+            )
+        backend_tsconfig = self._read_json(self.staged_project / "backend" / "tsconfig.json")
+        if backend_tsconfig.get("references") != [{"path": "../shared"}]:
+            raise ProjectInitializationError(
+                "PROJECT_NORMALIZATION_FAILED",
+                "backend/tsconfig.json must reference the shared TypeScript project.",
             )
         for package_path in self.staged_project.glob("*/package.json"):
             package = self._read_json(package_path)
@@ -542,8 +570,10 @@ class ProjectInitializer:
             "type": "module",
             "scripts": {
                 "dev": "tsx watch src/server.ts",
-                "build": "tsc -p tsconfig.json",
-                "typecheck": "tsc --noEmit -p tsconfig.json",
+                "build": "tsc -b tsconfig.json",
+                "typecheck": (
+                    "npm run build -w @arc/shared && tsc --noEmit -p tsconfig.json"
+                ),
                 "start": "node dist/server.js",
                 "db:generate": "drizzle-kit generate",
                 "db:migrate": "drizzle-kit migrate",
@@ -573,7 +603,7 @@ class ProjectInitializer:
             "type": "module",
             "exports": {".": {"types": "./dist/index.d.ts", "default": "./dist/index.js"}},
             "scripts": {
-                "build": "tsc -p tsconfig.json",
+                "build": "tsc -b tsconfig.json",
                 "typecheck": "tsc --noEmit -p tsconfig.json",
             },
             "dependencies": {"zod": self.catalog.zod},
@@ -581,6 +611,11 @@ class ProjectInitializer:
         }
 
     def _backend_tsconfig(self) -> dict[str, Any]:
+        config = self._node_tsconfig()
+        config["references"] = [{"path": "../shared"}]
+        return config
+
+    def _node_tsconfig(self) -> dict[str, Any]:
         return {
             "compilerOptions": {
                 "target": "ES2022",
@@ -602,7 +637,7 @@ class ProjectInitializer:
         }
 
     def _shared_tsconfig(self) -> dict[str, Any]:
-        config = self._backend_tsconfig()
+        config = self._node_tsconfig()
         config["compilerOptions"].update({"declaration": True, "composite": True})
         return config
 
