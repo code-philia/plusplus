@@ -29,7 +29,7 @@ class CompilationConfig:
     requirement_path: str
     user_requested_clear_all: bool = False
     app_type: str = "web"
-    web_port: int = 3301
+    web_port: int = 3000
     resume_from_queue: bool = False
     start_from: str = "PREPROCESSING"
     retry_failed: bool = False
@@ -117,8 +117,8 @@ def build_compile_parser(subparsers) -> None:
     parser.add_argument(
         "--port",
         type=int,
-        default=3301,
-        help="Web server port (only for app-type=web, default: 3301)",
+        default=3000,
+        help="Web server port (only for app-type=web, default: 3000)",
     )
     parser.add_argument(
         "--clean",

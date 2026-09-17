@@ -10,7 +10,7 @@ from colorama import Fore, Style
 
 _workspace_root = Path(os.environ.get("ARC_WORKSPACE_ROOT", ".")).expanduser().resolve()
 _app_type = os.environ.get("ARC_APP_TYPE", "web").strip().lower() or "web"
-_web_port = int(os.environ.get("ARC_WEB_PORT", "3301") or 3301)
+_web_port = int(os.environ.get("ARC_WEB_PORT", "3000") or 3000)
 _android_package = os.environ.get("ARC_ANDROID_PACKAGE", "com.example.template").strip() or "com.example.template"
 
 

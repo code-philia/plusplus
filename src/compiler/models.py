@@ -12,7 +12,7 @@ class CompilationRequest:
     requirement_path: Path
     output_dir: Path
     app_type: str = "web"
-    web_port: int = 3301
+    web_port: int = 3000
     resume: bool = False
     start_from: str = "PREPROCESSING"
     retry_failed: bool = False

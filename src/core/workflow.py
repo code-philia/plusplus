@@ -21,7 +21,7 @@ class ARCWorkflowManager:
         workspace_path: str,
         requirement_path: str = "",
         app_type: str = "web",
-        web_port: int = 3301,
+        web_port: int = 3000,
         log_cb: LogCallback | None = None,
     ) -> None:
         self.workspace_path = Path(workspace_path).expanduser().resolve()
