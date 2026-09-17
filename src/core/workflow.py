@@ -51,7 +51,7 @@ class ARCWorkflowManager:
         *,
         clear_all: bool = False,
         resume_from_queue: bool = False,
-        start_from: str = "FRONTEND",
+        start_from: str = "PREPROCESSING",
         retry_failed: bool = False,
         retry_node_ids: list[str] | None = None,
     ) -> dict[str, object]:

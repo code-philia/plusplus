@@ -14,24 +14,27 @@ class CompilerArtifactStore:
 
     def __init__(self, output_dir: Path) -> None:
         self.root = output_dir.expanduser().resolve() / ".arc"
-        self.frontend_root = self.root / "frontend"
+        # Preprocessing owns requirement normalization; product frontend design
+        # artifacts may use .arc/frontend independently.
+        self.preprocessing_root = self.root / "preprocessing"
         self.database_root = self.root / "database"
         self.design_root = self.root / "design"
         self.backend_root = self.root / "backend"
 
-    def write_frontend(
+    def write_preprocessing(
         self,
         *,
         requirement_ir: dict[str, Any],
         dependency_graph: dict[str, Any],
     ) -> dict[str, str]:
-        shutil.rmtree(self.frontend_root, ignore_errors=True)
+        shutil.rmtree(self.preprocessing_root, ignore_errors=True)
+        shutil.rmtree(self.root / "compiler_frontend", ignore_errors=True)
         shutil.rmtree(self.design_root, ignore_errors=True)
         shutil.rmtree(self.root / "compiler", ignore_errors=True)
         shutil.rmtree(self.root / "cache" / "design", ignore_errors=True)
         paths = {
-            "requirement_ir": self.frontend_root / "requirement_ir.json",
-            "dependency_graph": self.frontend_root / "dependency_graph.json",
+            "requirement_ir": self.preprocessing_root / "requirement_ir.json",
+            "dependency_graph": self.preprocessing_root / "dependency_graph.json",
         }
         nodes = requirement_ir.get("nodes", {})
         requirements = [copy.deepcopy(nodes[key]) for key in requirement_ir.get("node_order", []) if key in nodes]
@@ -58,9 +61,9 @@ class CompilerArtifactStore:
         write_json_atomic(paths["dependency_graph"], dependencies)
         return {name: str(path) for name, path in paths.items()}
 
-    def write_queue(self, *, root_id: str | None, node_states: dict[str, str], frontend_ok: bool) -> str:
+    def write_queue(self, *, root_id: str | None, node_states: dict[str, str], preprocessing_ok: bool) -> str:
         return self._write_queue(
-            frontend_status="COMPLETED" if frontend_ok else "FAILED",
+            preprocessing_status="COMPLETED" if preprocessing_ok else "FAILED",
             database_status="PENDING",
             design_status="PENDING",
             node_states=node_states,
@@ -448,14 +451,14 @@ class CompilerArtifactStore:
         *,
         root_id: str | None,
         node_states: dict[str, str],
-        frontend_ok: bool,
+        preprocessing_ok: bool,
         database_status: str,
         design_status: str = "PENDING",
         project_status: str = "PENDING",
         lowering_status: str = "PENDING",
     ) -> str:
         return self._write_queue(
-            frontend_status="COMPLETED" if frontend_ok else "FAILED",
+            preprocessing_status="COMPLETED" if preprocessing_ok else "FAILED",
             database_status=database_status,
             design_status=design_status,
             project_status=project_status,
@@ -466,7 +469,7 @@ class CompilerArtifactStore:
     def _write_queue(
         self,
         *,
-        frontend_status: str,
+        preprocessing_status: str,
         database_status: str,
         design_status: str,
         project_status: str = "PENDING",
@@ -475,7 +478,7 @@ class CompilerArtifactStore:
     ) -> str:
         path = self.root / "processing_queue.json"
         statuses = (
-            ("FRONTEND", frontend_status),
+            ("PREPROCESSING", preprocessing_status),
             ("DATABASE_SCHEMA", database_status),
             ("DESIGN", design_status),
             ("PROJECT_INITIALIZATION", project_status),
@@ -493,7 +496,7 @@ class CompilerArtifactStore:
                 "order": index,
                 "status": status,
                 "node_states": copy.deepcopy(state_rows)
-                if pass_id in {"FRONTEND", "DATABASE_SCHEMA", "DESIGN"}
+                if pass_id in {"PREPROCESSING", "DATABASE_SCHEMA", "DESIGN"}
                 else [],
             }
             for index, (pass_id, status) in enumerate(statuses)

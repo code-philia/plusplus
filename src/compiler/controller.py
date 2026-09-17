@@ -20,7 +20,7 @@ from .database_stage import (
 )
 from .design_stage import DesignPass, DesignPassResult, design_traceability
 from .file_planning import GlobalFilePlanner
-from .frontend_stage import RequirementFrontend
+from .preprocessing_stage import RequirementPreprocessor
 from .model_client import Model, ModelConfigurationError, StructuredModel
 from .models import CompilationRequest, CompilationResult
 from .module_lowering import ModuleSkeletonLowerer
@@ -44,18 +44,18 @@ class Compiler:
     ) -> None:
         self._runtime = runtime
         self._log_cb = log_cb
-        self._frontend = RequirementFrontend()
+        self._preprocessor = RequirementPreprocessor()
         self._model = model
 
     async def compile(self, request: CompilationRequest) -> CompilationResult:
         stage_order = {
-            "FRONTEND": 0,
+            "PREPROCESSING": 0,
             "DATABASE": 1,
             "DESIGN": 2,
             "PROJECT": 3,
             "SKELETON": 4,
         }
-        start_from = str(request.start_from or "FRONTEND").strip().upper()
+        start_from = str(request.start_from or "PREPROCESSING").strip().upper()
         if start_from not in stage_order:
             await self._log("Compiler", f"Unknown start stage: {start_from}", "error")
             return CompilationResult(ok=False, complete=False)
@@ -65,43 +65,43 @@ class Compiler:
         project_reused = start_rank > stage_order["PROJECT"]
 
         # ===================================================================
-        #                    Compiler Frontend Stage
+        #                    Requirement Preprocessing Stage
         # ===================================================================
 
         await self._log(
             "Compiler",
-            "Running deterministic FRONTEND pass."
-            if start_from == "FRONTEND"
-            else f"START_PROBE stage={start_from} upstream=FRONTEND source=requirements status=VALIDATING",
+            "Running deterministic PREPROCESSING pass."
+            if start_from == "PREPROCESSING"
+            else f"START_PROBE stage={start_from} upstream=PREPROCESSING source=requirements status=VALIDATING",
         )
-        frontend = self._frontend.compile(request.requirement_path)
-        root_id = frontend.requirement_ir.get("root_id") if frontend.requirement_ir else None
-        atomic_ids = list(frontend.requirement_ir.get("atomic_units", [])) if frontend.requirement_ir else []
-        states = {node_id: ("DISCOVERED" if frontend.ok else "FAILED") for node_id in atomic_ids}
+        preprocessing = self._preprocessor.compile(request.requirement_path)
+        root_id = preprocessing.requirement_ir.get("root_id") if preprocessing.requirement_ir else None
+        atomic_ids = list(preprocessing.requirement_ir.get("atomic_units", [])) if preprocessing.requirement_ir else []
+        states = {node_id: ("DISCOVERED" if preprocessing.ok else "FAILED") for node_id in atomic_ids}
 
         artifact_store = CompilerArtifactStore(request.output_dir)
         artifacts: dict[str, str] = {}
-        if start_from == "FRONTEND":
-            artifacts.update(artifact_store.write_frontend(
-                requirement_ir=frontend.requirement_ir,
-                dependency_graph=frontend.dependency_graph,
+        if start_from == "PREPROCESSING":
+            artifacts.update(artifact_store.write_preprocessing(
+                requirement_ir=preprocessing.requirement_ir,
+                dependency_graph=preprocessing.dependency_graph,
             ))
             artifacts["processing_queue"] = artifact_store.write_queue(
                 root_id=root_id,
                 node_states=states,
-                frontend_ok=frontend.ok,
+                preprocessing_ok=preprocessing.ok,
             )
 
-        if frontend.normalized_tree:
-            self._runtime.traceability.store_requirement_tree(frontend.normalized_tree)
+        if preprocessing.normalized_tree:
+            self._runtime.traceability.store_requirement_tree(preprocessing.normalized_tree)
         for node_id, state in states.items():
-            self._runtime.traceability.upsert_node_state(node_id, state, "frontend")
+            self._runtime.traceability.upsert_node_state(node_id, state, "preprocessing")
 
-        for error in frontend.errors:
+        for error in preprocessing.errors:
             await self._log("Compiler", error, "error")
 
-        if not frontend.ok:
-            await self._log("Compiler", "FRONTEND pass failed.", "error")
+        if not preprocessing.ok:
+            await self._log("Compiler", "PREPROCESSING pass failed.", "error")
             return CompilationResult(
                 ok=False,
                 complete=False,
@@ -110,10 +110,10 @@ class Compiler:
                 failed_nodes=atomic_ids,
                 artifacts=artifacts,
             )
-        if start_from != "FRONTEND":
+        if start_from != "PREPROCESSING":
             await self._log(
                 "Compiler",
-                f"START_PROBE stage={start_from} upstream=FRONTEND source=requirements status=VALIDATED",
+                f"START_PROBE stage={start_from} upstream=PREPROCESSING source=requirements status=VALIDATED",
             )
 
         # ===================================================================
@@ -146,7 +146,7 @@ class Compiler:
                 artifacts["processing_queue"] = artifact_store.write_pass_queue(
                     root_id=root_id,
                     node_states=states,
-                    frontend_ok=True,
+                    preprocessing_ok=True,
                     database_status="FAILED",
                 )
                 return CompilationResult(
@@ -167,7 +167,7 @@ class Compiler:
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
-                frontend_ok=True,
+                preprocessing_ok=True,
                 database_status="REUSED",
             )
             for node_id, state in database.node_states.items():
@@ -191,7 +191,7 @@ class Compiler:
                 artifacts["processing_queue"] = artifact_store.write_pass_queue(
                     root_id=root_id,
                     node_states=states,
-                    frontend_ok=True,
+                    preprocessing_ok=True,
                     database_status="FAILED",
                 )
                 return CompilationResult(
@@ -206,8 +206,8 @@ class Compiler:
             # Stage 1 is deliberately synchronous: each database pass and each
             # requirement completes before the next one starts.
             database = database_stage.compile(
-                frontend.requirement_ir,
-                frontend.dependency_graph,
+                preprocessing.requirement_ir,
+                preprocessing.dependency_graph,
                 resume=request.resume,
             )
             states.update(database.node_states)
@@ -218,7 +218,7 @@ class Compiler:
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
-                frontend_ok=True,
+                preprocessing_ok=True,
                 database_status=database_status,
             )
             for node_id, state in database.node_states.items():
@@ -261,7 +261,7 @@ class Compiler:
                 artifacts["processing_queue"] = artifact_store.write_pass_queue(
                     root_id=root_id,
                     node_states=states,
-                    frontend_ok=True,
+                    preprocessing_ok=True,
                     database_status="REUSED" if database_reused else "COMPLETED",
                     design_status="FAILED",
                 )
@@ -321,15 +321,15 @@ class Compiler:
             await self._log("Compiler", design_message)
             # Stage 2 keeps contract generation and module materialization serial.
             design = design_stage.compile(
-                frontend.requirement_ir,
-                frontend.dependency_graph,
+                preprocessing.requirement_ir,
+                preprocessing.dependency_graph,
                 database.schema,
             )
         states.update(design.node_states)
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
-            frontend_ok=True,
+            preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
             design_status=("REUSED" if design_reused else "COMPLETED") if design.ok else "FAILED",
         )
@@ -392,7 +392,7 @@ class Compiler:
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
-            frontend_ok=True,
+            preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
             design_status="REUSED" if design_reused else "COMPLETED",
             project_status=("REUSED" if project_reused else "COMPLETED") if project_ok else "FAILED",
@@ -431,7 +431,7 @@ class Compiler:
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
-            frontend_ok=True,
+            preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
             design_status="COMPLETED",
             project_status="COMPLETED",
@@ -471,7 +471,7 @@ class Compiler:
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
-            frontend_ok=True,
+            preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
             design_status="COMPLETED",
             project_status="COMPLETED",
@@ -514,7 +514,7 @@ class Compiler:
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
-                frontend_ok=True,
+                preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
                 design_status="COMPLETED",
                 project_status="COMPLETED",
@@ -532,7 +532,7 @@ class Compiler:
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
-            frontend_ok=True,
+            preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
             design_status="COMPLETED",
             project_status="COMPLETED",
@@ -564,7 +564,7 @@ class Compiler:
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
-                frontend_ok=True,
+                preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
                 design_status="COMPLETED",
                 project_status="COMPLETED",
@@ -582,7 +582,7 @@ class Compiler:
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
-            frontend_ok=True,
+            preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
             design_status="COMPLETED",
             project_status="COMPLETED",
@@ -618,7 +618,7 @@ class Compiler:
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
-                frontend_ok=True,
+                preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
                 design_status="COMPLETED",
                 project_status="COMPLETED",
@@ -636,7 +636,7 @@ class Compiler:
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
-            frontend_ok=True,
+            preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
             design_status="COMPLETED",
             project_status="COMPLETED",
@@ -668,7 +668,7 @@ class Compiler:
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
-                frontend_ok=True,
+                preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
                 design_status="COMPLETED",
                 project_status="COMPLETED",
@@ -686,7 +686,7 @@ class Compiler:
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
-            frontend_ok=True,
+            preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
             design_status="COMPLETED",
             project_status="COMPLETED",
@@ -718,7 +718,7 @@ class Compiler:
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
-                frontend_ok=True,
+                preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
                 design_status="COMPLETED",
                 project_status="COMPLETED",
@@ -736,7 +736,7 @@ class Compiler:
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
-            frontend_ok=True,
+            preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
             design_status="COMPLETED",
             project_status="COMPLETED",
@@ -781,7 +781,7 @@ class Compiler:
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
-                frontend_ok=True,
+                preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
                 design_status="COMPLETED",
                 project_status="COMPLETED",
@@ -799,7 +799,7 @@ class Compiler:
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
-            frontend_ok=True,
+            preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
             design_status="COMPLETED",
             project_status="COMPLETED",
@@ -825,7 +825,7 @@ class Compiler:
             artifacts["processing_queue"] = artifact_store.write_pass_queue(
                 root_id=root_id,
                 node_states=states,
-                frontend_ok=True,
+                preprocessing_ok=True,
                 database_status="REUSED" if database_reused else "COMPLETED",
                 design_status="COMPLETED",
                 project_status="COMPLETED",
@@ -843,7 +843,7 @@ class Compiler:
         artifacts["processing_queue"] = artifact_store.write_pass_queue(
             root_id=root_id,
             node_states=states,
-            frontend_ok=True,
+            preprocessing_ok=True,
             database_status="REUSED" if database_reused else "COMPLETED",
             design_status="COMPLETED",
             project_status="COMPLETED",

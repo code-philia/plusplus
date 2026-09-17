@@ -31,7 +31,7 @@ class CompilationConfig:
     app_type: str = "web"
     web_port: int = 3301
     resume_from_queue: bool = False
-    start_from: str = "FRONTEND"
+    start_from: str = "PREPROCESSING"
     retry_failed: bool = False
     retry_node_ids: list[str] | None = None
 
@@ -43,7 +43,7 @@ def _get_repo_root() -> str:
 def _should_reset_debug_log(*, resume: bool, start_from: str) -> bool:
     """Keep one continuous log when compilation reuses prior run artifacts."""
 
-    return not (resume or start_from != "FRONTEND")
+    return not (resume or start_from != "PREPROCESSING")
 
 
 def _ensure_dotenv_loaded() -> None:
@@ -132,8 +132,8 @@ def build_compile_parser(subparsers) -> None:
     )
     parser.add_argument(
         "--start-from",
-        choices=("frontend", "database", "design", "project", "skeleton"),
-        default="frontend",
+        choices=("preprocessing", "database", "design", "project", "skeleton"),
+        default="preprocessing",
         help=(
             "Debug probe: reuse validated artifacts before this stage and continue in the existing output directory"
         ),
@@ -160,8 +160,8 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     if args.clean and args.resume:
         print("Error: --clean and --resume are mutually exclusive")
         return 2
-    if args.clean and args.start_from != "frontend":
-        print("Error: --clean cannot be combined with --start-from after frontend")
+    if args.clean and args.start_from != "preprocessing":
+        print("Error: --clean cannot be combined with --start-from after preprocessing")
         return 2
     if (args.retry_failed or args.retry) and not args.resume:
         print("Error: --retry-failed and --retry require --resume")

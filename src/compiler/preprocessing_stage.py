@@ -13,7 +13,7 @@ IMAGE_REFERENCE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 
 
 @dataclass(slots=True)
-class FrontendResult:
+class PreprocessingResult:
     requirement_ir: dict[str, Any]
     dependency_graph: dict[str, Any]
     normalized_tree: dict[str, Any]
@@ -24,10 +24,10 @@ class FrontendResult:
         return not self.errors
 
 
-class RequirementFrontend:
+class RequirementPreprocessor:
     """Parse, normalize, validate, and schedule an ARC requirement document."""
 
-    def compile(self, requirement_path: Path) -> FrontendResult:
+    def compile(self, requirement_path: Path) -> PreprocessingResult:
         source_path = requirement_path.expanduser().resolve()
         errors: list[str] = []
         try:
@@ -35,7 +35,7 @@ class RequirementFrontend:
             payload = yaml.safe_load(source_bytes.decode("utf-8")) or {}
         except (OSError, UnicodeError, yaml.YAMLError) as exc:
             errors.append(_format_error("ARC1001", f"Cannot parse requirement document: {exc}", source=str(source_path)))
-            return FrontendResult({}, {}, {}, errors)
+            return PreprocessingResult({}, {}, {}, errors)
 
         if isinstance(payload, dict) and isinstance(payload.get("root"), dict):
             payload = payload["root"]
@@ -43,7 +43,7 @@ class RequirementFrontend:
             payload = payload["requirement"]
         if not isinstance(payload, dict):
             errors.append(_format_error("ARC1002", "Requirement document root must be a mapping.", source=str(source_path)))
-            return FrontendResult({}, {}, {}, errors)
+            return PreprocessingResult({}, {}, {}, errors)
 
         nodes: dict[str, dict[str, Any]] = {}
         node_order: list[str] = []
@@ -88,7 +88,7 @@ class RequirementFrontend:
         }
         if not root_id:
             errors.append(_format_error("ARC1003", "Requirement root id is missing.", source=str(source_path)))
-        return FrontendResult(requirement_ir, dependency_graph, normalized_tree, errors)
+        return PreprocessingResult(requirement_ir, dependency_graph, normalized_tree, errors)
 
     def _normalize_node(
         self,

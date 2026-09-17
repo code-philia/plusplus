@@ -14,7 +14,7 @@ class CompilationRequest:
     app_type: str = "web"
     web_port: int = 3301
     resume: bool = False
-    start_from: str = "FRONTEND"
+    start_from: str = "PREPROCESSING"
     retry_failed: bool = False
     retry_node_ids: tuple[str, ...] = ()
 
@@ -33,7 +33,7 @@ class CompilationResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok and self.complete,
-            "frontend_ok": self.ok,
+            "preprocessing_ok": self.ok,
             "complete": self.complete,
             "root_id": self.root_id,
             "states": dict(sorted(self.states.items())),
