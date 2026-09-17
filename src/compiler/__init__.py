@@ -8,6 +8,7 @@ from .file_planning import FilePlanningResult, GlobalFilePlanner
 from .model_client import Model, StructuredModel
 from .module_lowering import ModuleSkeletonLowerer, ModuleSkeletonResult
 from .models import CompilationRequest, CompilationResult
+from .project_build import ProjectBuilder, ProjectBuildResult
 from .project_initialization import (
     DependencyCatalog,
     ProjectInitializationResult,
@@ -42,6 +43,8 @@ __all__ = [
     "ModuleSkeletonResult",
     "ProjectInitializationResult",
     "ProjectInitializer",
+    "ProjectBuilder",
+    "ProjectBuildResult",
     "SymbolPlanningResult",
     "StructuredModel",
     "TypeLowerer",

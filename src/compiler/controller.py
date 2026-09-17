@@ -24,6 +24,7 @@ from .frontend_stage import RequirementFrontend
 from .model_client import Model, ModelConfigurationError, StructuredModel
 from .models import CompilationRequest, CompilationResult
 from .module_lowering import ModuleSkeletonLowerer
+from .project_build import ProjectBuilder
 from .project_initialization import ProjectInitializer
 from .skeleton_lowering import DatabaseSchemaLowerer, TypeLowerer
 from .symbol_planning import GlobalSymbolPlanner
@@ -809,10 +810,51 @@ class Compiler:
             "Global Glue Code, Route Registration, Barrel Export, Import Plan, and Backend Manifest generated.",
         )
 
+        # ===================================================================
+        #            Skeleton Stage 3.1: Synchronous Build Acceptance
+        # ===================================================================
+
+        await self._log(
+            "Compiler",
+            "Running synchronous PROJECT_BUILD acceptance gate with npm run build.",
+        )
+        project_build = ProjectBuilder(request.output_dir).build()
+        for error in project_build.errors:
+            await self._log("Compiler", error, "error")
+        if not project_build.ok:
+            artifacts["processing_queue"] = artifact_store.write_pass_queue(
+                root_id=root_id,
+                node_states=states,
+                frontend_ok=True,
+                database_status="REUSED" if database_reused else "COMPLETED",
+                design_status="COMPLETED",
+                project_status="COMPLETED",
+                lowering_status="BACKEND_BUILD_FAILED",
+            )
+            await self._log("Compiler", "PROJECT_BUILD acceptance gate failed.", "error")
+            return CompilationResult(
+                ok=False,
+                complete=False,
+                root_id=root_id,
+                states=states,
+                artifacts=artifacts,
+            )
+
+        artifacts["processing_queue"] = artifact_store.write_pass_queue(
+            root_id=root_id,
+            node_states=states,
+            frontend_ok=True,
+            database_status="REUSED" if database_reused else "COMPLETED",
+            design_status="COMPLETED",
+            project_status="COMPLETED",
+            lowering_status="BACKEND_BUILD_SUCCEEDED",
+        )
+        await self._log("Compiler", "PROJECT_BUILD acceptance gate completed successfully.")
+
         final_message = {
-            "API": "Stage 2 API boundary completed; Backend Manifest generated over the partial Design IR; typecheck and later passes are pending.",
-            "FUNC": "Stage 2 FUNC boundary completed; Backend Manifest generated over the partial Design IR; typecheck and later passes are pending.",
-            "MODULES": "Whole-program backend Skeleton and Backend Manifest generated; typecheck and later passes are pending.",
+            "API": "Stage 2 API boundary completed; Backend Manifest generated and project build passed over the partial Design IR; later passes are pending.",
+            "FUNC": "Stage 2 FUNC boundary completed; Backend Manifest generated and project build passed over the partial Design IR; later passes are pending.",
+            "MODULES": "Whole-program backend Skeleton and Backend Manifest generated; project build passed and later passes are pending.",
         }[design_stop_after]
 
         await self._log("Compiler", final_message, "warning")
