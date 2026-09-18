@@ -147,7 +147,9 @@ REQUIREMENT_UI_SCOPE_SCHEMA: dict[str, Any] = {
 UI_SCOPE_INSTRUCTIONS = """Classify one requirement node and plan only its page, layout, and store scope.
 Return exactly the supplied JSON shape. Use UI_REQUIRED when the requirement directly needs a user-facing page,
 UI_AFFECTING when it changes or reuses an existing UI symbol without introducing a page, and NO_UI only when no UI
-symbol is involved. CREATE allocates a new global symbol; REUSE must name a symbol already present in the registry.
+symbol is involved. UI_REQUIRED must include at least one CREATE or REUSE page. UI_AFFECTING must include at least
+one CREATE or REUSE layout, store, or page. Never return UI_REQUIRED or UI_AFFECTING with all corresponding symbol
+arrays empty. CREATE allocates a new global symbol; REUSE must name a symbol already present in the registry.
 Never create a second symbol with an existing name. Names are global English symbol names and must be stable across
 requirements. A CREATE page needs a non-empty absolute route and spec. A CREATE layout or store needs a non-empty
 spec. A CREATE store must define only genuinely cross-page state and its public actions; do not move page-local form
@@ -1129,12 +1131,12 @@ def _repair_scope_decision(
         "UI_AFFECTING" if layouts or stores else
         "NO_UI"
     )
+    # A valid model classification is semantic information, so never repair an
+    # incomplete UI_REQUIRED/UI_AFFECTING decision by silently weakening it to
+    # NO_UI. The cross-field validator will reject it and feed the defect back
+    # to the model for another attempt.
     if scope == "NO_UI" and has_entries:
         scope = "UI_REQUIRED" if pages else "UI_AFFECTING"
-    if scope == "UI_REQUIRED" and not pages:
-        scope = "UI_AFFECTING" if layouts or stores else "NO_UI"
-    if scope == "UI_AFFECTING" and not has_entries:
-        scope = "NO_UI"
 
     return {
         "requirement_id": requirement_id,

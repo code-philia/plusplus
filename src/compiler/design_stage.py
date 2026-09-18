@@ -18,7 +18,8 @@ from .model_client import StructuredModel, describe_model_error
 
 
 PRIMITIVE_TYPES = {"string", "integer", "number", "boolean", "date", "datetime", "uuid", "json"}
-EFFECT_OPERATIONS = {"READ", "CREATE", "UPDATE", "DELETE", "SESSION_WRITE", "COOKIE_WRITE", "EXTERNAL_IO"}
+DATABASE_EFFECT_OPERATIONS = {"READ", "CREATE", "UPDATE", "DELETE"}
+EFFECT_OPERATIONS = DATABASE_EFFECT_OPERATIONS | {"SESSION_WRITE", "COOKIE_WRITE", "EXTERNAL_IO"}
 REPAIR_CURRENT = "REPAIR_CURRENT"
 REOPEN_PARENT = "REOPEN_PARENT"
 UNRESOLVED = "UNRESOLVED"
@@ -86,7 +87,7 @@ MODULE_EFFECT_SCHEMA: dict[str, Any] = {
         "id": {"type": "string", "maxLength": 120, "pattern": r"^[a-z][a-z0-9_]*$"},
         "operation": {
             "type": "string",
-            "enum": ["READ", "CREATE", "UPDATE", "DELETE", "SESSION_WRITE", "COOKIE_WRITE", "EXTERNAL_IO"],
+            "enum": sorted(EFFECT_OPERATIONS),
         },
         "target": _nullable({"type": "string", "maxLength": 64}),
         "fields": {"type": "array", "items": {"type": "string", "maxLength": 64}},
@@ -134,6 +135,12 @@ template. Keep every required key and use [] when a section is empty. Describe o
 inputs, observable outputs, and required effects. Represent database reads as READ effects and state changes as their
 corresponding effect operation. Use only supplied database entities and fields. Constraints in the context must be
 reflected in the spec when they affect behavior; do not return constraint ids or allocate constraints to modules.
+Every database access required to satisfy observable behavior must appear as a READ, CREATE, UPDATE, or DELETE effect.
+This includes persisted session records: when `session` is a supplied database entity, inserting a session row is
+CREATE on `session`, not SESSION_WRITE. Reserve SESSION_WRITE for a non-database runtime session store. If the
+requirement writes a browser cookie, include COOKIE_WRITE. In particular, checking whether values already exist for
+UNIQUE or COMPOSITE_UNIQUE constraints requires a READ effect even when the database also enforces the constraint. Do
+not hide required effects inside the prose spec.
 Do not design modules, calls, steps, bindings, outcomes, guards, or algorithms. Keep every id concise (64 characters
 or fewer). Return only the structured object.
 
@@ -144,8 +151,11 @@ Example shape:
 API_DECOMPOSITION_INSTRUCTIONS = """Turn one Requirement Contract into API modules. Keep one user action in one API
 unless the requirement explicitly defines multiple operations. Every API contains exactly kind, name, spec, inputs,
 outputs, and effects. Set kind to API. Copy interface fields and effects from the supplied contract without changing
-their semantic identifiers, types, or required flags. Field names are local parameter labels and may be made clearer without changing
-the represented data. Do not design child functions or implementation steps. Return only `{\"modules\": [...]}`.
+their semantic identifiers, types, or required flags. Field names are local parameter labels and may be made clearer
+without changing the represented data. A module whose spec describes a database read or write must own the
+corresponding effect from the supplied contract; never describe hidden database access on a module with an empty
+effects list.
+Do not design child functions or implementation steps. Return only `{\"modules\": [...]}`.
 """
 
 MODULE_DECOMPOSITION_INSTRUCTIONS = """Read the layered Markdown context and decompose the current module from the top down.
@@ -157,8 +167,12 @@ introduced values required only when the child cannot complete without them. An 
 FUNC may contain its own logic and may call FUNC or DB modules. A DB module is always a leaf. The list order is the call
 order. A module input must come from the parent inputs or an earlier child output. Copy the exact interface field and
 effect identifiers supplied in the Markdown. Keep child responsibilities cohesive and smaller than the parent. Return
-an empty modules list when a FUNC can complete its remaining pure logic itself. Database effects must be delegated to
-DB modules and may not remain inside a terminal FUNC.
+an empty modules list when a FUNC can complete its remaining pure logic itself. Database effects are exactly READ,
+CREATE, UPDATE, and DELETE; they must be delegated to DB modules and may not remain inside a terminal FUNC.
+SESSION_WRITE, COOKIE_WRITE, and EXTERNAL_IO are application effects and must never be assigned to a DB module. Every
+DB child must own at least one database effect. Never invent an effect: when the parent effect table is empty, all
+child effects must be [] and no DB child may be introduced. A child whose spec describes database access must own one
+of the exact effects listed in the parent table.
 
 Treat semantic_id as the stable identity of a data value and type as its canonical data type. The name is only a local
 parameter label and may differ between modules. A child output may introduce new data or pass through/refine data that
@@ -302,6 +316,27 @@ class DesignPass:
 
             base = state.clone()
             contract = _normalize_requirement_contract(contract_result.value)
+            contract, normalized_effect_ids = _normalize_database_backed_session_effects(
+                contract,
+                design_context=design_context,
+            )
+            if normalized_effect_ids:
+                self._trace(
+                    "CONTRACT_EFFECTS_NORMALIZED "
+                    f"requirement={requirement_id} effects={normalized_effect_ids} "
+                    "from=SESSION_WRITE to=CREATE source=database_entities"
+                )
+            contract, completed_effect_ids = _complete_constraint_read_effects(
+                contract,
+                requirement_id=requirement_id,
+                design_context=design_context,
+            )
+            if completed_effect_ids:
+                self._trace(
+                    "CONTRACT_EFFECTS_COMPLETED "
+                    f"requirement={requirement_id} effects={completed_effect_ids} "
+                    "source=database_unique_constraints"
+                )
             base.requirement_contracts[requirement_id] = contract
             compiled, issues = self._compile_requirement(
                 base,
@@ -657,10 +692,13 @@ def _requirement_contract_issues(value: dict[str, Any], requirement_id: str, con
         effect_ids.add(effect_id)
         operation = str(effect.get("operation", ""))
         target = str(effect.get("target") or "").lower()
-        if operation in {"READ", "CREATE", "UPDATE", "DELETE"} and target not in allowed_entities:
+        if operation in DATABASE_EFFECT_OPERATIONS and target not in allowed_entities:
             issues.append(_issue("DATA_DOMAIN_OUT_OF_SCOPE", f"Effect {effect_id} references unavailable entity: {target}", "REQUIREMENT_CONTRACT", requirement_id))
         unknown = set(effect.get("fields", [])) - database_fields.get(target, set())
-        if operation in {"READ", "CREATE", "UPDATE", "DELETE"} and unknown:
+        database_backed = operation in DATABASE_EFFECT_OPERATIONS or (
+            operation == "SESSION_WRITE" and target in allowed_entities
+        )
+        if database_backed and unknown:
             issues.append(_issue("UNKNOWN_DATABASE_FIELD", f"Effect {effect_id} references unknown fields: {sorted(unknown)}", "REQUIREMENT_CONTRACT", requirement_id))
     return issues
 
@@ -734,6 +772,7 @@ def _simple_decomposition_issues(
 
     for index, module in enumerate(value.get("modules", []), start=1):
         label = str(module.get("name") or f"module {index}")
+        kind = str(module.get("kind", ""))
         if not str(module.get("spec", "")).strip():
             issues.append(_issue(
                 "MODULE_SPEC_EMPTY",
@@ -779,9 +818,26 @@ def _simple_decomposition_issues(
             elif source is None:
                 available[semantic_id] = copy.deepcopy(field_item)
 
-        for effect in module.get("effects", []):
+        module_effects = module.get("effects", [])
+        if kind == "DB" and not module_effects:
+            issues.append(_issue(
+                "DB_EFFECT_REQUIRED",
+                f"DB module {label} must own at least one READ, CREATE, UPDATE, or DELETE effect",
+                "MODULE_DECOMPOSITION",
+                parent_id,
+            ))
+        for effect in module_effects:
             effect_id = str(effect.get("id", ""))
             allocated_effects.append(effect_id)
+            operation = str(effect.get("operation", ""))
+            if kind == "DB" and operation not in DATABASE_EFFECT_OPERATIONS:
+                issues.append(_issue(
+                    "DB_EFFECT_INVALID",
+                    f"DB module {label} cannot own {operation or 'an empty operation'}; "
+                    "DB modules accept only READ, CREATE, UPDATE, or DELETE",
+                    "MODULE_DECOMPOSITION",
+                    parent_id,
+                ))
             expected = expected_effects.get(effect_id)
             if expected is None:
                 issues.append(_issue(
@@ -823,7 +879,7 @@ def _simple_decomposition_issues(
         else {
             effect_id
             for effect_id, effect in expected_effects.items()
-            if effect.get("operation") in {"READ", "CREATE", "UPDATE", "DELETE"}
+            if effect.get("operation") in DATABASE_EFFECT_OPERATIONS
         }
     )
     allocated_required = [effect_id for effect_id in allocated_effects if effect_id in required_effects]
@@ -952,6 +1008,131 @@ def _normalize_requirement_contract(value: dict[str, Any]) -> dict[str, Any]:
             effect["target"] = str(effect["target"]).lower()
         effect["fields"] = sorted(set(effect.get("fields", [])))
     return result
+
+
+def _normalize_database_backed_session_effects(
+    contract: dict[str, Any],
+    *,
+    design_context: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Represent writes to a persisted session entity as database CREATE effects.
+
+    SESSION_WRITE is reserved for runtime session stores that are not represented
+    in Database IR. A model may still use that operation for an insertion into a
+    supplied `session` entity; normalize that ambiguity before the contract is
+    frozen so every persisted DB module uses the canonical CRUD vocabulary.
+    """
+
+    result = copy.deepcopy(contract)
+    database_entities = {
+        str(value).lower()
+        for value in design_context.get("allowed_entities", [])
+        if str(value).strip()
+    }
+    normalized: list[str] = []
+    for effect in result.get("effects", []):
+        operation = str(effect.get("operation", "")).upper()
+        target = str(effect.get("target") or "").lower()
+        if operation != "SESSION_WRITE" or target not in database_entities:
+            continue
+        effect["operation"] = "CREATE"
+        normalized.append(str(effect.get("id", "")))
+    return result, normalized
+
+
+def _complete_constraint_read_effects(
+    contract: dict[str, Any],
+    *,
+    requirement_id: str,
+    design_context: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Complete READ effects implied by this requirement's uniqueness rules.
+
+    UNIQUE constraints are enforced by the database, but requirements commonly
+    need a preflight lookup to return a domain error instead of surfacing a raw
+    constraint failure. The Database IR is authoritative for the entity/field
+    identity, so this completion is deterministic and keeps all later module
+    decomposition inside the frozen Requirement Contract.
+    """
+
+    result = copy.deepcopy(contract)
+    effects = result.setdefault("effects", [])
+    existing_ids = {str(effect.get("id", "")) for effect in effects}
+    existing_read_fields: dict[str, set[str]] = {}
+    for effect in effects:
+        if str(effect.get("operation", "")).upper() != "READ":
+            continue
+        target = str(effect.get("target") or "").lower()
+        existing_read_fields.setdefault(target, set()).update(
+            str(value) for value in effect.get("fields", []) if str(value).strip()
+        )
+    fields_by_target: dict[str, set[str]] = {}
+
+    for constraint in design_context.get("constraints", []):
+        if str(constraint.get("type", "")).upper() not in {
+            "UNIQUE",
+            "COMPOSITE_UNIQUE",
+        }:
+            continue
+        owner_ids = {
+            str(value)
+            for value in constraint.get("requirement_ids", [])
+            if str(value).strip()
+        }
+        if owner_ids and requirement_id not in owner_ids:
+            continue
+        qualified_fields = [
+            str(value).strip()
+            for value in constraint.get("fields", [])
+            if str(value).strip()
+        ]
+        targets = {value.partition(".")[0].lower() for value in qualified_fields if "." in value}
+        if len(targets) != 1:
+            continue
+        target = next(iter(targets))
+        fields = {
+            value.partition(".")[2]
+            for value in qualified_fields
+            if value.partition(".")[0].lower() == target and value.partition(".")[2]
+        }
+        if fields:
+            fields_by_target.setdefault(target, set()).update(fields)
+
+    completed: list[str] = []
+    for target, fields in sorted(fields_by_target.items()):
+        ordered_fields = sorted(fields - existing_read_fields.get(target, set()))
+        if not ordered_fields:
+            continue
+        base_id = _stable_effect_id("read_existing", target, ordered_fields)
+        effect_id = base_id
+        suffix = 2
+        while effect_id in existing_ids:
+            effect_id = f"{base_id[:61]}_{suffix}"
+            suffix += 1
+        effects.append({
+            "id": effect_id,
+            "operation": "READ",
+            "target": target,
+            "fields": ordered_fields,
+        })
+        existing_ids.add(effect_id)
+        existing_read_fields.setdefault(target, set()).update(ordered_fields)
+        completed.append(effect_id)
+
+    effects.sort(key=lambda effect: str(effect.get("id", "")))
+    return result, completed
+
+
+def _stable_effect_id(prefix: str, target: str, fields: list[str]) -> str:
+    parts = [
+        re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+        for value in (prefix, target, *fields)
+    ]
+    readable = "_".join(value for value in parts if value)
+    if len(readable) <= 64:
+        return readable
+    digest = _hash({"prefix": prefix, "target": target, "fields": fields})[:10]
+    return f"{readable[:53].rstrip('_')}_{digest}"
 
 
 def _field_issues(fields: Any, label: str, blame: str) -> list[DesignIssue]:

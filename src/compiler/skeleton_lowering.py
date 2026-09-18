@@ -712,7 +712,7 @@ def _field_checks(
             errors.append(f"ARC3406 DATABASE_SCHEMA_INVALID: properties must be an object for {name}.")
             continue
         for kind, value in sorted(properties.items()):
-            if value is None or value is False or kind in {"default", "format"}:
+            if value is None or value is False or kind in {"default", "format", "pattern"}:
                 continue
             if value == "" or value == []:
                 warnings.append(
@@ -776,14 +776,6 @@ def _property_check_expression(
         return f"{field} < datetime('now')"
     if kind == "date_future" and value is True:
         return f"{field} > datetime('now')"
-    if kind == "pattern":
-        if not str(value):
-            return None
-        warnings.append(
-            "ARC3411 DATABASE_PATTERN_UNSUPPORTED: SQLite cannot enforce regex pattern "
-            f"for {field_name}; skipped."
-        )
-        return None
     warnings.append(
         f"ARC3412 DATABASE_CHECK_UNSUPPORTED: cannot lower {kind} for {field_name}; skipped."
     )

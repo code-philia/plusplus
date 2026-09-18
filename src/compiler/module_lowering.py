@@ -400,9 +400,6 @@ def _database_rows(
     if kind != "DB":
         return []
     effects = module.get("effects", [])
-    if not isinstance(effects, list):
-        errors.append(f"ARC3510 DB_EFFECT_INVALID: effects must be a list for {module.get('id')}.")
-        return []
     entity_tables = {
         str(symbol.get("entity", "")): symbol
         for symbol in symbols.values()
@@ -410,13 +407,7 @@ def _database_rows(
     }
     targets: list[str] = []
     for effect in effects:
-        operation = str(effect.get("operation", "")) if isinstance(effect, dict) else ""
         target = str(effect.get("target", "")) if isinstance(effect, dict) else ""
-        if operation not in {"READ", "CREATE", "UPDATE", "DELETE"} or not target:
-            errors.append(
-                f"ARC3510 DB_EFFECT_INVALID: DB module {module.get('id')} has non-database effect."
-            )
-            continue
         if target not in targets:
             targets.append(target)
     rows: list[dict[str, str]] = []

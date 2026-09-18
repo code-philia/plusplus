@@ -73,7 +73,6 @@ def _compact_field(field: dict[str, Any]) -> dict[str, Any]:
 
 def _compact_effect(effect: dict[str, Any]) -> dict[str, Any]:
     return {
-        key: copy.deepcopy(effect[key])
+        key: copy.deepcopy(effect.get(key))
         for key in ("id", "operation", "target", "fields")
-        if effect.get(key) is not None
     }
