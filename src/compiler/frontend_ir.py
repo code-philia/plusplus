@@ -9,14 +9,7 @@ from typing import Any
 
 
 FRONTEND_IR_SCHEMA_VERSION = 1
-FRONTEND_MODULE_KINDS = {"PAGE", "LAYOUT", "COMPONENT", "STORE"}
 UI_SCOPE_VALUES = {"UI_REQUIRED", "UI_AFFECTING", "NO_UI"}
-VISUAL_BINDING_INTENTS = {
-    "PAGE_REFERENCE",
-    "COMPONENT_REFERENCE",
-    "LAYOUT_REFERENCE",
-    "STYLE_REFERENCE",
-}
 
 
 class FrontendDesignErrorCode(StrEnum):
@@ -26,7 +19,6 @@ class FrontendDesignErrorCode(StrEnum):
     SYMBOL_DUPLICATE = "ARC4102"
     REFERENCE_UNKNOWN = "ARC4103"
     ROUTE_CONFLICT = "ARC4104"
-    COMPOSITION_CYCLE = "ARC4105"
     API_DEPENDENCY_INVALID = "ARC4106"
     REQUIREMENT_UNCOVERED = "ARC4107"
     BINDING_INCOMPATIBLE = "ARC4108"
@@ -51,11 +43,6 @@ class FrontendDesignErrorCode(StrEnum):
     COMPONENT_REUSE_MISSING = "ARC4132"
     COMPONENT_CREATION_CONFLICT = "ARC4133"
 
-    DATA_CONTRACT_MODEL_FAILED = "ARC4140"
-    DATA_CONTRACT_DECISION_INVALID = "ARC4141"
-    DATA_CONTRACT_CONFLICT = "ARC4142"
-    API_BINDING_UNRESOLVED = "ARC4143"
-
     DUAL_DESIGN_INVALID = "ARC4150"
 
 
@@ -64,7 +51,6 @@ FRONTEND_ERROR_TITLES: dict[FrontendDesignErrorCode, str] = {
     FrontendDesignErrorCode.SYMBOL_DUPLICATE: "FRONTEND_SYMBOL_DUPLICATE",
     FrontendDesignErrorCode.REFERENCE_UNKNOWN: "FRONTEND_REFERENCE_UNKNOWN",
     FrontendDesignErrorCode.ROUTE_CONFLICT: "FRONTEND_ROUTE_CONFLICT",
-    FrontendDesignErrorCode.COMPOSITION_CYCLE: "FRONTEND_COMPOSITION_CYCLE",
     FrontendDesignErrorCode.API_DEPENDENCY_INVALID: "FRONTEND_API_DEPENDENCY_INVALID",
     FrontendDesignErrorCode.REQUIREMENT_UNCOVERED: "FRONTEND_REQUIREMENT_UNCOVERED",
     FrontendDesignErrorCode.BINDING_INCOMPATIBLE: "FRONTEND_BINDING_INCOMPATIBLE",
@@ -85,10 +71,6 @@ FRONTEND_ERROR_TITLES: dict[FrontendDesignErrorCode, str] = {
     FrontendDesignErrorCode.COMPONENT_DECISION_INVALID: "COMPONENT_DECISION_INVALID",
     FrontendDesignErrorCode.COMPONENT_REUSE_MISSING: "COMPONENT_REUSE_MISSING",
     FrontendDesignErrorCode.COMPONENT_CREATION_CONFLICT: "COMPONENT_CREATION_CONFLICT",
-    FrontendDesignErrorCode.DATA_CONTRACT_MODEL_FAILED: "DATA_CONTRACT_MODEL_FAILED",
-    FrontendDesignErrorCode.DATA_CONTRACT_DECISION_INVALID: "DATA_CONTRACT_DECISION_INVALID",
-    FrontendDesignErrorCode.DATA_CONTRACT_CONFLICT: "DATA_CONTRACT_CONFLICT",
-    FrontendDesignErrorCode.API_BINDING_UNRESOLVED: "API_BINDING_UNRESOLVED",
     FrontendDesignErrorCode.DUAL_DESIGN_INVALID: "DUAL_DESIGN_INVALID",
 }
 
@@ -108,18 +90,6 @@ class FrontendDesignIssue:
 
     def format(self) -> str:
         return f"{self.code.value} {self.title}: {self.message}"
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "code": self.code.value,
-            "title": self.title,
-            "severity": self.severity,
-            "phase": self.phase,
-            "blame_symbol": self.blame_symbol,
-            "message": self.message,
-            "context": copy.deepcopy(self.context),
-        }
-
 
 def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
     return {"anyOf": [schema, {"type": "null"}]}
@@ -245,7 +215,6 @@ LAYOUT_SCHEMA: dict[str, Any] = {
         "id",
         "spec",
         "requirement_ids",
-        "page_ids",
         "component_ids",
         "render_obligations",
         "visual_reference_ids",
@@ -254,7 +223,6 @@ LAYOUT_SCHEMA: dict[str, Any] = {
         "id": {"type": "string", "pattern": r"^LAYOUT\.[A-Za-z][A-Za-z0-9]*$"},
         "spec": {"type": "string", "minLength": 1, "maxLength": 800},
         "requirement_ids": _string_list(),
-        "page_ids": _string_list(),
         "component_ids": _string_list(),
         "render_obligations": {"type": "array", "items": RENDER_OBLIGATION_SCHEMA},
         "visual_reference_ids": _string_list(),
@@ -336,36 +304,13 @@ STORE_ACTION_SCHEMA: dict[str, Any] = {
 STORE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["id", "spec", "state", "actions", "requirement_ids", "consumer_ids"],
+    "required": ["id", "spec", "state", "actions", "requirement_ids"],
     "properties": {
         "id": {"type": "string", "pattern": r"^STORE\.[A-Za-z][A-Za-z0-9]*$"},
         "spec": {"type": "string", "minLength": 1, "maxLength": 800},
         "state": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
         "actions": {"type": "array", "items": STORE_ACTION_SCHEMA},
         "requirement_ids": _string_list(),
-        "consumer_ids": _string_list(),
-    },
-}
-
-LOCAL_DATA_CONTRACT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["id", "owner_component_id", "fields"],
-    "properties": {
-        "id": {"type": "string", "pattern": r"^UI_TYPE\.[A-Za-z][A-Za-z0-9]*$"},
-        "owner_component_id": {"type": "string", "pattern": r"^COMPONENT\."},
-        "fields": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
-    },
-}
-
-COMPOSITION_EDGE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["parent_id", "child_id", "order"],
-    "properties": {
-        "parent_id": {"type": "string", "minLength": 1},
-        "child_id": {"type": "string", "minLength": 1},
-        "order": {"type": "integer", "minimum": 0},
     },
 }
 
@@ -412,8 +357,6 @@ FRONTEND_DESIGN_IR_SCHEMA: dict[str, Any] = {
         "pages",
         "components",
         "stores",
-        "local_data_contracts",
-        "composition_edges",
         "api_dependencies",
         "requirement_links",
     ],
@@ -424,8 +367,6 @@ FRONTEND_DESIGN_IR_SCHEMA: dict[str, Any] = {
         "pages": {"type": "array", "items": PAGE_SCHEMA},
         "components": {"type": "array", "items": COMPONENT_SCHEMA},
         "stores": {"type": "array", "items": STORE_SCHEMA},
-        "local_data_contracts": {"type": "array", "items": LOCAL_DATA_CONTRACT_SCHEMA},
-        "composition_edges": {"type": "array", "items": COMPOSITION_EDGE_SCHEMA},
         "api_dependencies": {"type": "array", "items": API_DEPENDENCY_SCHEMA},
         "requirement_links": {"type": "array", "items": REQUIREMENT_LINK_SCHEMA},
     },
@@ -437,14 +378,12 @@ FRONTEND_DESIGN_TABLE_SCHEMAS: dict[str, dict[str, Any]] = {
     "pages": {"type": "array", "items": PAGE_SCHEMA},
     "components": {"type": "array", "items": COMPONENT_SCHEMA},
     "stores": {"type": "array", "items": STORE_SCHEMA},
-    "local_data_contracts": {"type": "array", "items": LOCAL_DATA_CONTRACT_SCHEMA},
-    "composition_edges": {"type": "array", "items": COMPOSITION_EDGE_SCHEMA},
     "api_dependencies": {"type": "array", "items": API_DEPENDENCY_SCHEMA},
 }
 
 
 def repair_schema_shape(value: Any, schema: dict[str, Any]) -> Any:
-    """Apply lossless/tolerant size and property repairs before strict validation.
+    """Apply lossless/tolerant size and property repairs before minimum validation.
 
     This intentionally does not invent required semantic values or repair references.
     Individual Frontend Design passes own those decisions. It only removes unknown

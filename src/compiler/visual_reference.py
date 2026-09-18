@@ -253,19 +253,11 @@ class VisualReferenceResolutionResult:
     references: list[ResolvedVisualReference] = field(default_factory=list)
     errors: list[FrontendDesignIssue] = field(default_factory=list)
 
-    @property
-    def ok(self) -> bool:
-        return not self.errors
-
 
 @dataclass(slots=True)
 class VisualReferenceAnalysisResult:
     references: list[dict[str, Any]] = field(default_factory=list)
     errors: list[FrontendDesignIssue] = field(default_factory=list)
-
-    @property
-    def ok(self) -> bool:
-        return not self.errors
 
 
 class VisualReferenceResolver:
@@ -459,6 +451,7 @@ class VisualReferenceResolver:
             message=message,
             phase="VISUAL_REFERENCE_RESOLUTION",
             blame_symbol=blame_symbol,
+            severity="WARNING",
             context=context,
         )
 
@@ -485,8 +478,6 @@ class VisualReferenceAnalyzer:
         workspace_root: Path | None = None
         if artifact_root is not None:
             arc_root = artifact_root.expanduser().resolve()
-            if arc_root.name == "compiler":
-                arc_root = arc_root.parent
             workspace_root = arc_root.parent
         self._log = SynchronousLog(
             "VisualReferenceAnalyzer",
@@ -515,8 +506,14 @@ class VisualReferenceAnalyzer:
             analysis, issue = self._analyze_one(reference)
             if issue is not None:
                 errors.append(issue)
-                continue
-            assert analysis is not None
+                analysis = {
+                    "reference_id": reference.id,
+                    "regions": [],
+                    "visible_controls": [],
+                    "layout_cues": [],
+                    "style_cues": [],
+                    "text_cues": [],
+                }
             records.append(reference.to_ir(analysis))
         return VisualReferenceAnalysisResult(references=records, errors=errors)
 
@@ -672,6 +669,7 @@ class VisualReferenceAnalyzer:
             message=message,
             phase="VISUAL_REFERENCE_ANALYSIS",
             blame_symbol=reference.id,
+            severity="WARNING",
             context={"source_path": reference.source_path, **context},
         )
 

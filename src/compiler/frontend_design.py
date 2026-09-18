@@ -33,7 +33,6 @@ _SYMBOL_PREFIXES = {
     "LAYOUT": "LAYOUT",
     "COMPONENT": "COMPONENT",
     "STORE": "STORE",
-    "UI_TYPE": "UI_TYPE",
 }
 
 
@@ -153,8 +152,8 @@ Never create a second symbol with an existing name. Names are global English sym
 requirements. A CREATE page needs a non-empty absolute route and spec. A CREATE layout or store needs a non-empty
 spec. A CREATE store must define only genuinely cross-page state and its public actions; do not move page-local form
 or loading state into a global store. For REUSE, keep create-only fields as empty strings, empty arrays, or null; the
-compiler ignores them. Refer
-to an existing symbol by copying its registry `name` exactly; do not place the PAGE/LAYOUT/STORE prefix in `name`. Refer
+compiler ignores them. Refer to an existing symbol by copying its registry `name` exactly; do not place the
+PAGE/LAYOUT/STORE prefix in `name`. Refer
 only to Backend API ids and visual reference ids supplied for this requirement. API ids are opaque and must be copied
 exactly. Do not design components, JSX, CSS, files, implementation logic, local store fields, or API bindings. Use []
 whenever a list is empty and return only the structured JSON object.
@@ -166,7 +165,6 @@ class RequirementUIScopeResult:
     frontend_ir: dict[str, Any]
     node_states: dict[str, str]
     errors: list[str] = field(default_factory=list)
-    issues: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -186,8 +184,6 @@ class FrontendDesignState:
         self.pages: dict[str, dict[str, Any]] = {}
         self.components: dict[str, dict[str, Any]] = {}
         self.stores: dict[str, dict[str, Any]] = {}
-        self.local_data_contracts: dict[str, dict[str, Any]] = {}
-        self.composition_edges: list[dict[str, Any]] = []
         self.api_dependencies: list[dict[str, Any]] = []
         self.requirement_links: dict[str, dict[str, Any]] = {}
 
@@ -216,13 +212,11 @@ class FrontendDesignState:
             "pages",
             "components",
             "stores",
-            "local_data_contracts",
         ):
             table = getattr(state, table_name)
             for item in frontend_ir.get(table_name, []):
                 if isinstance(item, dict) and str(item.get("id", "")).strip():
                     table[str(item["id"])] = copy.deepcopy(item)
-        state.composition_edges = copy.deepcopy(frontend_ir.get("composition_edges", []))
         state.api_dependencies = copy.deepcopy(frontend_ir.get("api_dependencies", []))
         state.requirement_links = {
             str(item.get("requirement_id")): copy.deepcopy(item)
@@ -242,15 +236,6 @@ class FrontendDesignState:
             "pages": rows(self.pages),
             "components": rows(self.components),
             "stores": rows(self.stores),
-            "local_data_contracts": rows(self.local_data_contracts),
-            "composition_edges": sorted(
-                copy.deepcopy(self.composition_edges),
-                key=lambda item: (
-                    str(item.get("parent_id", "")),
-                    int(item.get("order", 0)),
-                    str(item.get("child_id", "")),
-                ),
-            ),
             "api_dependencies": sorted(
                 copy.deepcopy(self.api_dependencies),
                 key=lambda item: (str(item.get("consumer_id", "")), str(item.get("api_id", ""))),
@@ -294,7 +279,6 @@ class FrontendDesignState:
                     "id": symbol_id,
                     "spec": str(item["spec"]).strip(),
                     "requirement_ids": [requirement_id],
-                    "page_ids": [],
                     "component_ids": [],
                     "render_obligations": copy.deepcopy(item["render_obligations"]),
                     "visual_reference_ids": sorted(set(item["visual_reference_ids"])),
@@ -312,16 +296,13 @@ class FrontendDesignState:
                     "state": copy.deepcopy(item["state"]),
                     "actions": copy.deepcopy(item["actions"]),
                     "requirement_ids": [requirement_id],
-                    "consumer_ids": [],
                 }
             else:
                 _add_sorted_unique(trial.stores[symbol_id]["requirement_ids"], requirement_id)
 
-        touched_pages: set[str] = set()
         for item in decision["pages"]:
             page_id = self.stable_symbol_id("PAGE", item["name"])
             linked_symbols.add(page_id)
-            touched_pages.add(page_id)
             linked_visuals.update(str(value) for value in item["visual_reference_ids"])
             if item["action"] == "CREATE":
                 layout_id = (
@@ -356,14 +337,6 @@ class FrontendDesignState:
                     linked_symbols.add(str(existing_page["layout_id"]))
                 linked_symbols.update(str(value) for value in existing_page["store_dependencies"])
 
-        for page_id in touched_pages:
-            page = trial.pages[page_id]
-            layout_id = page.get("layout_id")
-            if layout_id:
-                _add_sorted_unique(trial.layouts[str(layout_id)]["page_ids"], page_id)
-            for store_id in page["store_dependencies"]:
-                _add_sorted_unique(trial.stores[str(store_id)]["consumer_ids"], page_id)
-
         trial.requirement_links[requirement_id] = {
             "requirement_id": requirement_id,
             "ui_scope": decision["ui_scope"],
@@ -376,8 +349,6 @@ class FrontendDesignState:
         self.pages = trial.pages
         self.components = trial.components
         self.stores = trial.stores
-        self.local_data_contracts = trial.local_data_contracts
-        self.composition_edges = trial.composition_edges
         self.api_dependencies = trial.api_dependencies
         self.requirement_links = trial.requirement_links
         return []
@@ -389,8 +360,6 @@ class RequirementUIScopePass:
     def __init__(self, model: StructuredModel, artifact_root: Path) -> None:
         self._model = model
         arc_root = artifact_root.expanduser().resolve()
-        if arc_root.name == "compiler":
-            arc_root = arc_root.parent
         self._log = SynchronousLog("RequirementUIScopePass", workspace_root=arc_root.parent)
         self._retry_count = _bounded_env_int("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", 2, 0, 10)
         self._trace_enabled = _env_flag("ARC_FRONTEND_DESIGN_TRACE", True)
@@ -498,7 +467,6 @@ class RequirementUIScopePass:
             frontend_ir=frontend_ir,
             node_states=node_states,
             errors=[issue.format() for issue in all_issues],
-            issues=[issue.as_dict() for issue in all_issues],
         )
 
     def _decide(
@@ -512,7 +480,6 @@ class RequirementUIScopePass:
         state: FrontendDesignState,
     ) -> tuple[dict[str, Any] | None, list[FrontendDesignIssue]]:
         feedback: list[str] = []
-        last_issues: list[FrontendDesignIssue] = []
         last_raw_decision: Any = {}
         for attempt in range(self._retry_count + 1):
             payload = {
@@ -559,15 +526,13 @@ class RequirementUIScopePass:
                 last_raw_decision = raw_decision
             except Exception as exc:
                 detail = describe_model_error(exc)
-                last_issues = [
-                    _issue(
-                        FrontendDesignErrorCode.UI_SCOPE_MODEL_FAILED,
-                        f"UI scope model call failed: {detail}",
-                        "REQUIREMENT_UI_SCOPE",
-                        requirement_id,
-                    )
-                ]
-                feedback = [last_issues[0].format()]
+                issue = _issue(
+                    FrontendDesignErrorCode.UI_SCOPE_MODEL_FAILED,
+                    f"UI scope model call failed: {detail}",
+                    "REQUIREMENT_UI_SCOPE",
+                    requirement_id,
+                )
+                feedback = [issue.format()]
                 self._trace(
                     f"MODEL_ERROR phase=requirement_ui_scope unit={requirement_id} "
                     f"error={detail}"
@@ -614,7 +579,6 @@ class RequirementUIScopePass:
                     f"attempt={attempt + 1} duration_ms={duration}"
                 )
                 return decision, []
-            last_issues = validation_issues
             feedback = [issue.format() for issue in validation_issues]
             self._trace(
                 f"MODEL_REJECTED phase=requirement_ui_scope unit={requirement_id} "
@@ -689,7 +653,7 @@ def validate_frontend_design_minimum(
         ]
 
     issues: list[FrontendDesignIssue] = []
-    tables = ("layouts", "pages", "components", "stores", "local_data_contracts")
+    tables = ("layouts", "pages", "components", "stores")
     symbols: dict[str, str] = {}
     for table_name in tables:
         for item in frontend_ir[table_name]:
@@ -748,9 +712,6 @@ def validate_frontend_design_minimum(
     routes: dict[str, str] = {}
     for layout in frontend_ir["layouts"]:
         layout_id = str(layout["id"])
-        for page_id in layout["page_ids"]:
-            if str(page_id) not in known_pages:
-                issues.append(_unknown_reference(layout_id, "page", str(page_id)))
         for component_id in layout["component_ids"]:
             if str(component_id) not in known_components:
                 issues.append(_unknown_reference(layout_id, "component", str(component_id)))
@@ -786,26 +747,6 @@ def validate_frontend_design_minimum(
             issues.append(_unknown_reference(component_id, "owner page", str(page_owner)))
         if layout_owner is not None and str(layout_owner) not in known_layouts:
             issues.append(_unknown_reference(component_id, "owner layout", str(layout_owner)))
-    for contract in frontend_ir["local_data_contracts"]:
-        contract_id = str(contract["id"])
-        owner_id = str(contract["owner_component_id"])
-        if owner_id not in known_components:
-            issues.append(_unknown_reference(contract_id, "owner component", owner_id))
-    known_consumers = known_pages | known_components
-    for store in frontend_ir["stores"]:
-        store_id = str(store["id"])
-        for consumer_id in store["consumer_ids"]:
-            if str(consumer_id) not in known_consumers:
-                issues.append(_unknown_reference(store_id, "consumer", str(consumer_id)))
-
-    composition_nodes = set(symbols)
-    for edge in frontend_ir["composition_edges"]:
-        parent_id = str(edge["parent_id"])
-        child_id = str(edge["child_id"])
-        if parent_id not in composition_nodes:
-            issues.append(_unknown_reference(parent_id, "composition parent", parent_id))
-        if child_id not in composition_nodes:
-            issues.append(_unknown_reference(parent_id, "composition child", child_id))
     for dependency in frontend_ir["api_dependencies"]:
         consumer_id = str(dependency["consumer_id"])
         api_id = str(dependency["api_id"])
@@ -820,374 +761,6 @@ def validate_frontend_design_minimum(
             for visual_id in item["visual_reference_ids"]:
                 if str(visual_id) not in known_visuals:
                     issues.append(_unknown_reference(owner_id, "visual reference", str(visual_id)))
-    return issues
-
-
-def validate_frontend_design_ir(
-    frontend_ir: dict[str, Any],
-    *,
-    expected_requirement_ids: set[str] | None = None,
-    backend_api_ids: set[str] | None = None,
-) -> list[FrontendDesignIssue]:
-    """Validate aggregate shape, symbol references, ownership, and graph invariants."""
-
-    shape_errors = schema_shape_errors(frontend_ir, FRONTEND_DESIGN_IR_SCHEMA)
-    if shape_errors:
-        return [
-            _issue(
-                FrontendDesignErrorCode.IR_INVALID,
-                message,
-                "FRONTEND_IR_VALIDATION",
-                "<frontend-design-ir>",
-            )
-            for message in shape_errors
-        ]
-
-    issues: list[FrontendDesignIssue] = []
-    table_names = ("layouts", "pages", "components", "stores", "local_data_contracts")
-    symbols: dict[str, dict[str, Any]] = {}
-    symbol_table: dict[str, str] = {}
-    for table_name in table_names:
-        for item in frontend_ir[table_name]:
-            symbol_id = str(item["id"])
-            if symbol_id in symbols:
-                issues.append(_issue(
-                    FrontendDesignErrorCode.SYMBOL_DUPLICATE,
-                    f"Duplicate Frontend symbol id: {symbol_id}.",
-                    "FRONTEND_IR_VALIDATION",
-                    symbol_id,
-                    tables=[symbol_table[symbol_id], table_name],
-                ))
-                continue
-            symbols[symbol_id] = item
-            symbol_table[symbol_id] = table_name
-
-    visual_by_id: dict[str, dict[str, Any]] = {}
-    for item in frontend_ir["visual_references"]:
-        visual_id = str(item["id"])
-        if visual_id in visual_by_id:
-            issues.append(_issue(
-                FrontendDesignErrorCode.SYMBOL_DUPLICATE,
-                f"Duplicate visual reference id: {visual_id}.",
-                "FRONTEND_IR_VALIDATION",
-                visual_id,
-            ))
-        visual_by_id[visual_id] = item
-        if item["analysis"]["reference_id"] != visual_id:
-            issues.append(_issue(
-                FrontendDesignErrorCode.REFERENCE_UNKNOWN,
-                f"Visual analysis reference_id does not match {visual_id}.",
-                "FRONTEND_IR_VALIDATION",
-                visual_id,
-            ))
-
-    links: dict[str, dict[str, Any]] = {}
-    for link in frontend_ir["requirement_links"]:
-        requirement_id = str(link["requirement_id"])
-        if requirement_id in links:
-            issues.append(_issue(
-                FrontendDesignErrorCode.SYMBOL_DUPLICATE,
-                f"Duplicate Frontend requirement link: {requirement_id}.",
-                "FRONTEND_IR_VALIDATION",
-                requirement_id,
-            ))
-        links[requirement_id] = link
-
-    if expected_requirement_ids is not None and set(links) != expected_requirement_ids:
-        issues.append(_issue(
-            FrontendDesignErrorCode.REQUIREMENT_UNCOVERED,
-            "Frontend requirement links do not match the current atomic requirements.",
-            "FRONTEND_IR_VALIDATION",
-            "<requirement-links>",
-            missing=sorted(expected_requirement_ids - set(links)),
-            extra=sorted(set(links) - expected_requirement_ids),
-        ))
-    known_requirements = expected_requirement_ids if expected_requirement_ids is not None else set(links)
-
-    route_owner: dict[str, str] = {}
-    for page in frontend_ir["pages"]:
-        page_id = str(page["id"])
-        route = str(page["route"])
-        existing = route_owner.get(route)
-        if existing is not None and existing != page_id:
-            issues.append(_issue(
-                FrontendDesignErrorCode.ROUTE_CONFLICT,
-                f"Route {route!r} is owned by both {existing} and {page_id}.",
-                "FRONTEND_IR_VALIDATION",
-                page_id,
-            ))
-        route_owner[route] = page_id
-
-    pages = {str(item["id"]): item for item in frontend_ir["pages"]}
-    layouts = {str(item["id"]): item for item in frontend_ir["layouts"]}
-    components = {str(item["id"]): item for item in frontend_ir["components"]}
-    stores = {str(item["id"]): item for item in frontend_ir["stores"]}
-
-    for page_id, page in pages.items():
-        issues.extend(_semantic_collection_issues(page["route_inputs"], page_id, "route input"))
-    for component_id, component in components.items():
-        issues.extend(_semantic_collection_issues(component["inputs"], component_id, "input"))
-        event_names = [str(value["name"]) for value in component["events"]]
-        if len(event_names) != len(set(event_names)):
-            issues.append(_issue(
-                FrontendDesignErrorCode.SYMBOL_DUPLICATE,
-                f"Component {component_id} repeats event names.",
-                "FRONTEND_IR_VALIDATION",
-                component_id,
-            ))
-    for store_id, store in stores.items():
-        issues.extend(_semantic_collection_issues(store["state"], store_id, "state"))
-        action_names = [str(value["name"]) for value in store["actions"]]
-        if len(action_names) != len(set(action_names)):
-            issues.append(_issue(
-                FrontendDesignErrorCode.SYMBOL_DUPLICATE,
-                f"Store {store_id} repeats action names.",
-                "FRONTEND_IR_VALIDATION",
-                store_id,
-            ))
-    for contract in frontend_ir["local_data_contracts"]:
-        issues.extend(_semantic_collection_issues(
-            contract["fields"],
-            str(contract["id"]),
-            "field",
-        ))
-
-    for table_name in ("layouts", "pages", "components"):
-        for item in frontend_ir[table_name]:
-            _validate_reference_list(
-                issues,
-                item["visual_reference_ids"],
-                set(visual_by_id),
-                owner_id=str(item["id"]),
-                label="visual reference",
-            )
-
-    for layout_id, layout in layouts.items():
-        _validate_reference_list(issues, layout["page_ids"], set(pages), layout_id, "page")
-        _validate_reference_list(
-            issues, layout["component_ids"], set(components), layout_id, "component"
-        )
-        for page_id in layout["page_ids"]:
-            if page_id in pages and pages[page_id].get("layout_id") != layout_id:
-                issues.append(_issue(
-                    FrontendDesignErrorCode.REFERENCE_UNKNOWN,
-                    f"Layout/page ownership is not reciprocal: {layout_id} -> {page_id}.",
-                    "FRONTEND_IR_VALIDATION",
-                    layout_id,
-                ))
-    for page_id, page in pages.items():
-        layout_id = page.get("layout_id")
-        if layout_id is not None and layout_id not in layouts:
-            issues.append(_unknown_reference(page_id, "layout", str(layout_id)))
-        elif layout_id is not None and page_id not in layouts[layout_id]["page_ids"]:
-            issues.append(_issue(
-                FrontendDesignErrorCode.REFERENCE_UNKNOWN,
-                f"Page/layout ownership is not reciprocal: {page_id} -> {layout_id}.",
-                "FRONTEND_IR_VALIDATION",
-                page_id,
-            ))
-        _validate_reference_list(
-            issues, page["component_ids"], set(components), page_id, "component"
-        )
-        _validate_reference_list(issues, page["store_dependencies"], set(stores), page_id, "store")
-        if backend_api_ids is not None:
-            _validate_api_ids(issues, page_id, page["api_dependencies"], backend_api_ids)
-
-    for component_id, component in components.items():
-        scope = component["scope"]
-        page_owner = component.get("owner_page_id")
-        layout_owner = component.get("owner_layout_id")
-        valid_owner = (
-            (scope == "PAGE" and page_owner in pages and layout_owner is None)
-            or (scope == "LAYOUT" and layout_owner in layouts and page_owner is None)
-            or (scope == "SHARED" and page_owner is None and layout_owner is None)
-        )
-        if not valid_owner:
-            issues.append(_issue(
-                FrontendDesignErrorCode.REFERENCE_UNKNOWN,
-                f"Component {component_id} has invalid ownership for scope {scope}.",
-                "FRONTEND_IR_VALIDATION",
-                component_id,
-            ))
-        elif scope == "PAGE" and component_id not in pages[page_owner]["component_ids"]:
-            issues.append(_issue(
-                FrontendDesignErrorCode.REFERENCE_UNKNOWN,
-                f"Page-owned component {component_id} is missing from {page_owner}.",
-                "FRONTEND_IR_VALIDATION",
-                component_id,
-            ))
-        elif scope == "LAYOUT" and component_id not in layouts[layout_owner]["component_ids"]:
-            issues.append(_issue(
-                FrontendDesignErrorCode.REFERENCE_UNKNOWN,
-                f"Layout-owned component {component_id} is missing from {layout_owner}.",
-                "FRONTEND_IR_VALIDATION",
-                component_id,
-            ))
-
-    for page_id, page in pages.items():
-        for component_id in page["component_ids"]:
-            if component_id not in components:
-                continue
-            component = components[component_id]
-            if component["scope"] not in {"PAGE", "SHARED"} or (
-                component["scope"] == "PAGE" and component["owner_page_id"] != page_id
-            ):
-                issues.append(_issue(
-                    FrontendDesignErrorCode.REFERENCE_UNKNOWN,
-                    f"Page {page_id} cannot contain component {component_id} with different ownership.",
-                    "FRONTEND_IR_VALIDATION",
-                    page_id,
-                ))
-    for layout_id, layout in layouts.items():
-        for component_id in layout["component_ids"]:
-            if component_id not in components:
-                continue
-            component = components[component_id]
-            if component["scope"] not in {"LAYOUT", "SHARED"} or (
-                component["scope"] == "LAYOUT" and component["owner_layout_id"] != layout_id
-            ):
-                issues.append(_issue(
-                    FrontendDesignErrorCode.REFERENCE_UNKNOWN,
-                    f"Layout {layout_id} cannot contain component {component_id} with different ownership.",
-                    "FRONTEND_IR_VALIDATION",
-                    layout_id,
-                ))
-
-    for contract in frontend_ir["local_data_contracts"]:
-        owner_id = str(contract["owner_component_id"])
-        if owner_id not in components:
-            issues.append(_unknown_reference(str(contract["id"]), "component", owner_id))
-
-    consumer_ids = set(pages) | set(components)
-    for store_id, store in stores.items():
-        _validate_reference_list(
-            issues, store["consumer_ids"], consumer_ids, store_id, "consumer"
-        )
-        for consumer_id in store["consumer_ids"]:
-            if consumer_id in pages and store_id not in pages[consumer_id]["store_dependencies"]:
-                issues.append(_issue(
-                    FrontendDesignErrorCode.REFERENCE_UNKNOWN,
-                    f"Store/page dependency is not reciprocal: {store_id} -> {consumer_id}.",
-                    "FRONTEND_IR_VALIDATION",
-                    store_id,
-                ))
-    for page_id, page in pages.items():
-        for store_id in page["store_dependencies"]:
-            if store_id in stores and page_id not in stores[store_id]["consumer_ids"]:
-                issues.append(_issue(
-                    FrontendDesignErrorCode.REFERENCE_UNKNOWN,
-                    f"Page/store dependency is not reciprocal: {page_id} -> {store_id}.",
-                    "FRONTEND_IR_VALIDATION",
-                    page_id,
-                ))
-
-    composition_nodes = set(layouts) | set(pages) | set(components)
-    adjacency: dict[str, set[str]] = {}
-    seen_edges: set[tuple[str, str]] = set()
-    seen_orders: set[tuple[str, int]] = set()
-    for edge in frontend_ir["composition_edges"]:
-        parent_id = str(edge["parent_id"])
-        child_id = str(edge["child_id"])
-        if parent_id not in composition_nodes:
-            issues.append(_unknown_reference(parent_id, "composition parent", parent_id))
-        if child_id not in composition_nodes:
-            issues.append(_unknown_reference(parent_id, "composition child", child_id))
-        pair = (parent_id, child_id)
-        if pair in seen_edges:
-            issues.append(_issue(
-                FrontendDesignErrorCode.SYMBOL_DUPLICATE,
-                f"Duplicate composition edge: {parent_id} -> {child_id}.",
-                "FRONTEND_IR_VALIDATION",
-                parent_id,
-            ))
-        seen_edges.add(pair)
-        order_key = (parent_id, int(edge["order"]))
-        if order_key in seen_orders:
-            issues.append(_issue(
-                FrontendDesignErrorCode.SYMBOL_DUPLICATE,
-                f"Composition parent {parent_id} repeats child order {edge['order']}.",
-                "FRONTEND_IR_VALIDATION",
-                parent_id,
-            ))
-        seen_orders.add(order_key)
-        adjacency.setdefault(parent_id, set()).add(child_id)
-    if _has_cycle(adjacency, composition_nodes):
-        issues.append(_issue(
-            FrontendDesignErrorCode.COMPOSITION_CYCLE,
-            "Frontend composition graph contains a cycle.",
-            "FRONTEND_IR_VALIDATION",
-            "<composition-graph>",
-        ))
-
-    for dependency in frontend_ir["api_dependencies"]:
-        consumer_id = str(dependency["consumer_id"])
-        api_id = str(dependency["api_id"])
-        if consumer_id not in symbols:
-            issues.append(_unknown_reference(consumer_id, "API consumer", consumer_id))
-        if backend_api_ids is not None and api_id not in backend_api_ids:
-            issues.append(_issue(
-                FrontendDesignErrorCode.API_DEPENDENCY_INVALID,
-                f"Frontend API dependency references unknown Backend API: {api_id}.",
-                "FRONTEND_IR_VALIDATION",
-                consumer_id,
-                api_id=api_id,
-            ))
-
-    for requirement_id, link in links.items():
-        symbol_ids = [str(value) for value in link["symbol_ids"]]
-        visual_ids = [str(value) for value in link["visual_reference_ids"]]
-        _validate_reference_list(issues, symbol_ids, set(symbols), requirement_id, "UI symbol")
-        _validate_reference_list(issues, visual_ids, set(visual_by_id), requirement_id, "visual reference")
-        for visual_id in visual_ids:
-            if visual_id in visual_by_id and requirement_id not in visual_by_id[visual_id]["requirement_ids"]:
-                issues.append(_issue(
-                    FrontendDesignErrorCode.REFERENCE_UNKNOWN,
-                    f"Requirement {requirement_id} does not own visual reference {visual_id}.",
-                    "FRONTEND_IR_VALIDATION",
-                    requirement_id,
-                ))
-        scope = link["ui_scope"]
-        if scope == "NO_UI" and symbol_ids:
-            issues.append(_issue(
-                FrontendDesignErrorCode.REQUIREMENT_UNCOVERED,
-                f"NO_UI requirement {requirement_id} must not link UI symbols.",
-                "FRONTEND_IR_VALIDATION",
-                requirement_id,
-            ))
-        if scope == "UI_REQUIRED" and not any(value in pages for value in symbol_ids):
-            issues.append(_issue(
-                FrontendDesignErrorCode.REQUIREMENT_UNCOVERED,
-                f"UI_REQUIRED requirement {requirement_id} must link at least one page.",
-                "FRONTEND_IR_VALIDATION",
-                requirement_id,
-            ))
-        if scope == "UI_AFFECTING" and not symbol_ids:
-            issues.append(_issue(
-                FrontendDesignErrorCode.REQUIREMENT_UNCOVERED,
-                f"UI_AFFECTING requirement {requirement_id} must link a UI symbol.",
-                "FRONTEND_IR_VALIDATION",
-                requirement_id,
-            ))
-
-    for table_name in ("layouts", "pages", "stores"):
-        for item in frontend_ir[table_name]:
-            symbol_id = str(item["id"])
-            for requirement_id in item["requirement_ids"]:
-                if requirement_id not in known_requirements:
-                    issues.append(_issue(
-                        FrontendDesignErrorCode.REQUIREMENT_UNCOVERED,
-                        f"Frontend symbol {symbol_id} references unknown requirement {requirement_id}.",
-                        "FRONTEND_IR_VALIDATION",
-                        symbol_id,
-                    ))
-                elif requirement_id in links and symbol_id not in links[requirement_id]["symbol_ids"]:
-                    issues.append(_issue(
-                        FrontendDesignErrorCode.REQUIREMENT_UNCOVERED,
-                        f"Requirement link {requirement_id} does not include owned symbol {symbol_id}.",
-                        "FRONTEND_IR_VALIDATION",
-                        requirement_id,
-                    ))
-
     return issues
 
 
@@ -1544,32 +1117,16 @@ def _repair_scope_decision(
 
     has_entries = bool(layouts or stores or pages)
     scope = raw_scope if raw_scope in {"UI_REQUIRED", "UI_AFFECTING", "NO_UI"} else (
-        "UI_REQUIRED" if raw_pages or allowed_visual_ids else
-        "UI_AFFECTING" if raw_layouts or raw_stores else
-        "UI_REQUIRED" if allowed_api_ids else
+        "UI_REQUIRED" if pages else
+        "UI_AFFECTING" if layouts or stores else
         "NO_UI"
     )
     if scope == "NO_UI" and has_entries:
         scope = "UI_REQUIRED" if pages else "UI_AFFECTING"
-    if scope == "UI_AFFECTING" and not has_entries:
-        scope = "UI_REQUIRED"
     if scope == "UI_REQUIRED" and not pages:
-        name = _fallback_symbol_name(requirement_id, "Page", 0)
-        page_id = state.stable_symbol_id("PAGE", name)
-        exists = page_id in state.pages
-        pages.append({
-            "action": "REUSE" if exists else "CREATE",
-            "name": name,
-            "spec": "" if exists else default_spec,
-            "route": "" if exists else _unique_route("", name, used_routes),
-            "route_inputs": [],
-            "layout_name": None,
-            "api_dependencies": sorted(allowed_api_ids),
-            "store_names": [],
-            "render_obligations": [],
-            "navigation": [],
-            "visual_reference_ids": sorted(allowed_visual_ids),
-        })
+        scope = "UI_AFFECTING" if layouts or stores else "NO_UI"
+    if scope == "UI_AFFECTING" and not has_entries:
+        scope = "NO_UI"
 
     return {
         "requirement_id": requirement_id,
@@ -1731,8 +1288,8 @@ def _model_requirement(requirement: dict[str, Any]) -> dict[str, Any]:
 
 def _model_api(module: dict[str, Any]) -> dict[str, Any]:
     return {
-        key: copy.deepcopy(module.get(key, [] if key in {"inputs", "outputs", "effects"} else ""))
-        for key in ("id", "spec", "inputs", "outputs", "effects")
+        key: copy.deepcopy(module.get(key, [] if key in {"inputs", "outputs"} else ""))
+        for key in ("id", "spec", "inputs", "outputs")
     }
 
 
@@ -1788,26 +1345,6 @@ def _provider_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_reference_list(
-    issues: list[FrontendDesignIssue],
-    values: Iterable[Any],
-    allowed: set[str],
-    owner_id: str,
-    label: str,
-) -> None:
-    references = [str(value) for value in values]
-    if len(references) != len(set(references)):
-        issues.append(_issue(
-            FrontendDesignErrorCode.SYMBOL_DUPLICATE,
-            f"{owner_id} contains duplicate {label} references.",
-            "FRONTEND_IR_VALIDATION",
-            owner_id,
-        ))
-    for reference in references:
-        if reference not in allowed:
-            issues.append(_unknown_reference(owner_id, label, reference))
-
-
 def _validate_api_ids(
     issues: list[FrontendDesignIssue],
     owner_id: str,
@@ -1849,25 +1386,6 @@ def _unknown_reference(
         owner_id,
         reference=reference,
     )
-
-
-def _has_cycle(adjacency: dict[str, set[str]], nodes: set[str]) -> bool:
-    visiting: set[str] = set()
-    visited: set[str] = set()
-
-    def visit(node: str) -> bool:
-        if node in visiting:
-            return True
-        if node in visited:
-            return False
-        visiting.add(node)
-        if any(visit(child) for child in adjacency.get(node, set()) if child in nodes):
-            return True
-        visiting.remove(node)
-        visited.add(node)
-        return False
-
-    return any(visit(node) for node in sorted(nodes) if node not in visited)
 
 
 def _safe_stable_id(
