@@ -169,8 +169,8 @@ class ModuleSkeletonLowerer:
                     "exports": exports,
                     "imports": import_plan,
                     "implementation_region": {
-                        "begin": "// ARC-IMPLEMENTATION-BEGIN",
-                        "end": "// ARC-IMPLEMENTATION-END",
+                        "begin": f"// ARC-IMPLEMENTATION-BEGIN:{module_id}",
+                        "end": f"// ARC-IMPLEMENTATION-END:{module_id}",
                     },
                 }
             )
@@ -505,6 +505,7 @@ def _render_module(
             "/**",
             f" * @arc-module {module.get('id')}",
             f" * @arc-owner {function_symbol.get('owner_requirement', '')}",
+            f" * @arc-requirement {function_symbol.get('owner_requirement', '')}",
             f" * @arc-kind {kind}",
             " * @arc-generated skeleton",
             " */",
@@ -549,9 +550,9 @@ def _render_module(
             lines.append("  void input;")
     lines.extend(
         [
-            "  // ARC-IMPLEMENTATION-BEGIN",
+            f"  // ARC-IMPLEMENTATION-BEGIN:{module.get('id')}",
             f'  throw new NotImplementedError("{module.get("id")}");',
-            "  // ARC-IMPLEMENTATION-END",
+            f"  // ARC-IMPLEMENTATION-END:{module.get('id')}",
             "}",
             "",
         ]

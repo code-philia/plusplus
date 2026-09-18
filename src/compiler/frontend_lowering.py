@@ -597,6 +597,7 @@ class FrontendSkeletonLowerer:
         pages = _table_by_id(frontend_ir, "pages")
         components = _table_by_id(frontend_ir, "components")
         stores = _table_by_id(frontend_ir, "stores")
+        owner_requirements = _frontend_owner_requirements(frontend_ir)
 
         sources: dict[str, str] = {}
         imports_by_path: dict[str, list[dict[str, Any]]] = {path: [] for path in files}
@@ -616,6 +617,7 @@ class FrontendSkeletonLowerer:
                 api_locations,
                 api_contract_index,
                 backend_routes,
+                owner_requirements,
                 sources,
                 imports_by_path,
                 exports_by_path,
@@ -624,6 +626,7 @@ class FrontendSkeletonLowerer:
             self._lower_stores(
                 stores,
                 store_locations,
+                owner_requirements,
                 sources,
                 imports_by_path,
                 exports_by_path,
@@ -633,6 +636,7 @@ class FrontendSkeletonLowerer:
                 pages,
                 components,
                 ui_locations,
+                owner_requirements,
                 sources,
                 imports_by_path,
                 exports_by_path,
@@ -788,6 +792,7 @@ class FrontendSkeletonLowerer:
         locations: dict[str, dict[str, Any]],
         apis: dict[str, dict[str, Any]],
         routes: dict[str, dict[str, Any]],
+        owner_requirements: dict[str, list[str]],
         sources: dict[str, str],
         imports: dict[str, list[dict[str, Any]]],
         exports: dict[str, list[str]],
@@ -834,7 +839,11 @@ class FrontendSkeletonLowerer:
                 target = json.dumps(route_path)
                 init = f'{{ method: "{method}" }}'
             sources[path] = (
-                "\n".join(_render_imports(rows))
+                "/**\n"
+                + f" * @arc-module API_CLIENT::{api_id}\n"
+                + f" * @arc-requirements {','.join(owner_requirements.get(api_id, []))}\n"
+                + " */\n"
+                + "\n".join(_render_imports(rows))
                 + "\n\n"
                 + f"export async function {client_symbol}({parameter}): Promise<{result_type}> {{\n"
                 + f"  return requestJson<{result_type}>({target}, {init});\n"
@@ -846,6 +855,7 @@ class FrontendSkeletonLowerer:
     def _lower_stores(
         stores: dict[str, dict[str, Any]],
         locations: dict[str, dict[str, Any]],
+        owner_requirements: dict[str, list[str]],
         sources: dict[str, str],
         imports: dict[str, list[dict[str, Any]]],
         exports: dict[str, list[str]],
@@ -875,7 +885,11 @@ class FrontendSkeletonLowerer:
                     f"  {name}: {_default_value(str(field_item.get('type', 'unknown')))},"
                 )
             sources[path] = (
-                f"export interface {state_symbol} {{\n{state_fields}\n}}\n\n"
+                "/**\n"
+                + f" * @arc-module {store_id}\n"
+                + f" * @arc-requirements {','.join(owner_requirements.get(store_id, []))}\n"
+                + " */\n"
+                + f"export interface {state_symbol} {{\n{state_fields}\n}}\n\n"
                 f"export interface {actions_symbol} {{\n"
                 + ("\n".join(action_lines) if action_lines else "  // No global actions were designed.")
                 + "\n}\n\n"
@@ -895,6 +909,7 @@ class FrontendSkeletonLowerer:
         pages: dict[str, dict[str, Any]],
         components: dict[str, dict[str, Any]],
         locations: dict[str, dict[str, Any]],
+        owner_requirements: dict[str, list[str]],
         sources: dict[str, str],
         imports: dict[str, list[dict[str, Any]]],
         exports: dict[str, list[str]],
@@ -971,6 +986,10 @@ class FrontendSkeletonLowerer:
             tag = "main" if kind == "PAGE" else "section"
             sources[path] = (
                 ("\n".join(_render_imports(rows)) + "\n\n" if rows else "")
+                + "/**\n"
+                + f" * @arc-module {ui_id}\n"
+                + f" * @arc-requirements {','.join(owner_requirements.get(ui_id, []))}\n"
+                + " */\n"
                 + f"export interface {props_symbol} {{\n"
                 + ("\n".join(props_lines) if props_lines else "  // No external props were designed.")
                 + "\n}\n"
@@ -978,9 +997,9 @@ class FrontendSkeletonLowerer:
                 + ("\n".join(declarations) + "\n" if declarations else "")
                 + "  return (\n"
                 + f"    <{tag} data-arc-{kind.lower()}={{{json.dumps(ui_id)}}}>\n"
-                + "      {/* <arc:implementation> */}\n"
+                + f"      {{/* ARC-IMPLEMENTATION-BEGIN:{ui_id} */}}\n"
                 + "\n".join(body_lines)
-                + "\n      {/* </arc:implementation> */}\n"
+                + f"\n      {{/* ARC-IMPLEMENTATION-END:{ui_id} */}}\n"
                 + f"    </{tag}>\n"
                 + "  );\n}\n"
             )
@@ -1140,6 +1159,33 @@ def _table_by_id(frontend_ir: dict[str, Any], table: str) -> dict[str, dict[str,
         for item in frontend_ir.get(table, [])
         if isinstance(item, dict) and item.get("id")
     }
+
+
+def _frontend_owner_requirements(frontend_ir: dict[str, Any]) -> dict[str, list[str]]:
+    owners: dict[str, set[str]] = {}
+    for table in ("layouts", "pages", "components", "stores"):
+        for item in frontend_ir.get(table, []):
+            if not isinstance(item, dict):
+                continue
+            symbol_id = str(item.get("id", "")).strip()
+            if not symbol_id:
+                continue
+            owners.setdefault(symbol_id, set()).update(
+                str(value).strip()
+                for value in item.get("requirement_ids", [])
+                if str(value).strip()
+            )
+    for link in frontend_ir.get("requirement_links", []):
+        if not isinstance(link, dict):
+            continue
+        requirement_id = str(link.get("requirement_id", "")).strip()
+        if not requirement_id:
+            continue
+        for symbol_id in link.get("symbol_ids", []):
+            normalized = str(symbol_id).strip()
+            if normalized:
+                owners.setdefault(normalized, set()).add(requirement_id)
+    return {key: sorted(values) for key, values in sorted(owners.items())}
 
 
 def _index_api_contracts(

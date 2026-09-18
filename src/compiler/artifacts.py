@@ -35,6 +35,7 @@ class CompilerArtifactStore:
         self.frontend_design_root = self.design_root / "frontend"
         self.backend_root = self.root / "backend"
         self.frontend_root = self.root / "frontend"
+        self.code_root = self.root / "code"
 
     def write_preprocessing(
         self,
@@ -559,6 +560,11 @@ class CompilerArtifactStore:
         for name, path in paths.items():
             write_json_atomic(path, payloads[name])
         return {name: str(path) for name, path in paths.items()}
+
+    def write_code_bindings(self, registry: dict[str, Any]) -> str:
+        path = self.code_root / "code_bindings.json"
+        write_json_atomic(path, registry)
+        return str(path)
 
     def write_generated_sources(self, sources: dict[str, str]) -> dict[str, str]:
         """Atomically materialize compiler-planned source files inside the output workspace."""

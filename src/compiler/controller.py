@@ -7,6 +7,7 @@ from arcbench_agent_runtime.runtime import AgentRuntime
 
 from .artifacts import CompilerArtifactStore
 from .backend_lowering import BackendGlueLowerer
+from .code_binding import CodeBindingLowerer
 from .database_stage import (
     DatabasePassResult,
     DatabaseSchemaPass,
@@ -912,9 +913,54 @@ class Compiler:
 
         await self._log("Compiler", "PROJECT_BUILD acceptance gate completed successfully.")
 
+        # ===================================================================
+        #          Skeleton Stage 3.3: IR-to-Source Code Binding
+        # ===================================================================
+
         await self._log(
             "Compiler",
-            "DUAL_DESIGN_FROZEN; Backend and Frontend Skeleton Manifests generated; project build passed.",
+            "Building and validating the deterministic IR-to-source Code Binding Registry.",
+        )
+        code_bindings = CodeBindingLowerer().lower(
+            output_root=request.output_dir,
+            requirement_ir=preprocessing.requirement_ir,
+            database_schema=database.schema,
+            design_ir=design.design_ir,
+            frontend_ir=frontend_design_ir,
+            backend_symbol_registry=symbol_planning.registry,
+            backend_type_manifest=type_lowering.manifest,
+            backend_module_manifests={
+                "DB": db_modules.manifest,
+                "FUNC": func_modules.manifest,
+                "API": api_modules.manifest,
+            },
+            backend_route_registry=backend_glue.route_registry,
+            frontend_symbol_registry=frontend_symbols.registry,
+            frontend_file_registry=frontend_files.registry,
+            frontend_route_registry=frontend_lowering.route_registry,
+        )
+        artifacts["code_bindings"] = artifact_store.write_code_bindings(
+            code_bindings.registry
+        )
+        for error in code_bindings.errors:
+            await self._log("Compiler", error, "error")
+        if not code_bindings.ok:
+            await self._log("Compiler", "CODE_BINDING validation failed.", "error")
+            return CompilationResult(
+                ok=False,
+                root_id=root_id,
+                states=states,
+                artifacts=artifacts,
+            )
+        await self._log(
+            "Compiler",
+            "CODE_BINDING_READY: Design IR, TypeScript types, and real source targets are linked.",
+        )
+
+        await self._log(
+            "Compiler",
+            "DUAL_DESIGN_FROZEN; Backend and Frontend Skeleton Manifests generated; "
+            "project build passed; CODE_BINDING_READY.",
         )
         return CompilationResult(
             ok=True,
