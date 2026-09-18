@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-from pathlib import Path
 from typing import Awaitable, Callable
 
 from arcbench_agent_runtime.runtime import AgentRuntime
@@ -72,7 +71,7 @@ class Compiler:
         start_from = str(request.start_from or "PREPROCESSING").strip().upper()
         if start_from not in stage_order:
             await self._log("Compiler", f"Unknown start stage: {start_from}", "error")
-            return CompilationResult(ok=False, complete=False)
+            return CompilationResult(ok=False)
         start_rank = stage_order[start_from]
         database_reused = start_rank > stage_order["DATABASE"]
         design_reused = start_rank > stage_order["DESIGN"]
@@ -101,16 +100,9 @@ class Compiler:
                 requirement_ir=preprocessing.requirement_ir,
                 dependency_graph=preprocessing.dependency_graph,
             ))
-            artifacts["processing_queue"] = artifact_store.write_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=preprocessing.ok,
-            )
 
         if preprocessing.normalized_tree:
             self._runtime.traceability.store_requirement_tree(preprocessing.normalized_tree)
-        for node_id, state in states.items():
-            self._runtime.traceability.upsert_node_state(node_id, state, "preprocessing")
 
         for error in preprocessing.errors:
             await self._log("Compiler", error, "error")
@@ -119,7 +111,6 @@ class Compiler:
             await self._log("Compiler", "PREPROCESSING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 failed_nodes=atomic_ids,
@@ -158,15 +149,8 @@ class Compiler:
             if validation_errors:
                 for error in validation_errors:
                     await self._log("Compiler", f"ARC2104: Cannot reuse database schema: {error}", "error")
-                artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                    root_id=root_id,
-                    node_states=states,
-                    preprocessing_ok=True,
-                    database_status="FAILED",
-                )
                 return CompilationResult(
                     ok=False,
-                    complete=False,
                     root_id=root_id,
                     states=states,
                     failed_nodes=atomic_ids,
@@ -179,14 +163,6 @@ class Compiler:
             states.update(database.node_states)
             artifacts["database_schema"] = str(artifact_store.database_root / "database_schema.json")
             artifacts["database_relationships"] = str(artifact_store.database_root / "relationships.json")
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED",
-            )
-            for node_id, state in database.node_states.items():
-                self._runtime.traceability.upsert_node_state(node_id, state, "database_schema")
             await self._log(
                 "Compiler",
                 f"START_PROBE stage={start_from} upstream=DATABASE source=.arc/database status=VALIDATED",
@@ -203,15 +179,8 @@ class Compiler:
                 model = model or Model.from_env()
             except ModelConfigurationError as exc:
                 await self._log("Compiler", str(exc), "error")
-                artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                    root_id=root_id,
-                    node_states=states,
-                    preprocessing_ok=True,
-                    database_status="FAILED",
-                )
                 return CompilationResult(
                     ok=False,
-                    complete=False,
                     root_id=root_id,
                     states=states,
                     failed_nodes=atomic_ids,
@@ -223,29 +192,20 @@ class Compiler:
             database = database_stage.compile(
                 preprocessing.requirement_ir,
                 preprocessing.dependency_graph,
-                resume=request.resume,
             )
             states.update(database.node_states)
             artifacts.update(database.pass_artifacts)
             structure = database_structure(database.schema)
             links = database_traceability(database.schema)
-            database_status = "COMPLETED" if database.ok else "FAILED"
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status=database_status,
-            )
-            for node_id, state in database.node_states.items():
-                self._runtime.traceability.upsert_node_state(node_id, state, "database_schema")
             for error in database.errors:
                 await self._log("Compiler", error, "error")
+            for warning in database.warnings:
+                await self._log("Compiler", warning, "warning")
             if not database.ok:
                 failed_nodes = sorted(node_id for node_id, state in states.items() if state == "FAILED")
                 await self._log("Compiler", "DATABASE_SCHEMA pass failed.", "error")
                 return CompilationResult(
                     ok=False,
-                    complete=False,
                     root_id=root_id,
                     states=states,
                     failed_nodes=failed_nodes,
@@ -262,7 +222,6 @@ class Compiler:
         #                    Compiler Design Stage
         # ===================================================================
 
-        design_stop_after = "MODULES"
         if design_reused:
             await self._log(
                 "Compiler",
@@ -273,16 +232,8 @@ class Compiler:
             )
             if read_error:
                 await self._log("Compiler", f"ARC3104: Cannot reuse Design IR: {read_error}", "error")
-                artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                    root_id=root_id,
-                    node_states=states,
-                    preprocessing_ok=True,
-                    database_status="REUSED" if database_reused else "COMPLETED",
-                    design_status="FAILED",
-                )
                 return CompilationResult(
                     ok=False,
-                    complete=False,
                     root_id=root_id,
                     states=states,
                     failed_nodes=atomic_ids,
@@ -318,29 +269,16 @@ class Compiler:
                 await self._log("Compiler", str(exc), "error")
                 return CompilationResult(
                     ok=False,
-                    complete=False,
                     root_id=root_id,
                     states=states,
                     failed_nodes=atomic_ids,
                     artifacts=artifacts,
                 )
             design_stage = DesignPass(model, artifact_store.root)
-            design_stop_after = design_stage.stop_after
-            if design_stop_after == "API":
-                design_message = (
-                    "Running REQUIREMENT CONTRACT and REQUIREMENT TO API passes; "
-                    "Stage 2 stops after API generation."
-                )
-            elif design_stop_after == "FUNC":
-                design_message = (
-                    "Running REQUIREMENT CONTRACT, REQUIREMENT TO API, and API TO FUNC decomposition; "
-                    "Stage 2 stops after direct FUNC generation."
-                )
-            else:
-                design_message = (
-                    "Running REQUIREMENT CONTRACT, REQUIREMENT TO API, and full top-down MODULE DECOMPOSITION passes."
-                )
-            await self._log("Compiler", design_message)
+            await self._log(
+                "Compiler",
+                "Running REQUIREMENT CONTRACT, REQUIREMENT TO API, and full top-down MODULE DECOMPOSITION passes.",
+            )
             # Stage 2 keeps contract generation and module materialization serial.
             design = design_stage.compile(
                 preprocessing.requirement_ir,
@@ -348,15 +286,6 @@ class Compiler:
                 database.schema,
             )
         states.update(design.node_states)
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=("REUSED" if design_reused else "COMPLETED") if design.ok else "FAILED",
-        )
-        for node_id, state in design.node_states.items():
-            self._runtime.traceability.upsert_node_state(node_id, state, "design")
         for error in design.errors:
             await self._log("Compiler", error, "error")
         if not design.ok:
@@ -364,7 +293,6 @@ class Compiler:
             await self._log("Compiler", "DESIGN pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 failed_nodes=failed_nodes,
@@ -412,8 +340,6 @@ class Compiler:
                     "pages",
                     "components",
                     "stores",
-                    "local_data_contracts",
-                    "composition_edges",
                     "api_dependencies",
                 ):
                     artifacts[f"frontend_design_{table_name}"] = str(
@@ -512,24 +438,11 @@ class Compiler:
         if frontend_errors:
             for node_id in atomic_ids:
                 states[node_id] = "FAILED"
-                self._runtime.traceability.upsert_node_state(
-                    node_id,
-                    "FAILED",
-                    "frontend_design",
-                )
             for error in frontend_errors:
                 await self._log("Compiler", error, "error")
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED" if database_reused else "COMPLETED",
-                design_status="FAILED",
-            )
             await self._log("Compiler", "FRONTEND_DESIGN pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 failed_nodes=atomic_ids,
@@ -541,22 +454,10 @@ class Compiler:
         )
         for node_id in atomic_ids:
             states[node_id] = dual_design_state
-            self._runtime.traceability.upsert_node_state(
-                node_id,
-                dual_design_state,
-                "frontend_design",
-            )
         self._runtime.traceability.merge_frontend_design_links(
             frontend_design_traceability(frontend_design_ir)
         )
         design_queue_status = dual_design_state
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-        )
         await self._log(
             "Compiler",
             f"{dual_design_state}: Backend Design IR and Frontend Design IR are validated and frozen.",
@@ -568,12 +469,13 @@ class Compiler:
 
         project_ok = True
         project_errors: list[str] = []
+        project_manifest = None
         if project_reused:
             await self._log(
                 "Compiler",
                 f"START_PROBE stage={start_from} upstream=PROJECT source=.arc/project/project-manifest.json status=VALIDATING",
             )
-            _, project_error = artifact_store.read_project_manifest()
+            project_manifest, project_error = artifact_store.read_project_manifest()
             if project_error:
                 project_ok = False
                 project_errors.append(f"ARC3201: Cannot reuse initialized project: {project_error}")
@@ -594,29 +496,28 @@ class Compiler:
                 request.output_dir,
                 web_port=request.web_port,
             )
-            project = initializer.initialize(request.app_type)
+            project = initializer.initialize()
             project_ok = project.ok
             project_errors.extend(project.errors)
             artifacts.update(project.artifacts)
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-            project_status=("REUSED" if project_reused else "COMPLETED") if project_ok else "FAILED",
-        )
+            if project_ok:
+                project_manifest, project_error = artifact_store.read_project_manifest()
+                if project_error:
+                    project_ok = False
+                    project_errors.append(
+                        f"ARC3201: Initialized project manifest is invalid: {project_error}"
+                    )
         for error in project_errors:
             await self._log("Compiler", error, "error")
         if not project_ok:
             await self._log("Compiler", "PROJECT_INITIALIZATION pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
             )
+        assert project_manifest is not None
         await self._log(
             "Compiler",
             "Project workspace initialized; Skeleton lowering may consume the frozen project manifest.",
@@ -630,21 +531,13 @@ class Compiler:
             "Compiler",
             "Running deterministic GLOBAL_SYMBOL_PLANNING over Design IR and Database Schema IR.",
         )
-        symbol_planning = GlobalSymbolPlanner(request.output_dir).plan(
+        symbol_planning = GlobalSymbolPlanner().plan(
             design.design_ir,
             database.schema,
+            project_manifest,
         )
         artifacts["backend_symbol_registry"] = artifact_store.write_symbol_registry(
             symbol_planning.registry
-        )
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-            project_status="COMPLETED",
-            lowering_status="SYMBOLS_PLANNED" if symbol_planning.ok else "FAILED",
         )
         for error in symbol_planning.errors:
             await self._log("Compiler", error, "error")
@@ -652,7 +545,6 @@ class Compiler:
             await self._log("Compiler", "GLOBAL_SYMBOL_PLANNING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
@@ -673,18 +565,10 @@ class Compiler:
         file_planning = GlobalFilePlanner(request.output_dir).plan(
             design.design_ir,
             symbol_planning.registry,
+            project_manifest,
         )
         artifacts["backend_file_registry"] = artifact_store.write_file_registry(
             file_planning.registry
-        )
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-            project_status="COMPLETED",
-            lowering_status="FILES_PLANNED" if file_planning.ok else "FAILED",
         )
         for error in file_planning.errors:
             await self._log("Compiler", error, "error")
@@ -692,7 +576,6 @@ class Compiler:
             await self._log("Compiler", "GLOBAL_FILE_PLANNING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
@@ -720,33 +603,14 @@ class Compiler:
         for error in type_lowering.errors:
             await self._log("Compiler", error, "error")
         if not type_lowering.ok:
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED" if database_reused else "COMPLETED",
-                design_status=design_queue_status,
-                project_status="COMPLETED",
-                lowering_status="FAILED",
-            )
             await self._log("Compiler", "TYPE_LOWERING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
             )
         artifacts.update(artifact_store.write_generated_sources(type_lowering.sources))
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-            project_status="COMPLETED",
-            lowering_status="TYPES_GENERATED",
-        )
         await self._log("Compiler", "Canonical TypeScript type world generated.")
 
         # ===================================================================
@@ -770,33 +634,14 @@ class Compiler:
         for error in database_lowering.errors:
             await self._log("Compiler", error, "error")
         if not database_lowering.ok:
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED" if database_reused else "COMPLETED",
-                design_status=design_queue_status,
-                project_status="COMPLETED",
-                lowering_status="FAILED",
-            )
             await self._log("Compiler", "DATABASE_SCHEMA_LOWERING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
             )
         artifacts.update(artifact_store.write_generated_sources(database_lowering.sources))
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-            project_status="COMPLETED",
-            lowering_status="DATABASE_SCHEMA_LOWERED",
-        )
         await self._log(
             "Compiler",
             "SQLite/Drizzle schema lowered; DB Module Skeleton generation is next.",
@@ -824,33 +669,14 @@ class Compiler:
         for error in db_modules.errors:
             await self._log("Compiler", error, "error")
         if not db_modules.ok:
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED" if database_reused else "COMPLETED",
-                design_status=design_queue_status,
-                project_status="COMPLETED",
-                lowering_status="FAILED",
-            )
             await self._log("Compiler", "DB_MODULE_LOWERING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
             )
         artifacts.update(artifact_store.write_generated_sources(db_modules.sources))
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-            project_status="COMPLETED",
-            lowering_status="DB_MODULES_GENERATED",
-        )
         await self._log("Compiler", "DB Module Skeletons generated.")
 
         # ===================================================================
@@ -874,33 +700,14 @@ class Compiler:
         for error in func_modules.errors:
             await self._log("Compiler", error, "error")
         if not func_modules.ok:
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED" if database_reused else "COMPLETED",
-                design_status=design_queue_status,
-                project_status="COMPLETED",
-                lowering_status="FAILED",
-            )
             await self._log("Compiler", "FUNC_MODULE_LOWERING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
             )
         artifacts.update(artifact_store.write_generated_sources(func_modules.sources))
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-            project_status="COMPLETED",
-            lowering_status="FUNC_MODULES_GENERATED",
-        )
         await self._log("Compiler", "FUNC Module Skeletons generated.")
 
         # ===================================================================
@@ -924,33 +731,14 @@ class Compiler:
         for error in api_modules.errors:
             await self._log("Compiler", error, "error")
         if not api_modules.ok:
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED" if database_reused else "COMPLETED",
-                design_status=design_queue_status,
-                project_status="COMPLETED",
-                lowering_status="FAILED",
-            )
             await self._log("Compiler", "API_MODULE_LOWERING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
             )
         artifacts.update(artifact_store.write_generated_sources(api_modules.sources))
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-            project_status="COMPLETED",
-            lowering_status="API_MODULES_GENERATED",
-        )
         await self._log(
             "Compiler",
             "API Module Skeletons generated; global Glue Code generation is next.",
@@ -987,33 +775,14 @@ class Compiler:
         for error in backend_glue.errors:
             await self._log("Compiler", error, "error")
         if not backend_glue.ok:
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED" if database_reused else "COMPLETED",
-                design_status=design_queue_status,
-                project_status="COMPLETED",
-                lowering_status="FAILED",
-            )
             await self._log("Compiler", "GLOBAL_GLUE_LOWERING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
             )
         artifacts.update(artifact_store.write_generated_sources(backend_glue.sources))
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-            project_status="COMPLETED",
-            lowering_status="BACKEND_MANIFEST_GENERATED",
-        )
         await self._log(
             "Compiler",
             "Global Glue Code, Route Registration, Barrel Export, Import Plan, and Backend Manifest generated.",
@@ -1027,10 +796,11 @@ class Compiler:
             "Compiler",
             "Running deterministic FRONTEND_GLOBAL_SYMBOL_PLANNING over Frontend Design IR.",
         )
-        frontend_symbols = FrontendGlobalSymbolPlanner(request.output_dir).plan(
+        frontend_symbols = FrontendGlobalSymbolPlanner().plan(
             frontend_design_ir,
             project_api_contracts(design.design_ir),
             symbol_planning.registry,
+            project_manifest,
         )
         artifacts["frontend_symbol_registry"] = artifact_store.write_frontend_symbol_registry(
             frontend_symbols.registry
@@ -1038,19 +808,9 @@ class Compiler:
         for error in frontend_symbols.errors:
             await self._log("Compiler", error, "error")
         if not frontend_symbols.ok:
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED" if database_reused else "COMPLETED",
-                design_status=design_queue_status,
-                project_status="COMPLETED",
-                lowering_status="FAILED",
-            )
             await self._log("Compiler", "FRONTEND_GLOBAL_SYMBOL_PLANNING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
@@ -1067,6 +827,7 @@ class Compiler:
         frontend_files = FrontendFilePlanner(request.output_dir).plan(
             frontend_design_ir,
             frontend_symbols.registry,
+            project_manifest,
         )
         artifacts["frontend_file_registry"] = artifact_store.write_frontend_file_registry(
             frontend_files.registry
@@ -1074,19 +835,9 @@ class Compiler:
         for error in frontend_files.errors:
             await self._log("Compiler", error, "error")
         if not frontend_files.ok:
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED" if database_reused else "COMPLETED",
-                design_status=design_queue_status,
-                project_status="COMPLETED",
-                lowering_status="FAILED",
-            )
             await self._log("Compiler", "FRONTEND_FILE_PLANNING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
@@ -1118,33 +869,14 @@ class Compiler:
         for error in frontend_lowering.errors:
             await self._log("Compiler", error, "error")
         if not frontend_lowering.ok:
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED" if database_reused else "COMPLETED",
-                design_status=design_queue_status,
-                project_status="COMPLETED",
-                lowering_status="FAILED",
-            )
             await self._log("Compiler", "FRONTEND_SKELETON_LOWERING pass failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
             )
         artifacts.update(artifact_store.write_generated_sources(frontend_lowering.sources))
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-            project_status="COMPLETED",
-            lowering_status="FRONTEND_MANIFEST_GENERATED",
-        )
         await self._log(
             "Compiler",
             "Frontend Props/Event/Store/API Client skeletons, UI modules, Routes, Barrels, Import Plan, and Frontend Manifest generated.",
@@ -1162,45 +894,22 @@ class Compiler:
         for error in project_build.errors:
             await self._log("Compiler", error, "error")
         if not project_build.ok:
-            artifacts["processing_queue"] = artifact_store.write_pass_queue(
-                root_id=root_id,
-                node_states=states,
-                preprocessing_ok=True,
-                database_status="REUSED" if database_reused else "COMPLETED",
-                design_status=design_queue_status,
-                project_status="COMPLETED",
-                lowering_status="PROJECT_BUILD_FAILED",
-            )
             await self._log("Compiler", "PROJECT_BUILD acceptance gate failed.", "error")
             return CompilationResult(
                 ok=False,
-                complete=False,
                 root_id=root_id,
                 states=states,
                 artifacts=artifacts,
             )
 
-        artifacts["processing_queue"] = artifact_store.write_pass_queue(
-            root_id=root_id,
-            node_states=states,
-            preprocessing_ok=True,
-            database_status="REUSED" if database_reused else "COMPLETED",
-            design_status=design_queue_status,
-            project_status="COMPLETED",
-            lowering_status="PROJECT_BUILD_SUCCEEDED",
-        )
         await self._log("Compiler", "PROJECT_BUILD acceptance gate completed successfully.")
 
-        final_message = {
-            "API": "Stage 2 API boundary frozen; Backend and Frontend Skeleton Manifests generated and project build passed over the partial Backend Design IR; later passes are pending.",
-            "FUNC": "Stage 2 FUNC boundary frozen; Backend and Frontend Skeleton Manifests generated and project build passed over the partial Backend Design IR; later passes are pending.",
-            "MODULES": "DUAL_DESIGN_FROZEN; Backend and Frontend Skeleton Manifests generated; project build passed and later passes are pending.",
-        }[design_stop_after]
-
-        await self._log("Compiler", final_message, "warning")
+        await self._log(
+            "Compiler",
+            "DUAL_DESIGN_FROZEN; Backend and Frontend Skeleton Manifests generated; project build passed.",
+        )
         return CompilationResult(
             ok=True,
-            complete=False,
             root_id=root_id,
             states=states,
             artifacts=artifacts,

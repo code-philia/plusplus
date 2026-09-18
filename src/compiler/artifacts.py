@@ -43,10 +43,7 @@ class CompilerArtifactStore:
         dependency_graph: dict[str, Any],
     ) -> dict[str, str]:
         shutil.rmtree(self.preprocessing_root, ignore_errors=True)
-        shutil.rmtree(self.root / "compiler_frontend", ignore_errors=True)
         shutil.rmtree(self.design_root, ignore_errors=True)
-        shutil.rmtree(self.root / "compiler", ignore_errors=True)
-        shutil.rmtree(self.root / "cache" / "design", ignore_errors=True)
         paths = {
             "requirement_ir": self.preprocessing_root / "requirement_ir.json",
             "dependency_graph": self.preprocessing_root / "dependency_graph.json",
@@ -75,14 +72,6 @@ class CompilerArtifactStore:
         write_json_atomic(paths["requirement_ir"], requirements)
         write_json_atomic(paths["dependency_graph"], dependencies)
         return {name: str(path) for name, path in paths.items()}
-
-    def write_queue(self, *, root_id: str | None, node_states: dict[str, str], preprocessing_ok: bool) -> str:
-        return self._write_queue(
-            preprocessing_status="COMPLETED" if preprocessing_ok else "FAILED",
-            database_status="PENDING",
-            design_status="PENDING",
-            node_states=node_states,
-        )
 
     def write_database(
         self,
@@ -194,12 +183,6 @@ class CompilerArtifactStore:
         }
         for path, values in tables.values():
             write_json_atomic(path, values)
-        for legacy_path in (
-            self.design_root / "api_modules.json",
-            self.design_root / "function_modules.json",
-            self.design_root / "db_modules.json",
-        ):
-            legacy_path.unlink(missing_ok=True)
         return {name: str(path) for name, (path, _) in tables.items()}
 
     def read_design(
@@ -275,7 +258,7 @@ class CompilerArtifactStore:
 
         api_modules: list[dict[str, Any]] = []
         api_module_ids: set[str] = set()
-        api_module_keys = {"id", "callers", "callees"}
+        api_module_keys = {"id", "callees"}
         for index, item in enumerate(tables["API"]):
             if not isinstance(item, dict):
                 return None, f"API module must be an object: {table_paths['API']}[{index}]"
@@ -289,8 +272,8 @@ class CompilerArtifactStore:
                 return None, f"Duplicate API module id: {api_id}"
             if api_id not in api_contracts:
                 return None, f"API module {api_id} has no shared API contract"
-            if not isinstance(item.get("callers"), list) or not isinstance(item.get("callees"), list):
-                return None, f"API module {api_id} callers/callees must be lists"
+            if not isinstance(item.get("callees"), list):
+                return None, f"API module {api_id} callees must be a list"
             api_module_ids.add(api_id)
             api_modules.append({**copy.deepcopy(api_contracts[api_id]), **copy.deepcopy(item)})
         if api_module_ids != set(api_contracts):
@@ -319,9 +302,10 @@ class CompilerArtifactStore:
                 if owner_requirement not in contracts:
                     return None, f"Design module {module_id} has no requirement contract"
                 module = copy.deepcopy(item)
-                for field_name in ("inputs", "outputs", "effects", "callers", "callees"):
+                for field_name in ("inputs", "outputs", "effects", "callees"):
                     if not isinstance(module.get(field_name), list):
                         return None, f"Design module {module_id} field {field_name} must be a list"
+                module["callers"] = []
                 module["kind"] = kind
                 module["owner_requirement"] = owner_requirement
                 module_by_id[module_id] = module
@@ -330,23 +314,20 @@ class CompilerArtifactStore:
         allowed_callee_kinds = {"API": {"FUNC"}, "FUNC": {"FUNC", "DB"}, "DB": set()}
         for module in modules:
             module_id = module["id"]
-            for direction in ("callers", "callees"):
-                references = [str(value).strip() for value in module[direction]]
-                if any(not value or value not in module_by_id for value in references):
-                    missing = sorted({value for value in references if value not in module_by_id})
-                    return None, f"Design module {module_id} has unknown {direction}: {missing}"
-                if len(references) != len(set(references)):
-                    return None, f"Design module {module_id} has duplicate {direction}"
-                module[direction] = references
+            references = [str(value).strip() for value in module["callees"]]
+            if any(not value or value not in module_by_id for value in references):
+                missing = sorted({value for value in references if value not in module_by_id})
+                return None, f"Design module {module_id} has unknown callees: {missing}"
+            if len(references) != len(set(references)):
+                return None, f"Design module {module_id} has duplicate callees"
+            module["callees"] = references
             for callee_id in module["callees"]:
                 callee = module_by_id[str(callee_id)]
                 if callee["kind"] not in allowed_callee_kinds[module["kind"]]:
                     return None, f"Invalid Design call edge: {module_id} -> {callee_id}"
-                if module_id not in callee["callers"]:
-                    return None, f"Design call edge is not reciprocal: {module_id} -> {callee_id}"
-            for caller_id in module["callers"]:
-                if module_id not in module_by_id[str(caller_id)]["callees"]:
-                    return None, f"Design caller edge is not reciprocal: {caller_id} -> {module_id}"
+                callee["callers"].append(module_id)
+        for module in modules:
+            module["callers"].sort()
 
         visiting: set[str] = set()
         visited: set[str] = set()
@@ -399,7 +380,6 @@ class CompilerArtifactStore:
         }
         for path, values in tables.values():
             write_json_atomic(path, values)
-        (self.frontend_design_root / "requirement_links.json").unlink(missing_ok=True)
         return {
             f"frontend_design_{table_name}": str(path)
             for table_name, (path, _) in tables.items()
@@ -607,61 +587,3 @@ class CompilerArtifactStore:
             temporary.replace(target)
             artifacts[f"generated_source:{normalized}"] = str(target)
         return artifacts
-
-    def write_pass_queue(
-        self,
-        *,
-        root_id: str | None,
-        node_states: dict[str, str],
-        preprocessing_ok: bool,
-        database_status: str,
-        design_status: str = "PENDING",
-        project_status: str = "PENDING",
-        lowering_status: str = "PENDING",
-    ) -> str:
-        return self._write_queue(
-            preprocessing_status="COMPLETED" if preprocessing_ok else "FAILED",
-            database_status=database_status,
-            design_status=design_status,
-            project_status=project_status,
-            lowering_status=lowering_status,
-            node_states=node_states,
-        )
-
-    def _write_queue(
-        self,
-        *,
-        preprocessing_status: str,
-        database_status: str,
-        design_status: str,
-        project_status: str = "PENDING",
-        lowering_status: str = "PENDING",
-        node_states: dict[str, str],
-    ) -> str:
-        path = self.root / "processing_queue.json"
-        statuses = (
-            ("PREPROCESSING", preprocessing_status),
-            ("DATABASE_SCHEMA", database_status),
-            ("DESIGN", design_status),
-            ("PROJECT_INITIALIZATION", project_status),
-            ("LOWERING", lowering_status),
-            ("IMPLEMENTATION", "PENDING"),
-            ("ACCEPTANCE", "PENDING"),
-        )
-        state_rows = [
-            {"requirement_id": requirement_id, "state": state}
-            for requirement_id, state in sorted(node_states.items())
-        ]
-        rows = [
-            {
-                "pass_id": pass_id,
-                "order": index,
-                "status": status,
-                "node_states": copy.deepcopy(state_rows)
-                if pass_id in {"PREPROCESSING", "DATABASE_SCHEMA", "DESIGN"}
-                else [],
-            }
-            for index, (pass_id, status) in enumerate(statuses)
-        ]
-        write_json_atomic(path, rows)
-        return str(path)

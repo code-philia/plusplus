@@ -56,9 +56,9 @@ class Model:
         transport_retries: int = 0,
     ) -> None:
         if not model.strip():
-            raise ModelConfigurationError("MODEL is required for the DATABASE_SCHEMA pass.")
+            raise ModelConfigurationError("MODEL is required for semantic compiler passes.")
         if not api_key.strip():
-            raise ModelConfigurationError("OPENAI_API_KEY is required for the DATABASE_SCHEMA pass.")
+            raise ModelConfigurationError("OPENAI_API_KEY is required for semantic compiler passes.")
         self.model = model.strip()
         self.api_key = api_key.strip()
         self.base_url = base_url.rstrip("/")

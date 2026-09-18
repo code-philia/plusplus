@@ -11,12 +11,8 @@ class CompilationRequest:
 
     requirement_path: Path
     output_dir: Path
-    app_type: str = "web"
     web_port: int = 3000
-    resume: bool = False
     start_from: str = "PREPROCESSING"
-    retry_failed: bool = False
-    retry_node_ids: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -24,7 +20,6 @@ class CompilationResult:
     """Compiler outcome independent of CLI rendering."""
 
     ok: bool
-    complete: bool
     root_id: str | None = None
     states: dict[str, str] = field(default_factory=dict)
     failed_nodes: list[str] = field(default_factory=list)
@@ -32,9 +27,7 @@ class CompilationResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "ok": self.ok and self.complete,
-            "preprocessing_ok": self.ok,
-            "complete": self.complete,
+            "ok": self.ok,
             "root_id": self.root_id,
             "states": dict(sorted(self.states.items())),
             "failed_nodes": sorted(self.failed_nodes),

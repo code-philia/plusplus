@@ -220,8 +220,11 @@ class ProjectInitializer:
                 "vite",
                 "frontend",
                 "--",
+                "--no-interactive",
                 "--template",
                 "react-ts",
+                "--no-eslint",
+                "--no-immediate",
             ],
             cwd=self.staged_project,
         )
