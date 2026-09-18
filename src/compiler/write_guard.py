@@ -8,25 +8,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from arc_agents.contracts import ProposedEdit, ProposedPatch
+
 from .code_binding import CODE_BINDING_READY, CodeTargetResolver
 
 
 WRITE_GUARD_SCHEMA_VERSION = 1
-
-
-@dataclass(frozen=True, slots=True)
-class ProposedEdit:
-    """Replace only the source text between one module's implementation markers."""
-
-    module_id: str
-    expected_sha256: str
-    replacement: str
-
-
-@dataclass(frozen=True, slots=True)
-class ProposedPatch:
-    requirement_id: str
-    edits: tuple[ProposedEdit, ...]
 
 
 @dataclass(slots=True)
@@ -308,6 +295,8 @@ def _replacement_error(value: str) -> str | None:
         return "replacement must not contain implementation markers."
     if "@arc-module" in value:
         return "replacement must not contain a module marker."
+    if re.search(r"(?m)^\s*(?:import|export)\s", value):
+        return "replacement must not contain a file-level import or export."
     return None
 
 

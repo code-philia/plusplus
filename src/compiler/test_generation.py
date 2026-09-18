@@ -632,12 +632,7 @@ class RequirementTestGenerationPass:
             required_layers=required_layers,
             test_obligations=test_obligations,
         )
-        artifacts = {
-            f"test_context:{requirement_id}": self._artifact_store.write_test_context_pack(
-                requirement_id,
-                context_pack,
-            )
-        }
+        artifacts: dict[str, str] = {}
         decision, sources, errors = self._generate_and_validate(
             requirement_id,
             context_pack,

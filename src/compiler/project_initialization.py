@@ -152,7 +152,8 @@ def test_workspace_spec(
                 '  testDir: "./e2e",\n'
                 "  fullyParallel: false,\n"
                 "  workers: 1,\n"
-                "  timeout: 30_000,\n"
+                "  timeout: 10_000,\n"
+                "  expect: { timeout: 10_000 },\n"
                 "  use: {\n"
                 '    baseURL: process.env.ARC_TEST_BASE_URL ?? "http://127.0.0.1:5173",\n'
                 '    trace: "retain-on-failure",\n'
@@ -164,13 +165,13 @@ def test_workspace_spec(
                 f'      url: "http://127.0.0.1:{port}/__arc/health",\n'
                 f'      env: {{ DATABASE_URL: ":memory:", NODE_ENV: "test", PORT: "{port}" }},\n'
                 "      reuseExistingServer: true,\n"
-                "      timeout: 120_000,\n"
+                "      timeout: 10_000,\n"
                 "    },\n"
                 "    {\n"
                 '      command: "npm run dev -w @arc/frontend -- --host 127.0.0.1",\n'
                 '      url: "http://127.0.0.1:5173",\n'
                 "      reuseExistingServer: true,\n"
-                "      timeout: 120_000,\n"
+                "      timeout: 10_000,\n"
                 "    },\n"
                 "  ],\n"
                 "});\n"

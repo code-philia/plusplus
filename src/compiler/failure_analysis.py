@@ -379,10 +379,11 @@ def _failure_phase(command: TestCommandResult, output: str) -> str:
     lowered = output.lower()
     if command.phase == "TYPECHECK":
         return "TYPECHECK"
+    if command.phase == "EXECUTION" and command.timed_out:
+        return "ASSERTION"
     if command.error or any(
         token in lowered
         for token in (
-            "timed out",
             "econnrefused",
             "address already in use",
             "webserver process",

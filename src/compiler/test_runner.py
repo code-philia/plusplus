@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
+
+from core.logging import SynchronousLog
 
 from .test_generation import TEST_ENVIRONMENT_READY, TEST_LAYERS, TESTS_FROZEN
 
@@ -38,6 +41,7 @@ class TestCommandResult:
     stdout: str = ""
     stderr: str = ""
     error: str | None = None
+    timed_out: bool = False
 
 
 @dataclass(slots=True)
@@ -71,6 +75,8 @@ class TestRunner:
     ) -> None:
         self.output_root = output_root.expanduser().resolve()
         self.environment = dict(os.environ if environment is None else environment)
+        self.environment.setdefault("CI", "1")
+        self._log = SynchronousLog("TestRunner", workspace_root=self.output_root)
         self._timeouts = {
             "TYPECHECK": _bounded_float(
                 self.environment,
@@ -96,8 +102,8 @@ class TestRunner:
             "E2E": _bounded_float(
                 self.environment,
                 "ARC_TDD_E2E_TIMEOUT_SECONDS",
-                300.0,
-                30.0,
+                10.0,
+                10.0,
                 1800.0,
             ),
         }
@@ -326,8 +332,17 @@ class TestRunner:
         timeout: float,
     ) -> TestCommandResult:
         started = time.perf_counter()
+        command_text = " ".join(command)
+        self._log.info(
+            f"STARTED phase={phase} layer={layer or '-'} timeout_s={timeout:g} "
+            f"command={command_text}"
+        )
         executable = shutil.which(command[0], path=self.environment.get("PATH"))
         if executable is None:
+            self._log.info(
+                f"FINISHED phase={phase} layer={layer or '-'} status=ERROR "
+                f"reason=command_unavailable"
+            )
             return TestCommandResult(
                 phase=phase,
                 layer=layer,
@@ -340,31 +355,26 @@ class TestRunner:
             )
         actual_command = [executable, *command[1:]]
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 actual_command,
                 cwd=str(self.output_root),
                 env=self.environment,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            return TestCommandResult(
-                phase=phase,
-                layer=layer,
-                command=command,
-                test_files=test_files,
-                status="ERROR",
-                returncode=None,
-                duration_ms=round((time.perf_counter() - started) * 1000),
-                stdout=_bounded_output(exc.stdout),
-                stderr=_bounded_output(exc.stderr),
-                error=f"ARC4507 TEST_COMMAND_TIMEOUT: exceeded {timeout:g}s.",
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                ),
+                start_new_session=os.name != "nt",
             )
         except OSError as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            self._log.info(
+                f"FINISHED phase={phase} layer={layer or '-'} status=ERROR "
+                f"duration_ms={duration_ms}"
+            )
             return TestCommandResult(
                 phase=phase,
                 layer=layer,
@@ -372,19 +382,89 @@ class TestRunner:
                 test_files=test_files,
                 status="ERROR",
                 returncode=None,
-                duration_ms=round((time.perf_counter() - started) * 1000),
+                duration_ms=duration_ms,
                 error=f"ARC4508 TEST_COMMAND_FAILED: {exc}",
             )
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process_tree(process)
+            try:
+                stdout, stderr = process.communicate(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or ""
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            is_test_timeout = phase == "EXECUTION"
+            status = "FAILED" if is_test_timeout else "ERROR"
+            timeout_message = (
+                f"TEST_COMMAND_TIMEOUT: {layer or phase} test command exceeded "
+                f"{timeout:g}s and was terminated."
+            )
+            stderr_text = (
+                stderr.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes)
+                else stderr
+            )
+            stderr = "\n".join(
+                value for value in (stderr_text, timeout_message) if value
+            )
+            self._log.info(
+                f"TIMED_OUT phase={phase} layer={layer or '-'} "
+                f"status={status} duration_ms={duration_ms} timeout_s={timeout:g} "
+                "process_tree=terminated"
+            )
+            return TestCommandResult(
+                phase=phase,
+                layer=layer,
+                command=command,
+                test_files=test_files,
+                status=status,
+                returncode=124 if is_test_timeout else None,
+                duration_ms=duration_ms,
+                stdout=_bounded_output(stdout),
+                stderr=_bounded_output(stderr),
+                error=(
+                    None
+                    if is_test_timeout
+                    else f"ARC4507 TEST_COMMAND_TIMEOUT: exceeded {timeout:g}s."
+                ),
+                timed_out=True,
+            )
+        except OSError as exc:
+            _terminate_process_tree(process)
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            self._log.info(
+                f"FINISHED phase={phase} layer={layer or '-'} status=ERROR "
+                f"duration_ms={duration_ms}"
+            )
+            return TestCommandResult(
+                phase=phase,
+                layer=layer,
+                command=command,
+                test_files=test_files,
+                status="ERROR",
+                returncode=None,
+                duration_ms=duration_ms,
+                error=f"ARC4508 TEST_COMMAND_FAILED: {exc}",
+            )
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        status = "PASSED" if process.returncode == 0 else "FAILED"
+        self._log.info(
+            f"FINISHED phase={phase} layer={layer or '-'} status={status} "
+            f"returncode={process.returncode} duration_ms={duration_ms}"
+        )
         return TestCommandResult(
             phase=phase,
             layer=layer,
             command=command,
             test_files=test_files,
-            status="PASSED" if completed.returncode == 0 else "FAILED",
-            returncode=completed.returncode,
-            duration_ms=round((time.perf_counter() - started) * 1000),
-            stdout=_bounded_output(completed.stdout),
-            stderr=_bounded_output(completed.stderr),
+            status=status,
+            returncode=process.returncode,
+            duration_ms=duration_ms,
+            stdout=_bounded_output(stdout),
+            stderr=_bounded_output(stderr),
         )
 
     def _finish(self, result: TestRunResult, started: float) -> TestRunResult:
@@ -417,6 +497,35 @@ class TestRunner:
         if not isinstance(value, dict):
             return {}, [f"{error_code}: {path} must contain an object."]
         return value, []
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    """Terminate a timed-out test command and every server it spawned."""
+
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        taskkill = shutil.which("taskkill")
+        if taskkill is not None:
+            try:
+                subprocess.run(
+                    [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=5.0,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
 
 
 def _normalize_layers(values: tuple[str, ...]) -> tuple[list[str], list[str]]:

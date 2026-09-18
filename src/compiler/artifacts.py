@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import shutil
 from pathlib import Path, PurePosixPath
@@ -585,20 +584,6 @@ class CompilerArtifactStore:
         write_json_atomic(path, manifest)
         return str(path)
 
-    def write_test_context_pack(
-        self,
-        requirement_id: str,
-        context_pack: dict[str, Any],
-    ) -> str:
-        safe_id = "".join(
-            character.lower() if character.isalnum() else "-"
-            for character in str(requirement_id)
-        ).strip("-") or "requirement"
-        digest = hashlib.sha256(str(requirement_id).encode("utf-8")).hexdigest()[:8]
-        path = self.tests_root / "context_packs" / f"{safe_id}-{digest}.json"
-        write_json_atomic(path, context_pack)
-        return str(path)
-
     def write_test_manifest(self, manifest: dict[str, Any]) -> str:
         path = self.tests_root / "test_manifest.json"
         write_json_atomic(path, manifest)
@@ -626,7 +611,10 @@ class CompilerArtifactStore:
                 raise ValueError(f"Generated test escapes output workspace: {relative!r}")
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_suffix(f"{target.suffix}.tmp")
-            temporary.write_text(content, encoding="utf-8")
+            # Test Manifest hashes the canonical UTF-8 source bytes. Writing
+            # text with newline=None translates LF to CRLF on Windows and
+            # immediately invalidates the newly frozen SHA-256.
+            temporary.write_bytes(content.encode("utf-8"))
             temporary.replace(target)
             artifacts[f"generated_test:{normalized}"] = str(target)
         return artifacts

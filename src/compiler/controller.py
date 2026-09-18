@@ -40,7 +40,8 @@ from .project_build import ProjectBuilder
 from .project_initialization import ProjectInitializer
 from .skeleton_lowering import DatabaseSchemaLowerer, TypeLowerer
 from .symbol_planning import GlobalSymbolPlanner
-from .test_generation import RequirementTestGenerationPass, TestEnvironmentInitializer
+from .tdd_orchestrator import NodeTDDOrchestrator
+from .test_generation import TestEnvironmentInitializer
 from .visual_reference import VisualReferenceAnalyzer, VisualReferenceResolver
 
 
@@ -69,7 +70,7 @@ class Compiler:
             "FRONTEND": 3,
             "PROJECT": 4,
             "SKELETON": 5,
-            "TESTS": 6,
+            "TDD": 6,
         }
         start_from = str(request.start_from or "PREPROCESSING").strip().upper()
         if start_from not in stage_order:
@@ -532,16 +533,16 @@ class Compiler:
         await self._log(
             "Compiler",
             (
-                "Project workspace and manifest validated for Test Generation."
-                if start_from == "TESTS"
+                "Project workspace and manifest validated for node-by-node TDD."
+                if start_from == "TDD"
                 else "Project workspace initialized; Skeleton lowering may consume the frozen project manifest."
             ),
         )
 
-        if start_from == "TESTS":
+        if start_from == "TDD":
             await self._log(
                 "Compiler",
-                "START_PROBE stage=TESTS upstream=CODE_BINDING "
+                "START_PROBE stage=TDD upstream=CODE_BINDING "
                 "source=.arc/code/code_bindings.json status=VALIDATING",
             )
             reusable_bindings, read_error = artifact_store.read_code_bindings()
@@ -569,10 +570,10 @@ class Compiler:
             )
             await self._log(
                 "Compiler",
-                "START_PROBE stage=TESTS upstream=CODE_BINDING "
+                "START_PROBE stage=TDD upstream=CODE_BINDING "
                 "source=.arc/code/code_bindings.json status=VALIDATED",
             )
-            return await self._generate_tests(
+            return await self._run_tdd(
                 request=request,
                 artifact_store=artifact_store,
                 requirement_ir=preprocessing.requirement_ir,
@@ -1013,7 +1014,7 @@ class Compiler:
             "CODE_BINDING_READY: Design IR, TypeScript types, and real source targets are linked.",
         )
 
-        return await self._generate_tests(
+        return await self._run_tdd(
             request=request,
             artifact_store=artifact_store,
             requirement_ir=preprocessing.requirement_ir,
@@ -1028,7 +1029,7 @@ class Compiler:
             artifacts=artifacts,
         )
 
-    async def _generate_tests(
+    async def _run_tdd(
         self,
         *,
         request: CompilationRequest,
@@ -1075,7 +1076,7 @@ class Compiler:
         )
 
         # ===================================================================
-        #          Stage 4.2: Requirement-by-Requirement Test Generation
+        #             Stage 5: Requirement-local Node TDD
         # ===================================================================
 
         try:
@@ -1090,13 +1091,38 @@ class Compiler:
             )
         await self._log(
             "Compiler",
-            "Generating bounded UNIT, INTEGRATION, and E2E tests per atomic requirement.",
+            "Starting node-by-node TDD in atomic dependency order.",
         )
-        test_generation = RequirementTestGenerationPass(
+        atomic_ids = {
+            str(value)
+            for value in requirement_ir.get("atomic_units", [])
+            if str(value)
+        }
+        order = [
+            str(requirement_id)
+            for wave in dependency_graph.get("atomic_implementation_waves", [])
+            if isinstance(wave, list)
+            for requirement_id in wave
+            if str(requirement_id) in atomic_ids
+        ]
+        if len(order) != len(set(order)) or set(order) != atomic_ids:
+            message = (
+                "ARC4548 TDD_ORDER_INVALID: atomic_implementation_waves must contain "
+                "every atomic requirement exactly once."
+            )
+            await self._log("Compiler", message, "error")
+            return CompilationResult(
+                ok=False,
+                root_id=root_id,
+                states=states,
+                failed_nodes=sorted(atomic_ids),
+                artifacts=artifacts,
+            )
+
+        orchestrator = NodeTDDOrchestrator(
             model,
             request.output_dir,
-            artifact_store,
-        ).compile(
+            artifact_store=artifact_store,
             requirement_ir=requirement_ir,
             dependency_graph=dependency_graph,
             database_schema=database_schema,
@@ -1105,29 +1131,56 @@ class Compiler:
             code_binding_registry=code_binding_registry,
             environment_manifest=test_environment.manifest,
         )
-        states.update(test_generation.node_states)
-        artifacts.update(test_generation.artifacts)
-        for error in test_generation.errors:
-            await self._log("Compiler", error, "error")
-        if not test_generation.ok:
-            await self._log("Compiler", "TEST_GENERATION pass failed.", "error")
-            return CompilationResult(
-                ok=False,
-                root_id=root_id,
-                states=states,
-                failed_nodes=sorted(
-                    node_id for node_id, state in states.items() if state == "FAILED"
-                ),
-                artifacts=artifacts,
+        for requirement_id in order:
+            await self._log(
+                "NodeTDDOrchestrator",
+                f"NODE_TDD_STARTED: generating frozen tests for {requirement_id}.",
+                node_id=requirement_id,
             )
-        self._runtime.traceability.merge_test_links(test_generation.manifest)
+            node_result = orchestrator.run_node(requirement_id)
+            states[requirement_id] = node_result.status
+            for name, path in node_result.artifacts.items():
+                artifact_name = (
+                    f"tdd_result:{requirement_id}" if name == "result" else name
+                )
+                artifacts[artifact_name] = path
+            if (
+                orchestrator.test_manifest is not None
+                and orchestrator.test_manifest.get("status") == "TESTS_FROZEN"
+            ):
+                self._runtime.traceability.merge_test_links(
+                    orchestrator.test_manifest
+                )
+            for error in node_result.errors:
+                await self._log(
+                    "NodeTDDOrchestrator",
+                    error,
+                    "error",
+                    requirement_id,
+                )
+            if not node_result.ok:
+                await self._log(
+                    "Compiler",
+                    f"NODE_TDD_FAILED: {requirement_id} stopped at {node_result.status}.",
+                    "error",
+                    requirement_id,
+                )
+                return CompilationResult(
+                    ok=False,
+                    root_id=root_id,
+                    states=states,
+                    failed_nodes=[requirement_id],
+                    artifacts=artifacts,
+                )
+            await self._log(
+                "NodeTDDOrchestrator",
+                f"NODE_ACCEPTED: {requirement_id} passed its frozen tests and impacted regressions.",
+                node_id=requirement_id,
+            )
+
         await self._log(
             "Compiler",
-            "TESTS_FROZEN: generated tests typecheck and are discoverable without executing assertions.",
-        )
-        await self._log(
-            "Compiler",
-            "Validated lowering and Code Binding Registry; TESTS_FROZEN.",
+            "NODE_TDD_COMPLETE: every atomic requirement reached NODE_ACCEPTED.",
         )
         return CompilationResult(
             ok=True,
