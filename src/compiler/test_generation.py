@@ -360,14 +360,36 @@ class TestStaticValidator:
             900.0,
         )
 
-    def validate(self, *, has_vitest: bool, has_e2e: bool) -> TestStaticValidationResult:
+    def validate(
+        self,
+        *,
+        has_vitest: bool,
+        has_e2e: bool,
+        test_files: list[str] | None = None,
+    ) -> TestStaticValidationResult:
         commands: list[list[str]] = [
             ["npm", "run", "typecheck", "-w", "@arc/tests"],
         ]
+        selected_files = [
+            _test_workspace_path(value)
+            for value in (test_files or [])
+        ]
+        vitest_files = [
+            value
+            for value in selected_files
+            if value.startswith(("unit/", "integration/"))
+        ]
+        e2e_files = [value for value in selected_files if value.startswith("e2e/")]
         if has_vitest:
-            commands.append(["npm", "run", "list:vitest", "-w", "@arc/tests"])
+            command = ["npm", "run", "list:vitest", "-w", "@arc/tests"]
+            if vitest_files:
+                command.extend(["--", *vitest_files])
+            commands.append(command)
         if has_e2e:
-            commands.append(["npm", "run", "list:e2e", "-w", "@arc/tests"])
+            command = ["npm", "run", "list:e2e", "-w", "@arc/tests"]
+            if e2e_files:
+                command.extend(["--", *e2e_files])
+            commands.append(command)
         errors: list[str] = []
         for command in commands:
             executable = shutil.which(command[0], path=self.environment.get("PATH"))
@@ -431,133 +453,249 @@ class RequirementTestGenerationPass:
         code_binding_registry: dict[str, Any],
         environment_manifest: dict[str, Any],
     ) -> TestGenerationResult:
+        global_errors: list[str] = []
         if code_binding_registry.get("status") != CODE_BINDING_READY:
-            return TestGenerationResult(
-                manifest=_empty_test_manifest("TEST_GENERATION_FAILED"),
-                node_states={},
-                errors=["ARC4410 CODE_BINDING_NOT_READY: Test Generation requires CODE_BINDING_READY."],
+            global_errors.append(
+                "ARC4410 CODE_BINDING_NOT_READY: Test Generation requires CODE_BINDING_READY."
             )
         if environment_manifest.get("status") != TEST_ENVIRONMENT_READY:
-            return TestGenerationResult(
-                manifest=_empty_test_manifest("TEST_GENERATION_FAILED"),
+            global_errors.append(
+                "ARC4411 TEST_ENVIRONMENT_NOT_READY: Test environment is unavailable."
+            )
+        if global_errors:
+            manifest = _finalize_manifest(
+                _empty_test_manifest("TEST_GENERATION_FAILED"),
+                status="TEST_GENERATION_FAILED",
+                requirement_order=[],
                 node_states={},
-                errors=["ARC4411 TEST_ENVIRONMENT_NOT_READY: Test environment is unavailable."],
+                environment_manifest=environment_manifest,
+                code_binding_registry=code_binding_registry,
+            )
+            artifact = self._artifact_store.write_test_manifest(manifest)
+            return TestGenerationResult(
+                manifest=manifest,
+                node_states={},
+                artifacts={"test_manifest": artifact},
+                errors=global_errors,
             )
 
-        resolver = CodeTargetResolver(code_binding_registry)
-        nodes = requirement_ir.get("nodes", {})
         order = _atomic_order(requirement_ir, dependency_graph)
         states = {requirement_id: "TEST_DISCOVERED" for requirement_id in order}
         artifacts: dict[str, str] = {}
-        manifest_tests: list[dict[str, Any]] = []
-        manifest_files: list[dict[str, Any]] = []
         errors: list[str] = []
+        manifest = _empty_test_manifest("TEST_GENERATING")
 
         for requirement_id in order:
-            node = nodes.get(requirement_id)
-            if not isinstance(node, dict):
-                errors.append(
-                    f"ARC4412 TEST_CONTEXT_INVALID: missing atomic requirement {requirement_id}."
-                )
-                states[requirement_id] = "FAILED"
-                break
-            try:
-                resolved_targets = resolver.resolve_requirement_targets(requirement_id)
-            except KeyError as exc:
-                errors.append(f"ARC4412 TEST_CONTEXT_INVALID: {exc}")
-                states[requirement_id] = "FAILED"
-                break
-            test_obligations = _plan_test_obligations(
-                requirement_id,
-                resolved_targets,
-                design_ir,
-            )
-            required_layers = [
-                layer for layer in TEST_LAYERS if layer in test_obligations
-            ]
-            if not required_layers:
-                errors.append(
-                    f"ARC4413 TEST_LAYER_UNRESOLVED: no public test seam for {requirement_id}."
-                )
-                states[requirement_id] = "FAILED"
-                break
-            context_pack = _build_context_pack(
+            result = self.generate_requirement(
                 requirement_id=requirement_id,
-                requirement=node,
+                requirement_ir=requirement_ir,
                 database_schema=database_schema,
                 design_ir=design_ir,
                 frontend_ir=frontend_ir,
-                resolved_targets=resolved_targets,
-                required_layers=required_layers,
-                test_obligations=test_obligations,
+                code_binding_registry=code_binding_registry,
+                environment_manifest=environment_manifest,
+                existing_manifest=manifest,
             )
-            artifacts[f"test_context:{requirement_id}"] = (
-                self._artifact_store.write_test_context_pack(requirement_id, context_pack)
-            )
-            decision, sources, validation_errors = self._generate_and_validate(
-                requirement_id,
-                context_pack,
-            )
-            if decision is None:
-                errors.extend(validation_errors)
-                states[requirement_id] = "FAILED"
+            manifest = result.manifest
+            states.update(result.node_states)
+            artifacts.update(result.artifacts)
+            errors.extend(result.errors)
+            if not result.ok:
                 break
-            source_artifacts = self._artifact_store.write_generated_tests(sources)
-            artifacts.update(source_artifacts)
-            test_rows, file_rows = _manifest_rows(
-                requirement_id,
-                node,
-                decision,
-                context_pack,
-            )
-            manifest_tests.extend(test_rows)
-            manifest_files.extend(file_rows)
-            states[requirement_id] = "TESTS_FROZEN"
 
-        has_vitest_files = any(
-            row.get("layer") in {"UNIT", "INTEGRATION"} for row in manifest_files
+        manifest = _finalize_manifest(
+            manifest,
+            status=TESTS_FROZEN if not errors else "TEST_GENERATION_FAILED",
+            requirement_order=order,
+            node_states=states,
+            environment_manifest=environment_manifest,
+            code_binding_registry=code_binding_registry,
         )
-        has_e2e_files = any(row.get("layer") == "E2E" for row in manifest_files)
-        manifest = {
-            "schema_version": TEST_GENERATION_SCHEMA_VERSION,
-            "status": TESTS_FROZEN if not errors else "TEST_GENERATION_FAILED",
-            "environment_status": environment_manifest.get("status"),
-            "code_binding_status": code_binding_registry.get("status"),
-            "requirements": [
-                {
-                    "requirement_id": requirement_id,
-                    "state": states.get(requirement_id, "NOT_GENERATED"),
-                    "test_ids": sorted(
-                        row["test_id"]
-                        for row in manifest_tests
-                        if row["requirement_id"] == requirement_id
-                    ),
-                }
-                for requirement_id in order
-            ],
-            "tests": sorted(manifest_tests, key=lambda row: row["test_id"]),
-            "files": sorted(manifest_files, key=lambda row: row["test_file"]),
-            "freeze_policy": {
-                "tests_are_read_only_during_implementation": True,
-                "integrity": "SHA256",
-            },
-            "validation": {
-                "typecheck": "PASSED" if not errors else "FAILED",
-                "vitest_collection": (
-                    "PASSED" if not errors else "FAILED"
-                ) if has_vitest_files else "NOT_REQUIRED",
-                "playwright_collection": (
-                    "PASSED" if not errors else "FAILED"
-                ) if has_e2e_files else "NOT_REQUIRED",
-                "behavior_executed": False,
-            },
-        }
         artifacts["test_manifest"] = self._artifact_store.write_test_manifest(manifest)
         return TestGenerationResult(
             manifest=manifest,
             node_states=states,
             artifacts=artifacts,
             errors=list(dict.fromkeys(errors)),
+        )
+
+    def generate_requirement(
+        self,
+        *,
+        requirement_id: str,
+        requirement_ir: dict[str, Any],
+        database_schema: dict[str, Any],
+        design_ir: dict[str, Any],
+        frontend_ir: dict[str, Any],
+        code_binding_registry: dict[str, Any],
+        environment_manifest: dict[str, Any],
+        existing_manifest: dict[str, Any] | None = None,
+    ) -> TestGenerationResult:
+        """Generate, validate, and freeze tests for exactly one atomic requirement.
+
+        When an existing manifest is supplied, its other requirement slices are
+        retained and the selected requirement slice is replaced atomically at
+        the manifest level. This is the Stage 5 node-by-node entry point.
+        """
+
+        requirement_id = str(requirement_id).strip()
+        base_manifest = copy.deepcopy(
+            existing_manifest
+            if isinstance(existing_manifest, dict)
+            else _empty_test_manifest("TEST_GENERATING")
+        )
+        state = {requirement_id: "TEST_DISCOVERED"} if requirement_id else {}
+        precondition_errors = _test_generation_precondition_errors(
+            requirement_id=requirement_id,
+            requirement_ir=requirement_ir,
+            code_binding_registry=code_binding_registry,
+            environment_manifest=environment_manifest,
+        )
+        if precondition_errors:
+            if requirement_id:
+                state[requirement_id] = "FAILED"
+            manifest = _finalize_manifest(
+                base_manifest,
+                status="TEST_GENERATION_FAILED",
+                requirement_order=[requirement_id] if requirement_id else [],
+                node_states=state,
+                environment_manifest=environment_manifest,
+                code_binding_registry=code_binding_registry,
+            )
+            artifact = self._artifact_store.write_test_manifest(manifest)
+            return TestGenerationResult(
+                manifest=manifest,
+                node_states=state,
+                artifacts={"test_manifest": artifact},
+                errors=precondition_errors,
+            )
+
+        nodes = requirement_ir.get("nodes", {})
+        node = nodes[requirement_id]
+        try:
+            resolved_targets = CodeTargetResolver(
+                code_binding_registry
+            ).resolve_requirement_targets(requirement_id)
+        except KeyError as exc:
+            state[requirement_id] = "FAILED"
+            errors = [f"ARC4412 TEST_CONTEXT_INVALID: {exc}"]
+            manifest = _finalize_manifest(
+                base_manifest,
+                status="TEST_GENERATION_FAILED",
+                requirement_order=[requirement_id],
+                node_states=state,
+                environment_manifest=environment_manifest,
+                code_binding_registry=code_binding_registry,
+            )
+            artifact = self._artifact_store.write_test_manifest(manifest)
+            return TestGenerationResult(
+                manifest=manifest,
+                node_states=state,
+                artifacts={"test_manifest": artifact},
+                errors=errors,
+            )
+
+        test_obligations = _plan_test_obligations(
+            requirement_id,
+            resolved_targets,
+            design_ir,
+        )
+        required_layers = [layer for layer in TEST_LAYERS if layer in test_obligations]
+        if not required_layers:
+            state[requirement_id] = "FAILED"
+            errors = [
+                f"ARC4413 TEST_LAYER_UNRESOLVED: no public test seam for {requirement_id}."
+            ]
+            manifest = _finalize_manifest(
+                base_manifest,
+                status="TEST_GENERATION_FAILED",
+                requirement_order=[requirement_id],
+                node_states=state,
+                environment_manifest=environment_manifest,
+                code_binding_registry=code_binding_registry,
+            )
+            artifact = self._artifact_store.write_test_manifest(manifest)
+            return TestGenerationResult(
+                manifest=manifest,
+                node_states=state,
+                artifacts={"test_manifest": artifact},
+                errors=errors,
+            )
+
+        context_pack = _build_context_pack(
+            requirement_id=requirement_id,
+            requirement=node,
+            database_schema=database_schema,
+            design_ir=design_ir,
+            frontend_ir=frontend_ir,
+            resolved_targets=resolved_targets,
+            required_layers=required_layers,
+            test_obligations=test_obligations,
+        )
+        artifacts = {
+            f"test_context:{requirement_id}": self._artifact_store.write_test_context_pack(
+                requirement_id,
+                context_pack,
+            )
+        }
+        decision, sources, errors = self._generate_and_validate(
+            requirement_id,
+            context_pack,
+        )
+        if decision is None:
+            state[requirement_id] = "FAILED"
+            manifest = _finalize_manifest(
+                base_manifest,
+                status="TEST_GENERATION_FAILED",
+                requirement_order=[requirement_id],
+                node_states=state,
+                environment_manifest=environment_manifest,
+                code_binding_registry=code_binding_registry,
+            )
+            artifacts["test_manifest"] = self._artifact_store.write_test_manifest(manifest)
+            return TestGenerationResult(
+                manifest=manifest,
+                node_states=state,
+                artifacts=artifacts,
+                errors=list(dict.fromkeys(errors)),
+            )
+
+        previous_paths = {
+            str(row.get("test_file", ""))
+            for row in base_manifest.get("files", [])
+            if isinstance(row, dict)
+            and str(row.get("requirement_id", "")) == requirement_id
+            and str(row.get("test_file", ""))
+        }
+        self._remove_requirement_files(previous_paths - set(sources))
+        artifacts.update(self._artifact_store.write_generated_tests(sources))
+        test_rows, file_rows = _manifest_rows(
+            requirement_id,
+            node,
+            decision,
+            context_pack,
+        )
+        manifest = _replace_requirement_slice(
+            base_manifest,
+            requirement_id=requirement_id,
+            state=TESTS_FROZEN,
+            test_rows=test_rows,
+            file_rows=file_rows,
+        )
+        manifest = _finalize_manifest(
+            manifest,
+            status=TESTS_FROZEN,
+            requirement_order=_manifest_requirement_order(manifest),
+            node_states={requirement_id: TESTS_FROZEN},
+            environment_manifest=environment_manifest,
+            code_binding_registry=code_binding_registry,
+        )
+        state[requirement_id] = TESTS_FROZEN
+        artifacts["test_manifest"] = self._artifact_store.write_test_manifest(manifest)
+        return TestGenerationResult(
+            manifest=manifest,
+            node_states=state,
+            artifacts=artifacts,
         )
 
     def _generate_and_validate(
@@ -607,14 +745,15 @@ class RequirementTestGenerationPass:
             sources = _decision_sources(decision, context_pack)
             self._remove_requirement_files(planned_paths)
             self._artifact_store.write_generated_tests(sources)
-            all_test_files = list((self._output_root / "tests").glob("**/*.spec.ts"))
             has_vitest = any(
-                path.parent.name in {"unit", "integration"} for path in all_test_files
+                path.startswith(("tests/unit/", "tests/integration/"))
+                for path in sources
             )
-            has_e2e = any(path.parent.name == "e2e" for path in all_test_files)
+            has_e2e = any(path.startswith("tests/e2e/") for path in sources)
             static_result = self._validator.validate(
                 has_vitest=has_vitest,
                 has_e2e=has_e2e,
+                test_files=sorted(sources),
             )
             if static_result.ok:
                 self._trace(
@@ -1242,6 +1381,165 @@ def _empty_test_manifest(status: str) -> dict[str, Any]:
             "integrity": "SHA256",
         },
     }
+
+
+def _test_generation_precondition_errors(
+    *,
+    requirement_id: str,
+    requirement_ir: dict[str, Any],
+    code_binding_registry: dict[str, Any],
+    environment_manifest: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    if code_binding_registry.get("status") != CODE_BINDING_READY:
+        errors.append(
+            "ARC4410 CODE_BINDING_NOT_READY: Test Generation requires CODE_BINDING_READY."
+        )
+    if environment_manifest.get("status") != TEST_ENVIRONMENT_READY:
+        errors.append(
+            "ARC4411 TEST_ENVIRONMENT_NOT_READY: Test environment is unavailable."
+        )
+    nodes = requirement_ir.get("nodes", {})
+    atomic_ids = {
+        str(value) for value in requirement_ir.get("atomic_units", []) if str(value)
+    }
+    if not requirement_id:
+        errors.append("ARC4412 TEST_CONTEXT_INVALID: requirement_id is required.")
+    elif not isinstance(nodes, dict) or not isinstance(nodes.get(requirement_id), dict):
+        errors.append(
+            f"ARC4412 TEST_CONTEXT_INVALID: missing atomic requirement {requirement_id}."
+        )
+    elif requirement_id not in atomic_ids:
+        errors.append(
+            f"ARC4412 TEST_CONTEXT_INVALID: {requirement_id} is not an atomic requirement."
+        )
+    return errors
+
+
+def _replace_requirement_slice(
+    manifest: dict[str, Any],
+    *,
+    requirement_id: str,
+    state: str,
+    test_rows: list[dict[str, Any]],
+    file_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    result = copy.deepcopy(manifest)
+    retained_tests = [
+        copy.deepcopy(row)
+        for row in result.get("tests", [])
+        if isinstance(row, dict) and str(row.get("requirement_id", "")) != requirement_id
+    ]
+    retained_files = [
+        copy.deepcopy(row)
+        for row in result.get("files", [])
+        if isinstance(row, dict) and str(row.get("requirement_id", "")) != requirement_id
+    ]
+    result["tests"] = sorted(
+        [*retained_tests, *copy.deepcopy(test_rows)],
+        key=lambda row: str(row.get("test_id", "")),
+    )
+    result["files"] = sorted(
+        [*retained_files, *copy.deepcopy(file_rows)],
+        key=lambda row: str(row.get("test_file", "")),
+    )
+    requirements = [
+        copy.deepcopy(row)
+        for row in result.get("requirements", [])
+        if isinstance(row, dict) and str(row.get("requirement_id", "")) != requirement_id
+    ]
+    requirements.append(
+        {
+            "requirement_id": requirement_id,
+            "state": state,
+            "test_ids": sorted(str(row["test_id"]) for row in test_rows),
+        }
+    )
+    result["requirements"] = requirements
+    return result
+
+
+def _manifest_requirement_order(manifest: dict[str, Any]) -> list[str]:
+    return [
+        str(row.get("requirement_id", ""))
+        for row in manifest.get("requirements", [])
+        if isinstance(row, dict) and str(row.get("requirement_id", ""))
+    ]
+
+
+def _finalize_manifest(
+    manifest: dict[str, Any],
+    *,
+    status: str,
+    requirement_order: list[str],
+    node_states: dict[str, str],
+    environment_manifest: dict[str, Any],
+    code_binding_registry: dict[str, Any],
+) -> dict[str, Any]:
+    result = copy.deepcopy(manifest)
+    tests = [copy.deepcopy(row) for row in result.get("tests", []) if isinstance(row, dict)]
+    files = [copy.deepcopy(row) for row in result.get("files", []) if isinstance(row, dict)]
+    previous_requirements = {
+        str(row.get("requirement_id", "")): copy.deepcopy(row)
+        for row in result.get("requirements", [])
+        if isinstance(row, dict) and str(row.get("requirement_id", ""))
+    }
+    ordered_ids = list(dict.fromkeys([
+        *[str(value) for value in requirement_order if str(value)],
+        *previous_requirements,
+    ]))
+    requirements: list[dict[str, Any]] = []
+    for requirement_id in ordered_ids:
+        previous = previous_requirements.get(requirement_id, {})
+        requirements.append(
+            {
+                "requirement_id": requirement_id,
+                "state": node_states.get(
+                    requirement_id,
+                    str(previous.get("state", "NOT_GENERATED")),
+                ),
+                "test_ids": sorted(
+                    str(row.get("test_id", ""))
+                    for row in tests
+                    if str(row.get("requirement_id", "")) == requirement_id
+                    and str(row.get("test_id", ""))
+                ),
+            }
+        )
+    has_vitest = any(row.get("layer") in {"UNIT", "INTEGRATION"} for row in files)
+    has_e2e = any(row.get("layer") == "E2E" for row in files)
+    validation_passed = status == TESTS_FROZEN
+    result.update(
+        {
+            "schema_version": TEST_GENERATION_SCHEMA_VERSION,
+            "status": status,
+            "environment_status": environment_manifest.get("status"),
+            "code_binding_status": code_binding_registry.get("status"),
+            "requirements": requirements,
+            "tests": sorted(tests, key=lambda row: str(row.get("test_id", ""))),
+            "files": sorted(files, key=lambda row: str(row.get("test_file", ""))),
+            "freeze_policy": {
+                "tests_are_read_only_during_implementation": True,
+                "integrity": "SHA256",
+            },
+            "validation": {
+                "typecheck": "PASSED" if validation_passed else "FAILED",
+                "vitest_collection": (
+                    "PASSED" if validation_passed else "FAILED"
+                ) if has_vitest else "NOT_REQUIRED",
+                "playwright_collection": (
+                    "PASSED" if validation_passed else "FAILED"
+                ) if has_e2e else "NOT_REQUIRED",
+                "behavior_executed": False,
+            },
+        }
+    )
+    return result
+
+
+def _test_workspace_path(test_file: str) -> str:
+    normalized = str(test_file).replace("\\", "/").strip().strip("/")
+    return normalized.removeprefix("tests/")
 
 
 def _command_output(stdout: str | None, stderr: str | None) -> str:
