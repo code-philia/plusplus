@@ -57,7 +57,6 @@ def project_api_contract(module: dict[str, Any]) -> dict[str, Any]:
 def project_api_module(module: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(module.get("id", "")),
-        "callers": sorted({str(value) for value in module.get("callers", []) if str(value)}),
         "callees": list(
             dict.fromkeys(str(value) for value in module.get("callees", []) if str(value))
         ),
@@ -75,6 +74,6 @@ def _compact_field(field: dict[str, Any]) -> dict[str, Any]:
 def _compact_effect(effect: dict[str, Any]) -> dict[str, Any]:
     return {
         key: copy.deepcopy(effect[key])
-        for key in ("id", "operation", "target", "fields", "action")
+        for key in ("id", "operation", "target", "fields")
         if effect.get(key) is not None
     }

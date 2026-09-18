@@ -69,11 +69,12 @@ REQUIREMENT_CONTRACT_SCHEMA: dict[str, Any] = {
 MODULE_INTERFACE_FIELD_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["semantic_id", "name", "type"],
+    "required": ["semantic_id", "name", "type", "required"],
     "properties": {
         "semantic_id": {"type": "string", "maxLength": 120, "pattern": r"^[a-z][a-z0-9_.]*$"},
         "name": {"type": "string", "maxLength": 64, "pattern": r"^[a-z][a-z0-9_]*$"},
         "type": {"type": "string", "enum": sorted(PRIMITIVE_TYPES)},
+        "required": {"type": "boolean"},
     },
 }
 
@@ -123,7 +124,7 @@ API_DECOMPOSITION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["modules"],
     "properties": {
-        "modules": {"type": "array", "minItems": 1, "maxItems": 4, "items": API_MODULE_SCHEMA},
+        "modules": {"type": "array", "minItems": 0, "maxItems": 4, "items": API_MODULE_SCHEMA},
     },
 }
 
@@ -143,14 +144,16 @@ Example shape:
 API_DECOMPOSITION_INSTRUCTIONS = """Turn one Requirement Contract into API modules. Keep one user action in one API
 unless the requirement explicitly defines multiple operations. Every API contains exactly kind, name, spec, inputs,
 outputs, and effects. Set kind to API. Copy interface fields and effects from the supplied contract without changing
-their semantic identifiers or types. Field names are local parameter labels and may be made clearer without changing
+their semantic identifiers, types, or required flags. Field names are local parameter labels and may be made clearer without changing
 the represented data. Do not design child functions or implementation steps. Return only `{\"modules\": [...]}`.
 """
 
 MODULE_DECOMPOSITION_INSTRUCTIONS = """Read the layered Markdown context and decompose the current module from the top down.
 Silently plan how the parent responsibility is completed, then return only its direct child modules in execution order.
 
-Every child contains exactly six fields: kind, name, spec, inputs, outputs, and effects. An API may call FUNC only. A
+Every child contains exactly six top-level fields: kind, name, spec, inputs, outputs, and effects. Each interface field
+contains semantic_id, name, type, and required. Preserve required exactly when reusing a parent field; mark newly
+introduced values required only when the child cannot complete without them. An API may call FUNC only. A
 FUNC may contain its own logic and may call FUNC or DB modules. A DB module is always a leaf. The list order is the call
 order. A module input must come from the parent inputs or an earlier child output. Copy the exact interface field and
 effect identifiers supplied in the Markdown. Keep child responsibilities cohesive and smaller than the parent. Return
@@ -197,7 +200,6 @@ class DesignPassResult:
     design_ir: dict[str, Any]
     node_states: dict[str, str]
     errors: list[str] = field(default_factory=list)
-    issues: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -257,20 +259,11 @@ class DesignPass:
     def __init__(self, model: StructuredModel, artifact_root: Path) -> None:
         self._model = model
         arc_root = artifact_root.expanduser().resolve()
-        if arc_root.name == "compiler":
-            arc_root = arc_root.parent
         self._log = SynchronousLog("DesignPass", workspace_root=arc_root.parent)
         self._local_retries = _env_int("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", 2, 0, 10)
         self._reopen_budget = _env_int("ARC_DESIGN_REOPEN_COUNT", 2, 0, 6)
         self._trace_enabled = _env_flag("ARC_DESIGN_TRACE", True)
         self._max_modules = _env_int("ARC_DESIGN_MAX_MODULES_PER_REQUIREMENT", 64, 4, 256)
-        self._stop_after = _env_choice("ARC_DESIGN_STOP_AFTER", "MODULES", {"API", "FUNC", "MODULES"})
-
-    @property
-    def stop_after(self) -> str:
-        """Return the configured Stage 2 boundary."""
-
-        return self._stop_after
 
     def compile(
         self,
@@ -322,16 +315,12 @@ class DesignPass:
                 all_issues.extend(issues)
                 break
             state = compiled
-            states[requirement_id] = {
-                "API": "API_GENERATED",
-                "FUNC": "FUNC_GENERATED",
-                "MODULES": "DESIGN_VALIDATED",
-            }[self._stop_after]
+            states[requirement_id] = "DESIGN_VALIDATED"
 
         final_issues = all_issues
         design = state.to_ir()
         errors = [f"{issue.code}: {issue.message}" for issue in final_issues]
-        return DesignPassResult(design, states, errors, [item.as_dict() for item in final_issues])
+        return DesignPassResult(design, states, errors)
 
     def _compile_requirement(
         self,
@@ -367,12 +356,6 @@ class DesignPass:
             api_ids, issues = _materialize_apis(trial, requirement_id, contract, result.value)
             if issues:
                 return None, issues
-            if self._stop_after == "API":
-                self._trace(
-                    f"STAGE_STOP boundary=API requirement={requirement_id} "
-                    f"generated_apis={len(api_ids)}"
-                )
-                return trial, []
             failure: list[DesignIssue] = []
             for api_id in api_ids:
                 expanded, child_issues = self._expand_module(
@@ -388,8 +371,6 @@ class DesignPass:
                     failure = child_issues
                     break
                 trial = expanded
-            if not failure and self._stop_after == "FUNC":
-                return trial, []
             if not failure:
                 return trial, []
             last_issues = failure
@@ -458,12 +439,6 @@ class DesignPass:
                 continue
             duration = int((time.perf_counter() - started) * 1000)
             self._trace_json("MODEL_OUTPUT", phase, unit_id, decision, duration)
-            decision, normalization_notes = _normalize_compatible_decision(phase, decision)
-            if normalization_notes:
-                self._trace(
-                    f"MODEL_NORMALIZED phase={phase} unit={unit_id} "
-                    f"changes={'; '.join(normalization_notes)}"
-                )
             issues = _shape_issues(decision, output_schema, phase, unit_id)
             if not issues:
                 issues = validator(decision)
@@ -507,7 +482,6 @@ class DesignPass:
             decomposition_schema = _module_decomposition_output_schema(module)
             context_markdown = _module_decomposition_markdown(
                 requirement,
-                requirement_contract,
                 design_context,
                 state,
                 module_id,
@@ -541,16 +515,6 @@ class DesignPass:
             )
             if issues:
                 return None, issues
-            if self._stop_after == "FUNC" and module["kind"] == "API":
-                generated_func_ids = [
-                    child_id for child_id in child_ids
-                    if trial.modules[child_id]["kind"] == "FUNC"
-                ]
-                self._trace(
-                    f"STAGE_STOP boundary=FUNC parent={module_id} "
-                    f"generated_funcs={len(generated_func_ids)}"
-                )
-                return trial, []
             failure: list[DesignIssue] = []
             for child_id in child_ids:
                 child = trial.modules[child_id]
@@ -601,15 +565,14 @@ def project_design_context(schema: dict[str, Any], requirement_id: str, dependen
     entities: list[dict[str, Any]] = []
     allowed_entities: set[str] = set()
     for entity in schema.get("entities", []):
-        sources = set(entity.get("sources", [])) | set(entity.get("requirement_ids", []))
+        requirement_ids = set(entity.get("requirement_ids", []))
         fields = [
             copy.deepcopy(item)
             for item in entity.get("fields", [])
-            if not item.get("sources")
-            or set(item.get("sources", [])) & allowed_requirements
+            if not item.get("requirement_ids")
             or set(item.get("requirement_ids", [])) & allowed_requirements
         ]
-        if sources & allowed_requirements or fields:
+        if requirement_ids & allowed_requirements or fields:
             key = str(entity.get("key", "")).lower()
             allowed_entities.add(key)
             entities.append({
@@ -618,7 +581,6 @@ def project_design_context(schema: dict[str, Any], requirement_id: str, dependen
                 "fields": [{
                     "name": item.get("name"),
                     "type": item.get("type"),
-                    "logical_type": item.get("logical_type", item.get("type")),
                     "nullable": item.get("nullable"),
                     "references": item.get("references"),
                     "properties": copy.deepcopy(item.get("properties", {})),
@@ -636,10 +598,10 @@ def project_design_context(schema: dict[str, Any], requirement_id: str, dependen
     for raw in schema.get("constraints", []):
         fields = [str(value) for value in raw.get("fields", [])]
         referenced = {value.partition(".")[0].lower() for value in fields if "." in value}
-        sources = set(raw.get("sources", [])) | set(raw.get("requirement_ids", []))
+        requirement_ids = set(raw.get("requirement_ids", []))
         if referenced and not referenced <= allowed_entities:
             continue
-        if sources and not sources & allowed_requirements:
+        if requirement_ids and not requirement_ids & allowed_requirements:
             continue
         item = copy.deepcopy(raw)
         item["id"] = str(raw.get("id") or f"constraint_{_hash(raw)[:12]}")
@@ -1041,12 +1003,6 @@ def _provider_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _normalize_compatible_decision(phase: str, value: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-    """Repair semantically neutral model noise before strict validation."""
-
-    return copy.deepcopy(value), []
-
-
 def _module_decomposition_output_schema(parent: dict[str, Any]) -> dict[str, Any]:
     """Specialize the decomposition form so illegal layer choices are unavailable."""
 
@@ -1054,7 +1010,7 @@ def _module_decomposition_output_schema(parent: dict[str, Any]) -> dict[str, Any
     step_properties = schema["properties"]["modules"]["items"]["properties"]
     allowed = {"FUNC"} if parent.get("kind") == "API" else {"FUNC", "DB"}
     step_properties["kind"]["enum"] = sorted(allowed)
-    schema["properties"]["modules"]["minItems"] = 1 if parent.get("kind") == "API" else 0
+    schema["properties"]["modules"]["minItems"] = 0
     return schema
 
 
@@ -1125,45 +1081,13 @@ def _database_field_catalog(context: dict[str, Any]) -> dict[str, set[str]]:
 
 
 def _compact_module_effect(effect: dict[str, Any]) -> dict[str, Any]:
-    """Attach one compiler-defined executable action to a module side effect."""
+    """Project the semantic effect fields consumed by downstream passes."""
 
-    result = {
+    return {
         key: copy.deepcopy(effect[key])
         for key in ("id", "operation", "target", "fields")
         if effect.get(key) is not None
     }
-    result["action"] = copy.deepcopy(effect.get("action")) or _effect_action(effect)
-    return result
-
-
-def _effect_action(effect: dict[str, Any]) -> dict[str, Any]:
-    operation = str(effect.get("operation") or "").upper()
-    target = str(effect.get("target") or "state")
-    fields = [str(value) for value in effect.get("fields", []) if str(value)]
-    if operation in {"READ", "CREATE", "UPDATE", "DELETE"}:
-        if operation == "READ":
-            selection = ", ".join(fields) or "*"
-            statement = f"SELECT {selection} FROM {target} WHERE <predicate>"
-        elif operation == "CREATE":
-            insert_fields = [field for field in fields if field != "id"]
-            statement = (
-                f"INSERT INTO {target} ({', '.join(insert_fields)}) VALUES "
-                f"({', '.join(f':{field}' for field in insert_fields)})"
-                if insert_fields else f"INSERT INTO {target} DEFAULT VALUES"
-            )
-        elif operation == "UPDATE":
-            assignments = ", ".join(f"{field} = :{field}" for field in fields) or "<fields>"
-            statement = f"UPDATE {target} SET {assignments} WHERE <predicate>"
-        else:
-            statement = f"DELETE FROM {target} WHERE <predicate>"
-        return {"kind": "DATABASE", "command": "SQL", "statement": statement}
-    if operation == "SESSION_WRITE":
-        return {"kind": "SESSION", "command": "SET", "target": target, "values": fields}
-    if operation == "COOKIE_WRITE":
-        return {"kind": "COOKIE", "command": "SET", "target": target, "values": fields}
-    if operation == "EXTERNAL_IO":
-        return {"kind": "EXTERNAL", "command": "CALL", "target": target, "arguments": fields}
-    return {"kind": "STATE", "command": "MUTATE", "target": target, "values": fields}
 
 
 def _module_visible_effects(module: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1218,11 +1142,13 @@ def _expand_interface_field(
             "semantic_id": semantic_id,
             "name": str(existing["name"]),
             "type": str(existing["type"]),
+            "required": bool(existing.get("required", True)),
         }
     return {
         "semantic_id": semantic_id,
         "name": str(field_item["name"]),
         "type": str(field_item["type"]),
+        "required": bool(field_item.get("required", True)),
     }
 
 
@@ -1240,186 +1166,58 @@ def _qualified_module_id(requirement_id: str, kind: str, name: str) -> str:
     return f"{requirement_id}::{kind}.{name}"
 
 
-def _ancestor_path(state: DesignState, module_id: str) -> list[str]:
-    result: list[str] = []
-    current: str | None = module_id
-    while current and current in state.modules:
-        result.append(current)
-        current = state.modules[current].get("parent_id")
-    return list(reversed(result))
-
-
-def _requirement_contract_template(requirement_id: str) -> dict[str, Any]:
-    return {"requirement_id": requirement_id, "spec": "", "inputs": [], "outputs": [], "effects": []}
-
-
-def _api_template() -> dict[str, Any]:
-    return {
-        "modules": [{
-            "kind": "API",
-            "name": "OperationName",
-            "spec": "Expose one requirement operation.",
-            "inputs": [],
-            "outputs": [],
-            "effects": [],
-        }],
-    }
-
-
 def _module_decomposition_markdown(
     requirement: dict[str, Any],
-    contract: dict[str, Any],
     design_context: dict[str, Any],
     state: DesignState,
     module_id: str,
     output_schema: dict[str, Any],
 ) -> str:
-    """Render one decomposition decision as layered, human-readable Markdown."""
+    """Render only the decision-local context not already encoded by the schema."""
 
     module = state.modules[module_id]
     allowed_kinds = output_schema["properties"]["modules"]["items"]["properties"]["kind"]["enum"]
     lines = [
-        "# Module Decomposition Context",
+        "# Current decomposition decision",
         "",
-        "## 1. 需求原文",
+        "## Requirement",
         "",
-        f"### {_md(requirement.get('requirement_id', contract.get('requirement_id', '')))} {_md(requirement.get('name', ''))}".rstrip(),
+        f"- ID: `{_md(requirement.get('requirement_id', ''))}`",
+        f"- Name: {_md(requirement.get('name', ''))}",
+        f"- Summary: {_md(requirement.get('description', ''))}",
         "",
-        str(requirement.get("description") or "（无描述）").strip(),
-    ]
-    scenarios = requirement.get("scenarios", [])
-    if scenarios:
-        lines.extend(["", "### 验收场景", ""])
-        for scenario in scenarios:
-            lines.append(f"- **{_md(scenario.get('name', scenario.get('id', 'Scenario')))}**")
-            for step in scenario.get("steps", []):
-                lines.append(f"  - `{_md(step.get('keyword', ''))}` {_md(step.get('content', ''))}")
-
-    lines.extend([
-        "",
-        "## 2. 需求契约",
-        "",
-        "### Spec",
-        "",
-        str(contract.get("spec") or "（无）"),
-        "",
-        "### Inputs",
-        "",
-        *_field_table(contract.get("inputs", [])),
-        "",
-        "### Outputs",
-        "",
-        *_field_table(contract.get("outputs", [])),
-        "",
-        "### Side effects",
-        "",
-        *_effect_table(contract.get("effects", [])),
-    ])
-
-    lines.extend(["", "## 3. 需求设计的 Entity", ""])
-    for entity in design_context.get("entities", []):
-        lines.extend([
-            f"### {_md(entity.get('key', ''))}",
-            "",
-            str(entity.get("description") or "（无描述）"),
-            "",
-            "| Field | Type | Nullable | Primary key | References |",
-            "|---|---|---:|---:|---|",
-        ])
-        for field_item in entity.get("fields", []):
-            lines.append(
-                f"| {_md(field_item.get('name'))} | {_md(field_item.get('logical_type', field_item.get('type')))} "
-                f"| {_yes_no(field_item.get('nullable'))} | {_yes_no(field_item.get('primary_key'))} "
-                f"| {_md(field_item.get('references') or '')} |"
-            )
-        lines.append("")
-    relationships = design_context.get("relationships", [])
-    if relationships:
-        lines.extend(["### Relationships", ""])
-        for item in relationships:
-            lines.append(
-                f"- `{_md(item.get('parent'))}` → `{_md(item.get('child'))}`"
-                f" ({_md(item.get('cardinality', item.get('type', 'relationship')))})"
-            )
-    if design_context.get("constraints"):
-        lines.extend(["", "### Constraints", ""])
-        for item in design_context.get("constraints", []):
-            lines.append(f"- `{_md(item.get('id'))}`: {_md(item.get('description', ''))}")
-
-    lines.extend([
-        "",
-        "## 4. 该需求当前的模块层次",
-        "",
-        "```text",
-        *_module_hierarchy_lines(state, module_id),
-        "```",
-        "",
-        "## 5. 当前待拆解模块",
+        "## Parent module",
         "",
         f"- ID: `{_md(module.get('id'))}`",
         f"- Kind: `{_md(module.get('kind'))}`",
-        f"- Spec: {_md(module.get('spec'))}",
+        f"- Responsibility: {_md(module.get('spec'))}",
         f"- Allowed direct child kinds: {_inline_list(allowed_kinds)}",
         "",
-        "### Inputs",
+        "### Available inputs",
         "",
         *_field_table(module.get("inputs", [])),
         "",
-        "### Outputs",
+        "### Required outputs",
         "",
         *_field_table(module.get("outputs", [])),
         "",
-        "### Side effects",
+        "### Effects that children may own",
         "",
         *_effect_table(_module_visible_effects(module)),
         "",
-        "## 6. 模块输出格式",
+        "## Relevant database slice",
         "",
-        "只返回当前模块的直接子模块列表。每个模块只有 `kind`、`name`、`spec`、`inputs`、`outputs`、`effects`。",
-        "列表顺序就是调用顺序。接口字段只写 `semantic_id`、`name`、`type`。编译器据此推导局部数据，",
-        "并自动生成模块 ID、调用关系、`callers` 与 `callees`。不要输出这些编译器字段。",
-        "",
-        "| Field | Meaning |",
-        "|---|---|",
-        "| `kind` | `FUNC` 或 `DB`，必须属于上方允许集合 |",
-        "| `name` | PascalCase 模块名称 |",
-        "| `spec` | 一句话职责 |",
-        "| `inputs` / `outputs` | 模块接口字段；输入必须来自父输入或更早的子模块输出 |",
-        "| `effects` | 从父模块 effects 中原样分配的数据库读取、写入、会话或外部操作 |",
-        "",
-        "### Data-flow rules",
-        "",
-        "- `semantic_id` 是数据的稳定身份；跨模块判断同一个数据时以它为准。",
-        "- `type` 是该数据的规范类型；复用已有 `semantic_id` 时必须保持完全相同的 `type`。",
-        "- `name` 只是当前模块的局部参数名，可以与其他模块中同一 `semantic_id` 的名称不同。",
-        "- 子模块输出既可以是新产生的数据，也可以是验证、规范化或授权后继续传递的已有数据。",
-        "- 不要仅仅为了表示“验证通过”而创建新的 semantic_id；可以原样输出已有 semantic_id。",
-        "- 后续子模块可以直接使用父输入或任意更早子模块已经提供的数据。",
-        "- 例如：VerifyPassword 可以输入并输出 `account.id: uuid`；之后 CreateSession 可以用局部名 "
-        "`account_id` 输入同一个 `account.id: uuid`。",
-        "",
-        "```json",
-        json.dumps(_module_decomposition_template(), ensure_ascii=False, indent=2),
-        "```",
-    ])
+    ]
+    entities = design_context.get("entities", [])
+    if not entities:
+        lines.append("- None")
+    for entity in entities:
+        fields = ", ".join(
+            f"{field.get('name')}:{field.get('type')}"
+            for field in entity.get("fields", [])
+        )
+        lines.append(f"- `{_md(entity.get('key'))}`: {_md(fields or 'no fields')}")
     return "\n".join(lines).strip()
-
-
-def _module_decomposition_template() -> dict[str, Any]:
-    return {
-        "modules": [{
-            "kind": "FUNC",
-            "name": "ChildResponsibility",
-            "spec": "Complete one cohesive part of the parent responsibility.",
-            "inputs": [{
-                "semantic_id": "request.value",
-                "name": "value",
-                "type": "string",
-            }],
-            "outputs": [],
-            "effects": [],
-        }],
-    }
 
 
 def _field_table(fields: list[dict[str, Any]]) -> list[str]:
@@ -1449,18 +1247,6 @@ def _effect_table(effects: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def _module_hierarchy_lines(state: DesignState, module_id: str) -> list[str]:
-    path = _ancestor_path(state, module_id)
-    lines = [f"{'    ' * index}{'└── ' if index else ''}{item}" for index, item in enumerate(path)]
-    children = [
-        str(invocation.get("callee"))
-        for invocation in state.invocations
-        if invocation.get("caller") == module_id
-    ]
-    lines.extend(f"{'    ' * len(path)}└── {child}" for child in children)
-    return lines or [module_id]
-
-
 def _feedback_markdown(feedback: list[str], *, heading: str = "校验反馈（请修复后重新输出）") -> str:
     return "\n\n## " + heading + "\n\n" + "\n".join(f"- {_md(item)}" for item in feedback)
 
@@ -1478,6 +1264,33 @@ def _md(value: Any) -> str:
     if isinstance(value, (dict, list)):
         value = json.dumps(value, ensure_ascii=False, sort_keys=True)
     return str(value or "").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def _requirement_contract_template(requirement_id: str) -> dict[str, Any]:
+    """Return the compact fixed shape shown to the contract model."""
+
+    return {
+        "requirement_id": requirement_id,
+        "spec": "",
+        "inputs": [],
+        "outputs": [],
+        "effects": [],
+    }
+
+
+def _api_template() -> dict[str, Any]:
+    """Return a minimal API decision example without embedding a large schema."""
+
+    return {
+        "modules": [{
+            "kind": "API",
+            "name": "OperationName",
+            "spec": "Expose one requirement operation.",
+            "inputs": [],
+            "outputs": [],
+            "effects": [],
+        }],
+    }
 
 
 def _requirement_context(nodes: dict[str, Any], requirement_id: str) -> dict[str, Any]:
@@ -1523,11 +1336,6 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
 def _env_flag(name: str, default: bool) -> bool:
     value = os.getenv(name)
     return default if value is None else value.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _env_choice(name: str, default: str, choices: set[str]) -> str:
-    value = os.getenv(name, default).strip().upper()
-    return value if value in choices else default
 
 
 def design_traceability(design_ir: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
