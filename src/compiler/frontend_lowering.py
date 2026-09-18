@@ -10,9 +10,6 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from arcbench_agent_runtime.jsonio import read_json
-
-
 FRONTEND_SYMBOL_REGISTRY_SCHEMA_VERSION = 1
 FRONTEND_FILE_REGISTRY_SCHEMA_VERSION = 1
 FRONTEND_MANIFEST_SCHEMA_VERSION = 1
@@ -78,9 +75,7 @@ class FrontendLoweringResult:
 class FrontendGlobalSymbolPlanner:
     """Allocate every Frontend TypeScript symbol through one planning interface."""
 
-    def __init__(self, output_root: Path) -> None:
-        self.output_root = output_root.expanduser().resolve()
-        self.project_manifest_path = self.output_root / ".arc" / "project" / "project-manifest.json"
+    def __init__(self) -> None:
         self._symbols: dict[str, dict[str, Any]] = {}
         self._used_names: dict[str, str] = {}
         self._ui_bindings: dict[str, dict[str, Any]] = {}
@@ -93,9 +88,10 @@ class FrontendGlobalSymbolPlanner:
         frontend_ir: dict[str, Any],
         api_contracts: list[dict[str, Any]],
         backend_symbol_registry: dict[str, Any],
+        project_manifest: dict[str, Any],
     ) -> FrontendSymbolPlanningResult:
         self._reset()
-        self._validate_project_manifest(read_json(self.project_manifest_path, None))
+        self._validate_project_manifest(project_manifest)
         api_contract_index = _index_api_contracts(api_contracts, self._errors)
         backend_symbols = _index_backend_symbols(backend_symbol_registry, self._errors)
         backend_bindings = _index_backend_bindings(backend_symbol_registry, self._errors)
@@ -106,13 +102,6 @@ class FrontendGlobalSymbolPlanner:
 
         for store in _object_rows(frontend_ir.get("stores"), "stores", self._errors):
             self._plan_store(store)
-
-        for contract in _object_rows(
-            frontend_ir.get("local_data_contracts"),
-            "local_data_contracts",
-            self._errors,
-        ):
-            self._plan_local_contract(contract)
 
         for api_id in _frontend_api_ids(frontend_ir):
             api = api_contract_index.get(api_id)
@@ -246,28 +235,6 @@ class FrontendGlobalSymbolPlanner:
             "initial_symbol": initial_symbol,
         }
 
-    def _plan_local_contract(self, contract: dict[str, Any]) -> None:
-        contract_id = str(contract.get("id", "")).strip()
-        owner_id = str(contract.get("owner_component_id", "")).strip()
-        if not contract_id.startswith("UI_TYPE.") or contract_id in self._symbols:
-            self._errors.append(
-                f"ARC4203 FRONTEND_SYMBOL_INVALID: invalid local contract id {contract_id!r}."
-            )
-            return
-        if owner_id not in self._ui_bindings:
-            self._errors.append(
-                f"ARC4204 FRONTEND_OWNER_UNKNOWN: {contract_id} owner {owner_id!r} is unavailable."
-            )
-            return
-        self._register(
-            contract_id,
-            "LOCAL_DATA_CONTRACT",
-            "interface",
-            _pascal_case(contract_id.split(".", 1)[1]) or "LocalData",
-            owner_id=owner_id,
-            fields=copy.deepcopy(contract.get("fields", [])),
-        )
-
     def _plan_api_client(
         self,
         api: dict[str, Any],
@@ -360,7 +327,6 @@ class FrontendFilePlanner:
 
     def __init__(self, output_root: Path) -> None:
         self.output_root = output_root.expanduser().resolve()
-        self.project_manifest_path = self.output_root / ".arc" / "project" / "project-manifest.json"
         self._allowed_roots: tuple[str, ...] = ()
         self._files: dict[str, dict[str, Any]] = {}
         self._symbol_locations: dict[str, dict[str, Any]] = {}
@@ -374,9 +340,10 @@ class FrontendFilePlanner:
         self,
         frontend_ir: dict[str, Any],
         symbol_registry: dict[str, Any],
+        project_manifest: dict[str, Any],
     ) -> FrontendFilePlanningResult:
         self._reset()
-        self._load_allowed_roots(read_json(self.project_manifest_path, None))
+        self._load_allowed_roots(project_manifest)
         symbols = _index_rows(symbol_registry.get("symbols"), "id", "symbols", self._errors)
         ui_bindings = _index_rows(
             symbol_registry.get("ui_bindings"), "ui_id", "ui_bindings", self._errors
@@ -405,15 +372,6 @@ class FrontendFilePlanner:
             for table_name in _UI_TABLES.values()
             for item in _object_rows(frontend_ir.get(table_name), table_name, self._errors)
         }
-        local_contracts = {
-            str(item["id"]): item
-            for item in _object_rows(
-                frontend_ir.get("local_data_contracts"),
-                "local_data_contracts",
-                self._errors,
-            )
-        }
-
         for ui_id, binding in sorted(ui_bindings.items()):
             item = ui_items.get(ui_id)
             if item is None:
@@ -426,16 +384,6 @@ class FrontendFilePlanner:
             self._place_symbol(str(binding["ui_id"]), symbols, path, f"{kind}_SKELETON", "BODY_ONLY")
             self._place_symbol(str(binding["props_symbol_id"]), symbols, path, f"{kind}_SKELETON", "BODY_ONLY")
             self._ui_locations[ui_id] = {**copy.deepcopy(binding), "path": path}
-
-        for contract_id, contract in sorted(local_contracts.items()):
-            owner_id = str(contract.get("owner_component_id", ""))
-            owner = self._ui_locations.get(owner_id)
-            if owner is None:
-                self._errors.append(
-                    f"ARC4213 FRONTEND_FILE_OWNER_UNKNOWN: {contract_id} owner {owner_id} is missing."
-                )
-                continue
-            self._place_symbol(contract_id, symbols, str(owner["path"]), "COMPONENT_SKELETON", "BODY_ONLY")
 
         for store_id, binding in sorted(store_bindings.items()):
             path = self._allocate_path(
@@ -505,12 +453,6 @@ class FrontendFilePlanner:
                 self._errors.append(f"ARC4210 PROJECT_MANIFEST_INVALID: unavailable root {path}.")
                 continue
             normalized.append(path)
-        # Workspaces initialized before Frontend runtime lowering already have
-        # Vite's official config file, but their manifest does not list it yet.
-        # Admit that exact file so --start-from skeleton can migrate it safely.
-        vite_config = "frontend/vite.config.ts"
-        if (self.output_root / vite_config).is_file():
-            normalized.append(vite_config)
         self._allowed_roots = tuple(sorted(set(normalized)))
 
     def _allocate_path(
@@ -655,10 +597,6 @@ class FrontendSkeletonLowerer:
         pages = _table_by_id(frontend_ir, "pages")
         components = _table_by_id(frontend_ir, "components")
         stores = _table_by_id(frontend_ir, "stores")
-        local_contracts = _table_by_id(frontend_ir, "local_data_contracts")
-        local_by_owner = {
-            str(value.get("owner_component_id")): value for value in local_contracts.values()
-        }
 
         sources: dict[str, str] = {}
         imports_by_path: dict[str, list[dict[str, Any]]] = {path: [] for path in files}
@@ -694,9 +632,7 @@ class FrontendSkeletonLowerer:
                 layouts,
                 pages,
                 components,
-                local_by_owner,
                 ui_locations,
-                symbols,
                 sources,
                 imports_by_path,
                 exports_by_path,
@@ -773,7 +709,6 @@ class FrontendSkeletonLowerer:
                 "pages": sorted(pages),
                 "components": sorted(components),
                 "stores": sorted(stores),
-                "local_data_contracts": sorted(local_contracts),
                 "api_clients": sorted(api_locations),
             },
             "generated_files": [] if errors else sorted(sources),
@@ -959,9 +894,7 @@ class FrontendSkeletonLowerer:
         layouts: dict[str, dict[str, Any]],
         pages: dict[str, dict[str, Any]],
         components: dict[str, dict[str, Any]],
-        local_by_owner: dict[str, dict[str, Any]],
         locations: dict[str, dict[str, Any]],
-        symbols: dict[str, dict[str, Any]],
         sources: dict[str, str],
         imports: dict[str, list[dict[str, Any]]],
         exports: dict[str, list[str]],
@@ -990,23 +923,12 @@ class FrontendSkeletonLowerer:
                         continue
                     event_name = f"on{_pascal_case(str(event.get('name', 'event')))}"
                     payload = event.get("payload_type")
+                    result_type = "Promise<void>" if event.get("async") else "void"
                     callback = (
-                        f"(payload: {_typescript_type(str(payload))}) => void"
-                        if payload else "() => void"
+                        f"(payload: {_typescript_type(str(payload))}) => {result_type}"
+                        if payload else f"() => {result_type}"
                     )
                     props_lines.append(f"  {event_name}?: {callback};")
-
-            local_contract = local_by_owner.get(ui_id)
-            local_contract_source = ""
-            local_contract_symbol = None
-            if local_contract is not None:
-                contract_id = str(local_contract["id"])
-                local_contract_symbol = str(symbols[contract_id]["symbol"])
-                local_contract_source = (
-                    f"\nexport interface {local_contract_symbol} {{\n"
-                    f"{_render_fields(local_contract.get('fields', []))}\n"
-                    "}\n"
-                )
 
             child_ids = [
                 str(value) for value in item.get("component_ids", [])
@@ -1052,7 +974,6 @@ class FrontendSkeletonLowerer:
                 + f"export interface {props_symbol} {{\n"
                 + ("\n".join(props_lines) if props_lines else "  // No external props were designed.")
                 + "\n}\n"
-                + local_contract_source
                 + f"\nexport function {function_symbol}(_props: {props_symbol}) {{\n"
                 + ("\n".join(declarations) + "\n" if declarations else "")
                 + "  return (\n"
@@ -1064,11 +985,7 @@ class FrontendSkeletonLowerer:
                 + "  );\n}\n"
             )
             imports[path] = rows
-            exports[path] = [
-                function_symbol,
-                props_symbol,
-                *([local_contract_symbol] if local_contract_symbol else []),
-            ]
+            exports[path] = [function_symbol, props_symbol]
 
     @staticmethod
     def _lower_router(
@@ -1126,6 +1043,7 @@ class FrontendSkeletonLowerer:
                 "page_source": str(location["path"]),
                 "layout_id": layout_id,
                 "layout_symbol": layout_symbol,
+                "navigation": copy.deepcopy(page.get("navigation", [])),
             })
         if not route_source:
             route_source.append(

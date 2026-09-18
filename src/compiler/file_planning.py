@@ -6,9 +6,6 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from arcbench_agent_runtime.jsonio import read_json
-
-
 FILE_REGISTRY_SCHEMA_VERSION = 1
 FILES_PLANNED = "FILES_PLANNED"
 MODULE_KINDS = {"API", "FUNC", "DB"}
@@ -47,7 +44,6 @@ class GlobalFilePlanner:
 
     def __init__(self, output_root: Path) -> None:
         self.output_root = output_root.expanduser().resolve()
-        self.project_manifest_path = self.output_root / ".arc" / "project" / "project-manifest.json"
         self._allowed_roots: tuple[str, ...] = ()
         self._files: dict[str, dict[str, Any]] = {}
         self._symbol_locations: dict[str, dict[str, Any]] = {}
@@ -59,10 +55,10 @@ class GlobalFilePlanner:
         self,
         design_ir: dict[str, Any],
         symbol_registry: dict[str, Any],
+        project_manifest: dict[str, Any],
     ) -> FilePlanningResult:
         self._reset()
-        manifest = read_json(self.project_manifest_path, None)
-        self._validate_project_manifest(manifest)
+        self._validate_project_manifest(project_manifest)
         symbols = self._index_symbols(symbol_registry)
         modules = self._index_modules(design_ir)
         bindings = self._index_bindings(symbol_registry)

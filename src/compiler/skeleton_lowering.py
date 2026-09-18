@@ -176,14 +176,9 @@ class DatabaseSchemaLowerer:
         sources: dict[str, str] = {}
         tables: list[dict[str, Any]] = []
         application_constraints = _application_constraints(database_schema)
-        skipped_constraints: list[dict[str, Any]] = []
 
         if not errors:
             _validate_entity_coverage(entities, entity_symbols, errors)
-            skipped_constraints = _collect_skipped_database_checks(
-                database_schema,
-                warnings,
-            )
 
         if not errors:
             for entity_key, entity in sorted(entities.items()):
@@ -210,6 +205,7 @@ class DatabaseSchemaLowerer:
                     continue
                 source, lowered_checks, import_plan = _render_database_entity_file(
                     entity,
+                    database_schema.get("constraints", []),
                     type_symbol,
                     table_symbol,
                     entities,
@@ -222,7 +218,7 @@ class DatabaseSchemaLowerer:
                 tables.append(
                     {
                         "entity": entity_key,
-                        "table": str(entity.get("table") or entity_key),
+                        "table": entity_key,
                         "table_symbol": str(table_symbol["symbol"]),
                         "record_symbol": str(type_symbol["symbol"]),
                         "path": type_path,
@@ -244,7 +240,6 @@ class DatabaseSchemaLowerer:
             "orm": "drizzle",
             "tables": tables,
             "application_constraints": application_constraints,
-            "skipped_constraints": skipped_constraints,
             "planned_files": sorted(sources),
             "generated_files": [] if errors else sorted(sources),
         }
@@ -514,59 +509,6 @@ def _validate_entity_coverage(
         )
 
 
-def _collect_skipped_database_checks(
-    schema: dict[str, Any],
-    warnings: list[str],
-) -> list[dict[str, Any]]:
-    property_checks = {
-        (
-            f"{entity.get('key')}.{field_item.get('name')}",
-            f"{kind}={json.dumps(value, ensure_ascii=False, sort_keys=True)}",
-        ): kind
-        for entity in schema.get("entities", [])
-        if isinstance(entity, dict)
-        for field_item in entity.get("fields", [])
-        if isinstance(field_item, dict)
-        for kind, value in field_item.get("properties", {}).items()
-        if value is not None and value is not False and kind not in {"default", "format"}
-    }
-    skipped: list[dict[str, Any]] = []
-    for constraint in schema.get("constraints", []):
-        if not isinstance(constraint, dict):
-            continue
-        if constraint.get("type") != "CHECK" or constraint.get("enforcement") != "DATABASE":
-            continue
-        fields = constraint.get("fields", [])
-        field_reference = str(fields[0]) if isinstance(fields, list) and len(fields) == 1 else ""
-        description = str(constraint.get("description", ""))
-        kind = property_checks.get((field_reference, description))
-        if kind is None:
-            warnings.append(
-                "ARC3408 DATABASE_CHECK_UNLOWERABLE: CHECK constraint "
-                f"{constraint.get('id')!r} has no machine-readable expression; skipped."
-            )
-            skipped.append(_skipped_constraint(constraint, "NO_MACHINE_READABLE_EXPRESSION"))
-        elif kind == "pattern":
-            skipped.append(_skipped_constraint(constraint, "SQLITE_PATTERN_UNSUPPORTED"))
-        elif kind not in {
-            "min_length",
-            "max_length",
-            "minimum",
-            "maximum",
-            "enum",
-            "date_past",
-            "date_future",
-        }:
-            skipped.append(_skipped_constraint(constraint, "DATABASE_CHECK_UNSUPPORTED"))
-    return skipped
-
-
-def _skipped_constraint(constraint: dict[str, Any], reason: str) -> dict[str, Any]:
-    row = copy.deepcopy(constraint)
-    row["skip_reason"] = reason
-    return row
-
-
 def _application_constraints(schema: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         copy.deepcopy(constraint)
@@ -577,6 +519,7 @@ def _application_constraints(schema: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _render_database_entity_file(
     entity: dict[str, Any],
+    constraints: list[dict[str, Any]],
     type_symbol: dict[str, Any],
     table_symbol: dict[str, Any],
     entities: dict[str, dict[str, Any]],
@@ -635,7 +578,7 @@ def _render_database_entity_file(
                 )
         builders.append((field_item, builder))
 
-    single_unique, composite_unique = _unique_constraints(entity)
+    single_unique, composite_unique = _unique_constraints(entity_key, constraints)
     checks = _field_checks(entity, errors, warnings)
     if composite_unique:
         imports["drizzle-orm/sqlite-core"].add("uniqueIndex")
@@ -656,7 +599,7 @@ def _render_database_entity_file(
     lines.append("")
     lines.extend(_render_entity_interface(type_symbol, errors))
 
-    table_name = str(entity.get("table") or entity_key)
+    table_name = entity_key
     table_variable = str(table_symbol["symbol"])
     lines.append(f'export const {table_variable} = sqliteTable("{_escape_string(table_name)}", {{')
     for field_item, builder in builders:
@@ -728,18 +671,25 @@ def _drizzle_column_builder(field_item: dict[str, Any], errors: list[str]) -> tu
     return f'text("{escaped}")', "text"
 
 
-def _unique_constraints(entity: dict[str, Any]) -> tuple[set[str], list[list[str]]]:
+def _unique_constraints(
+    entity_key: str,
+    constraints: list[dict[str, Any]],
+) -> tuple[set[str], list[list[str]]]:
     single: set[str] = set()
     composite: set[tuple[str, ...]] = set()
-    for field_item in entity.get("fields", []):
-        if not isinstance(field_item, dict):
+    for constraint in constraints:
+        if (
+            not isinstance(constraint, dict)
+            or constraint.get("type") not in {"UNIQUE", "COMPOSITE_UNIQUE"}
+            or constraint.get("enforcement") != "DATABASE"
+        ):
             continue
-        if field_item.get("unique"):
-            single.add(str(field_item.get("name", "")))
-    for index in entity.get("indexes", []):
-        if not isinstance(index, dict) or not index.get("unique"):
+        references = [str(value) for value in constraint.get("fields", [])]
+        if not references or any(
+            reference.partition(".")[0] != entity_key for reference in references
+        ):
             continue
-        names = tuple(str(value) for value in index.get("fields", []))
+        names = tuple(reference.partition(".")[2] for reference in references)
         if len(names) == 1:
             single.add(names[0])
         elif len(names) > 1:
@@ -764,6 +714,11 @@ def _field_checks(
         for kind, value in sorted(properties.items()):
             if value is None or value is False or kind in {"default", "format"}:
                 continue
+            if value == "" or value == []:
+                warnings.append(
+                    f"ARC3412 DATABASE_CHECK_UNSUPPORTED: empty {kind} for {name}; skipped."
+                )
+                continue
             expression = _property_check_expression(name, kind, value, warnings)
             if expression is not None:
                 result.append((name, kind, expression))
@@ -778,14 +733,43 @@ def _property_check_expression(
 ) -> str | None:
     field = f"${{table.{field_name}}}"
     if kind == "min_length":
-        return f"length({field}) >= {int(value)}"
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            warnings.append(
+                f"ARC3412 DATABASE_CHECK_UNSUPPORTED: invalid min_length for {field_name}; skipped."
+            )
+            return None
+        if number < 0:
+            warnings.append(
+                f"ARC3412 DATABASE_CHECK_UNSUPPORTED: negative min_length for {field_name}; skipped."
+            )
+            return None
+        return f"length({field}) >= {number}"
     if kind == "max_length":
-        return f"length({field}) <= {int(value)}"
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            warnings.append(
+                f"ARC3412 DATABASE_CHECK_UNSUPPORTED: invalid max_length for {field_name}; skipped."
+            )
+            return None
+        if number < 0:
+            warnings.append(
+                f"ARC3412 DATABASE_CHECK_UNSUPPORTED: negative max_length for {field_name}; skipped."
+            )
+            return None
+        return f"length({field}) <= {number}"
     if kind == "minimum":
         return f"{field} >= {_sql_literal(value)}"
     if kind == "maximum":
         return f"{field} <= {_sql_literal(value)}"
-    if kind == "enum" and isinstance(value, list) and value:
+    if kind == "enum":
+        if not isinstance(value, list) or not value:
+            warnings.append(
+                f"ARC3412 DATABASE_CHECK_UNSUPPORTED: invalid enum for {field_name}; skipped."
+            )
+            return None
         values = ", ".join(_sql_literal(item) for item in value)
         return f"{field} in ({values})"
     if kind == "date_past" and value is True:
@@ -793,6 +777,8 @@ def _property_check_expression(
     if kind == "date_future" and value is True:
         return f"{field} > datetime('now')"
     if kind == "pattern":
+        if not str(value):
+            return None
         warnings.append(
             "ARC3411 DATABASE_PATTERN_UNSUPPORTED: SQLite cannot enforce regex pattern "
             f"for {field_name}; skipped."

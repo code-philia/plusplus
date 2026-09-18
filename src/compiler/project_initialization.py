@@ -4,11 +4,13 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from arcbench_agent_runtime.jsonio import write_json_atomic
+from core.logging import SynchronousLog
 
 
 PROJECT_STATUS = "PROJECT_INITIALIZED"
@@ -30,7 +32,6 @@ class DependencyCatalog:
 
     node_major: str = "22.12.0"
     npm_minimum: str = "10.9.0"
-    create_vite: str = "7.1.3"
     typescript: str = "5.9.2"
     react: str = "18.3.1"
     react_dom: str = "18.3.1"
@@ -53,7 +54,6 @@ class DependencyCatalog:
         return {
             "node": self.node_major,
             "npm": self.npm_minimum,
-            "create-vite": self.create_vite,
             "typescript": self.typescript,
             "react": self.react,
             "react-dom": self.react_dom,
@@ -85,6 +85,9 @@ class ProjectInitializationResult:
 class ProjectInitializer:
     """Materialize the Stage 2.5 workspace without using ARC project templates."""
 
+    _DEFAULT_COMMAND_TIMEOUT_SECONDS = 300.0
+    _COMMAND_HEARTBEAT_SECONDS = 15.0
+
     _PROJECT_TARGETS = (
         "package.json",
         "package-lock.json",
@@ -114,15 +117,29 @@ class ProjectInitializer:
         self.project_artifact_root = self.arc_root / "project"
         self._promoted_targets: list[Path] = []
         self._project_artifact_owned = False
+        self._log = SynchronousLog("ProjectInitializer", workspace_root=self.output_root)
+        self._command_timeout_seconds = self._read_command_timeout()
 
-    def initialize(self, app_type: str) -> ProjectInitializationResult:
+    def _read_command_timeout(self) -> float:
+        """Read a bounded timeout so a registry outage cannot look like a hang."""
+
+        raw = self.environment.get("ARC_PROJECT_COMMAND_TIMEOUT_SECONDS", "")
+        if not raw.strip():
+            return self._DEFAULT_COMMAND_TIMEOUT_SECONDS
         try:
-            normalized_type = str(app_type or "web").strip().lower()
-            if normalized_type != "web":
-                raise ProjectInitializationError(
-                    "PROJECT_PROFILE_INVALID",
-                    f"Stage 2.5 currently supports app_type=web, received {normalized_type!r}.",
-                )
+            value = float(raw)
+        except ValueError:
+            self._log.info(
+                "Invalid ARC_PROJECT_COMMAND_TIMEOUT_SECONDS; using "
+                f"{self._DEFAULT_COMMAND_TIMEOUT_SECONDS:g}s."
+            )
+            return self._DEFAULT_COMMAND_TIMEOUT_SECONDS
+        # A very small timeout makes npm fail before it can produce useful
+        # diagnostics, while an unbounded value recreates the old behaviour.
+        return max(30.0, min(value, 1800.0))
+
+    def initialize(self) -> ProjectInitializationResult:
+        try:
             self._validate_toolchain()
             self._validate_target()
             self._prepare_staging()
@@ -200,7 +217,7 @@ class ProjectInitializer:
             [
                 "npm",
                 "create",
-                f"vite@{self.catalog.create_vite}",
+                "vite",
                 "frontend",
                 "--",
                 "--template",
@@ -212,19 +229,9 @@ class ProjectInitializer:
             workspace_root = self.staged_project / workspace
             workspace_root.mkdir(parents=True, exist_ok=False)
             self._run(["npm", "init", "-y"], cwd=workspace_root)
-        for workspace in ("backend", "shared"):
-            self._run(
-                [
-                    "npm",
-                    "exec",
-                    "--yes",
-                    f"--package=typescript@{self.catalog.typescript}",
-                    "--",
-                    "tsc",
-                    "--init",
-                ],
-                cwd=self.staged_project / workspace,
-            )
+        # _normalize_workspace writes the canonical backend/shared tsconfig
+        # files. Running npm exec tsc --init here would only perform extra
+        # registry lookups and immediately produce files that are overwritten.
 
     def _normalize_workspace(self) -> None:
         self._write_json(self.staged_project / "package.json", self._root_package())
@@ -504,21 +511,54 @@ class ProjectInitializer:
                 f"Required command is unavailable: {args[0]}",
             )
         command = [executable, *args[1:]]
+        command_label = " ".join(str(value) for value in args)
+        self._log.info(f"COMMAND_START cwd={cwd} command={command_label}")
         command_environment = dict(self.environment)
         command_environment.setdefault("npm_config_yes", "true")
         command_environment.setdefault("npm_config_audit", "false")
         command_environment.setdefault("npm_config_fund", "false")
+        command_environment.setdefault("npm_config_progress", "false")
+        command_environment.setdefault("npm_config_update_notifier", "false")
+        command_environment.setdefault("CI", "true")
+        started = time.monotonic()
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=command_environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
         try:
-            completed = subprocess.run(
+            output = ""
+            while True:
+                elapsed = time.monotonic() - started
+                remaining = self._command_timeout_seconds - elapsed
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(
+                        command,
+                        self._command_timeout_seconds,
+                        output=output,
+                    )
+                try:
+                    output, _ = process.communicate(
+                        timeout=min(self._COMMAND_HEARTBEAT_SECONDS, remaining)
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    self._log.info(
+                        "COMMAND_RUNNING "
+                        f"cwd={cwd} command={command_label} "
+                        f"elapsed_ms={round((time.monotonic() - started) * 1000)}"
+                    )
+            completed = subprocess.CompletedProcess(
                 command,
-                cwd=cwd,
-                env=command_environment,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=900,
+                process.returncode,
+                stdout=output or "",
+                stderr="",
             )
         except FileNotFoundError as exc:
             raise ProjectInitializationError(
@@ -526,9 +566,22 @@ class ProjectInitializer:
                 f"Required command is unavailable: {args[0]}",
             ) from exc
         except subprocess.TimeoutExpired as exc:
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            process.kill()
+            output, _ = process.communicate()
+            self._log.info(
+                "COMMAND_TIMEOUT "
+                f"cwd={cwd} command={command_label} duration_ms={elapsed_ms} "
+                f"timeout_s={self._command_timeout_seconds:g}"
+            )
+            detail = (output or str(getattr(exc, "output", ""))).strip()
+            if len(detail) > 2000:
+                detail = detail[-2000:]
             raise ProjectInitializationError(
                 "PROJECT_SCAFFOLD_FAILED",
-                f"Command {list(args)!r} exceeded the 900 second timeout.",
+                f"Command {list(args)!r} exceeded the "
+                f"{self._command_timeout_seconds:g} second timeout"
+                + (f": {detail}" if detail else "."),
             ) from exc
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).strip()
@@ -538,6 +591,10 @@ class ProjectInitializer:
                 "PROJECT_SCAFFOLD_FAILED",
                 f"Command {list(args)!r} exited with {completed.returncode}: {detail}",
             )
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        self._log.info(
+            f"COMMAND_COMPLETED cwd={cwd} command={command_label} duration_ms={elapsed_ms}"
+        )
         return completed
 
     def _root_package(self) -> dict[str, Any]:

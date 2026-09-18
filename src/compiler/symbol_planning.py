@@ -5,10 +5,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
-
-from arcbench_agent_runtime.jsonio import read_json
 
 
 SYMBOL_REGISTRY_SCHEMA_VERSION = 1
@@ -103,9 +100,7 @@ class SymbolPlanningResult:
 class GlobalSymbolPlanner:
     """Plan every public TypeScript symbol before file planning starts."""
 
-    def __init__(self, output_root: Path) -> None:
-        self.output_root = output_root.expanduser().resolve()
-        self.project_manifest_path = self.output_root / ".arc" / "project" / "project-manifest.json"
+    def __init__(self) -> None:
         self._symbols: dict[str, dict[str, Any]] = {}
         self._used_names: dict[str, str] = {}
         self._contract_ids: dict[str, str] = {}
@@ -113,10 +108,14 @@ class GlobalSymbolPlanner:
         self._semantic_values: dict[str, dict[str, Any]] = {}
         self._errors: list[str] = []
 
-    def plan(self, design_ir: dict[str, Any], database_schema: dict[str, Any]) -> SymbolPlanningResult:
+    def plan(
+        self,
+        design_ir: dict[str, Any],
+        database_schema: dict[str, Any],
+        project_manifest: dict[str, Any],
+    ) -> SymbolPlanningResult:
         self._reset()
-        manifest = read_json(self.project_manifest_path, None)
-        self._validate_project_manifest(manifest)
+        self._validate_project_manifest(project_manifest)
         if self._errors:
             return self._result()
 
