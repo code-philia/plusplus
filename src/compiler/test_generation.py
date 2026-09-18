@@ -1,0 +1,1294 @@
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import os
+import posixpath
+import re
+import shutil
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Mapping
+
+from core.logging import SynchronousLog
+
+from .artifacts import CompilerArtifactStore
+from .code_binding import CODE_BINDING_READY, CodeTargetResolver
+from .database_stage import schema_for_requirement
+from .model_client import StructuredModel, describe_model_error
+from .project_initialization import DependencyCatalog, test_workspace_spec
+
+
+TEST_ENVIRONMENT_READY = "TEST_ENVIRONMENT_READY"
+TESTS_FROZEN = "TESTS_FROZEN"
+TEST_LAYERS = ("UNIT", "INTEGRATION", "E2E")
+TEST_GENERATION_SCHEMA_VERSION = 1
+
+
+TEST_GENERATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["files"],
+    "properties": {
+        "files": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["layer", "cases", "code"],
+                "properties": {
+                    "layer": {"type": "string", "enum": list(TEST_LAYERS)},
+                    "cases": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 6,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "title",
+                                "source_scenario_ids",
+                                "target_modules",
+                            ],
+                            "properties": {
+                                "title": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 160,
+                                },
+                                "source_scenario_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "maxItems": 3,
+                                },
+                                "target_modules": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "maxItems": 12,
+                                },
+                            },
+                        },
+                    },
+                    "code": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 30000,
+                    },
+                },
+            },
+        }
+    },
+}
+
+
+TEST_GENERATION_INSTRUCTIONS = """You are the Stage 4 Test Generator for one atomic requirement.
+Generate a small set of executable RED tests from the supplied Requirement Context Pack.
+
+Ownership boundary:
+- Expected behavior and assertions come only from requirement, scenarios, and requirement_contract.
+- Invocation mechanisms, imports, symbols, routes, and Props come only from code_targets and public_seams.
+- Construct typed values from type_targets and requirement-owned examples; do not guess TypeScript fields.
+- Never infer behavior from an implementation body. No implementation body is supplied.
+- Do not invent source paths, routes, symbols, module ids, scenario ids, or test layers.
+- Generate exactly one file for every layer in required_layers.
+- Use only required_layers, output_files, allowed_imports, and available target_modules.
+- Required layers come from distinct public seams inside the same vertical requirement; they are not separate requirements.
+- For each layer, target at least one exact module listed by test_obligations[layer].target_modules.
+
+Testing rules:
+- Test observable behavior through the public seam. Do not assert internal call counts or mock ARC modules.
+- Mock only external system boundaries when the requirement makes that unavoidable.
+- Expected values must be requirement examples or independent literals, never recomputed by the implementation algorithm.
+- Cover every supplied scenario id at least once across the suite and include at least one focused case per required layer.
+- The same scenario may be referenced by cases at different seams when one vertical requirement requires multiple layers.
+- Keep the total small. Normally produce one to three core cases.
+- UNIT uses Vitest and directly invokes an exported FUNC symbol.
+- INTEGRATION uses Vitest + Supertest against the exported Express `app` and the supplied HTTP route.
+- E2E uses @playwright/test and the supplied frontend route/observable labels.
+- Tests may fail because implementation regions still throw or are incomplete. Do not weaken assertions.
+- Code must be complete TypeScript with imports and test declarations, without markdown fences.
+- Do not use `.only`, skipped tests, snapshots, dynamic source discovery, filesystem searches, or line numbers.
+- Import only specifiers listed for that output layer. Use the exact import specifiers and exported symbols.
+- Return exactly one JSON object and no prose.
+
+Output shape:
+{"files":[{"layer":"UNIT|INTEGRATION|E2E","cases":[{"title":"...","source_scenario_ids":["exact id"],"target_modules":["exact id"]}],"code":"complete TypeScript source"}]}
+"""
+
+
+@dataclass(slots=True)
+class TestEnvironmentResult:
+    ok: bool
+    manifest: dict[str, Any]
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TestStaticValidationResult:
+    ok: bool
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TestGenerationResult:
+    manifest: dict[str, Any]
+    node_states: dict[str, str]
+    artifacts: dict[str, str] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+class TestEnvironmentInitializer:
+    """Validate the fixed test workspace provisioned during Project Initialization."""
+
+    def __init__(
+        self,
+        output_root: Path,
+        *,
+        backend_port: int,
+        catalog: DependencyCatalog | None = None,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
+        self.output_root = output_root.expanduser().resolve()
+        self.tests_root = self.output_root / "tests"
+        self.backend_port = max(1, min(65535, int(backend_port)))
+        self.catalog = catalog or DependencyCatalog()
+        self.environment = dict(os.environ if environment is None else environment)
+
+    def initialize(self) -> TestEnvironmentResult:
+        errors: list[str] = []
+        spec = test_workspace_spec(self.catalog, backend_port=self.backend_port)
+        browser_installed = False
+        environment_source = "PROJECT_MANIFEST"
+        try:
+            root_package = _read_json_object(self.output_root / "package.json")
+            test_package = _read_json_object(self.tests_root / "package.json")
+            test_tsconfig = _read_json_object(self.tests_root / "tsconfig.json")
+            project_manifest = _read_json_object(
+                self.output_root / ".arc" / "project" / "project-manifest.json"
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            errors.append(f"ARC4401 TEST_ENVIRONMENT_INVALID: {exc}")
+            root_package = {}
+            test_package = {}
+            test_tsconfig = {}
+            project_manifest = {}
+
+        if test_package != spec["package"]:
+            errors.append(
+                "ARC4401 TEST_ENVIRONMENT_INVALID: tests/package.json differs from "
+                "the compiler-owned pinned workspace."
+            )
+        if test_tsconfig != spec["tsconfig"]:
+            errors.append(
+                "ARC4401 TEST_ENVIRONMENT_INVALID: tests/tsconfig.json differs from "
+                "the compiler-owned configuration."
+            )
+        for directory in ("unit", "integration", "e2e", "support"):
+            if not (self.tests_root / directory).is_dir():
+                errors.append(
+                    f"ARC4401 TEST_ENVIRONMENT_INVALID: missing tests/{directory}."
+                )
+        for relative, expected in spec["text_files"].items():
+            path = self.tests_root / relative
+            try:
+                actual = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                errors.append(
+                    f"ARC4401 TEST_ENVIRONMENT_INVALID: cannot read tests/{relative}: {exc}"
+                )
+                continue
+            if actual != expected:
+                errors.append(
+                    f"ARC4401 TEST_ENVIRONMENT_INVALID: tests/{relative} differs from "
+                    "the compiler-owned configuration."
+                )
+
+        workspaces = root_package.get("workspaces")
+        if not isinstance(workspaces, list) or "tests" not in workspaces:
+            errors.append(
+                "ARC4401 TEST_ENVIRONMENT_INVALID: root package workspaces must contain tests."
+            )
+        expected_scripts = {
+            "test:typecheck": "npm run typecheck -w @arc/tests",
+            "test:list": (
+                "npm run list:vitest -w @arc/tests && npm run list:e2e -w @arc/tests"
+            ),
+            "test:unit": "npm run test:unit -w @arc/tests",
+            "test:integration": "npm run test:integration -w @arc/tests",
+            "test:e2e": "npm run test:e2e -w @arc/tests",
+        }
+        root_scripts = root_package.get("scripts")
+        if not isinstance(root_scripts, dict) or any(
+            root_scripts.get(name) != command
+            for name, command in expected_scripts.items()
+        ):
+            errors.append(
+                "ARC4401 TEST_ENVIRONMENT_INVALID: root package test scripts are incomplete."
+            )
+        if not (self.output_root / "package-lock.json").is_file() or not (
+            self.output_root / "node_modules"
+        ).is_dir():
+            errors.append(
+                "ARC4401 TEST_ENVIRONMENT_INVALID: the initialized npm workspace is unavailable."
+            )
+        tests_link = self.output_root / "node_modules" / "@arc" / "tests"
+        expected_tests = self.tests_root.resolve()
+        actual_tests = tests_link.resolve()
+        if not tests_link.exists() or actual_tests != expected_tests:
+            errors.append(
+                "ARC4401 TEST_ENVIRONMENT_INVALID: @arc/tests workspace link is invalid."
+            )
+        for package_path in ("vitest", "supertest", "typescript", "@playwright/test"):
+            if not (self.output_root / "node_modules" / package_path).exists():
+                errors.append(
+                    "ARC4401 TEST_ENVIRONMENT_INVALID: preinstalled package is missing: "
+                    f"{package_path}."
+                )
+
+        project_test_environment = project_manifest.get("testEnvironment")
+        if not isinstance(project_test_environment, dict):
+            legacy_manifest_path = (
+                self.output_root / ".arc" / "tests" / "environment_manifest.json"
+            )
+            try:
+                legacy_manifest = _read_json_object(legacy_manifest_path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                legacy_manifest = {}
+            if legacy_manifest.get("status") == TEST_ENVIRONMENT_READY:
+                project_test_environment = {
+                    "status": legacy_manifest.get("status"),
+                    "browserInstalled": legacy_manifest.get("browser_installed", False),
+                    "versions": legacy_manifest.get("versions"),
+                }
+                environment_source = "LEGACY_TEST_ENVIRONMENT_MANIFEST"
+        if not isinstance(project_test_environment, dict) or project_test_environment.get(
+            "status"
+        ) != TEST_ENVIRONMENT_READY:
+            errors.append(
+                "ARC4401 TEST_ENVIRONMENT_INVALID: Project Manifest has no ready test environment."
+            )
+        else:
+            browser_installed = bool(project_test_environment.get("browserInstalled"))
+            if project_test_environment.get("versions") != {
+                "typescript": self.catalog.typescript,
+                "vitest": self.catalog.vitest,
+                "@playwright/test": self.catalog.playwright,
+                "supertest": self.catalog.supertest,
+                "@types/supertest": self.catalog.types_supertest,
+            }:
+                errors.append(
+                    "ARC4401 TEST_ENVIRONMENT_INVALID: Project Manifest test versions differ "
+                    "from the compiler dependency catalog."
+                )
+
+        manifest = {
+            "schema_version": 1,
+            "status": TEST_ENVIRONMENT_READY if not errors else "TEST_ENVIRONMENT_FAILED",
+            "workspace": "tests",
+            "package": "@arc/tests",
+            "frameworks": {
+                "unit": "vitest",
+                "integration": "vitest+supertest",
+                "e2e": "playwright",
+            },
+            "roots": {
+                "unit": "tests/unit",
+                "integration": "tests/integration",
+                "e2e": "tests/e2e",
+                "support": "tests/support",
+            },
+            "validation_commands": [
+                "npm run typecheck -w @arc/tests",
+                "npm run list:vitest -w @arc/tests",
+                "npm run list:e2e -w @arc/tests",
+            ],
+            "execution_commands": {
+                "unit": "npm run test:unit -w @arc/tests",
+                "integration": "npm run test:integration -w @arc/tests",
+                "e2e": "npm run test:e2e -w @arc/tests",
+            },
+            "browser_installed": browser_installed,
+            "provisioned_by": (
+                "PROJECT_INITIALIZATION"
+                if environment_source == "PROJECT_MANIFEST"
+                else "LEGACY_TEST_GENERATION"
+            ),
+            "reused_without_install": True,
+            "validated_from": environment_source,
+            "workspace_occurrences": (
+                workspaces.count("tests") if isinstance(workspaces, list) else 0
+            ),
+            "backend_port": self.backend_port,
+            "frontend_port": 5173,
+            "versions": {
+                "typescript": self.catalog.typescript,
+                "vitest": self.catalog.vitest,
+                "@playwright/test": self.catalog.playwright,
+                "supertest": self.catalog.supertest,
+                "@types/supertest": self.catalog.types_supertest,
+            },
+        }
+        return TestEnvironmentResult(ok=not errors, manifest=manifest, errors=errors)
+
+
+class TestStaticValidator:
+    """Check generated tests without executing their assertions."""
+
+    def __init__(
+        self,
+        output_root: Path,
+        *,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
+        self.output_root = output_root.expanduser().resolve()
+        self.environment = dict(os.environ if environment is None else environment)
+        self._timeout = _bounded_float_env(
+            self.environment,
+            "ARC_TEST_VALIDATION_TIMEOUT_SECONDS",
+            300.0,
+            30.0,
+            900.0,
+        )
+
+    def validate(self, *, has_vitest: bool, has_e2e: bool) -> TestStaticValidationResult:
+        commands: list[list[str]] = [
+            ["npm", "run", "typecheck", "-w", "@arc/tests"],
+        ]
+        if has_vitest:
+            commands.append(["npm", "run", "list:vitest", "-w", "@arc/tests"])
+        if has_e2e:
+            commands.append(["npm", "run", "list:e2e", "-w", "@arc/tests"])
+        errors: list[str] = []
+        for command in commands:
+            executable = shutil.which(command[0], path=self.environment.get("PATH"))
+            if executable is None:
+                errors.append(
+                    f"ARC4431 TEST_STATIC_VALIDATION_FAILED: command unavailable: {command[0]}"
+                )
+                break
+            try:
+                completed = subprocess.run(
+                    [executable, *command[1:]],
+                    cwd=str(self.output_root),
+                    env=self.environment,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=self._timeout,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                errors.append(f"ARC4431 TEST_STATIC_VALIDATION_FAILED: {exc}")
+                break
+            if completed.returncode != 0:
+                errors.append(
+                    "ARC4431 TEST_STATIC_VALIDATION_FAILED: "
+                    f"{command!r} exited with {completed.returncode}: "
+                    f"{_command_output(completed.stdout, completed.stderr)}"
+                )
+                break
+        return TestStaticValidationResult(ok=not errors, errors=errors)
+
+
+class RequirementTestGenerationPass:
+    """Generate and freeze a bounded set of tests for each atomic requirement."""
+
+    def __init__(
+        self,
+        model: StructuredModel,
+        output_root: Path,
+        artifact_store: CompilerArtifactStore,
+    ) -> None:
+        self._model = model
+        self._output_root = output_root.expanduser().resolve()
+        self._artifact_store = artifact_store
+        self._validator = TestStaticValidator(self._output_root)
+        self._retries = _bounded_int_env("ARC_TEST_GENERATION_RETRY_COUNT", 2, 0, 5)
+        self._trace_enabled = _env_flag(os.environ, "ARC_TEST_GENERATION_TRACE", True)
+        self._log = SynchronousLog(
+            "RequirementTestGenerationPass", workspace_root=self._output_root
+        )
+
+    def compile(
+        self,
+        *,
+        requirement_ir: dict[str, Any],
+        dependency_graph: dict[str, Any],
+        database_schema: dict[str, Any],
+        design_ir: dict[str, Any],
+        frontend_ir: dict[str, Any],
+        code_binding_registry: dict[str, Any],
+        environment_manifest: dict[str, Any],
+    ) -> TestGenerationResult:
+        if code_binding_registry.get("status") != CODE_BINDING_READY:
+            return TestGenerationResult(
+                manifest=_empty_test_manifest("TEST_GENERATION_FAILED"),
+                node_states={},
+                errors=["ARC4410 CODE_BINDING_NOT_READY: Test Generation requires CODE_BINDING_READY."],
+            )
+        if environment_manifest.get("status") != TEST_ENVIRONMENT_READY:
+            return TestGenerationResult(
+                manifest=_empty_test_manifest("TEST_GENERATION_FAILED"),
+                node_states={},
+                errors=["ARC4411 TEST_ENVIRONMENT_NOT_READY: Test environment is unavailable."],
+            )
+
+        resolver = CodeTargetResolver(code_binding_registry)
+        nodes = requirement_ir.get("nodes", {})
+        order = _atomic_order(requirement_ir, dependency_graph)
+        states = {requirement_id: "TEST_DISCOVERED" for requirement_id in order}
+        artifacts: dict[str, str] = {}
+        manifest_tests: list[dict[str, Any]] = []
+        manifest_files: list[dict[str, Any]] = []
+        errors: list[str] = []
+
+        for requirement_id in order:
+            node = nodes.get(requirement_id)
+            if not isinstance(node, dict):
+                errors.append(
+                    f"ARC4412 TEST_CONTEXT_INVALID: missing atomic requirement {requirement_id}."
+                )
+                states[requirement_id] = "FAILED"
+                break
+            try:
+                resolved_targets = resolver.resolve_requirement_targets(requirement_id)
+            except KeyError as exc:
+                errors.append(f"ARC4412 TEST_CONTEXT_INVALID: {exc}")
+                states[requirement_id] = "FAILED"
+                break
+            test_obligations = _plan_test_obligations(
+                requirement_id,
+                resolved_targets,
+                design_ir,
+            )
+            required_layers = [
+                layer for layer in TEST_LAYERS if layer in test_obligations
+            ]
+            if not required_layers:
+                errors.append(
+                    f"ARC4413 TEST_LAYER_UNRESOLVED: no public test seam for {requirement_id}."
+                )
+                states[requirement_id] = "FAILED"
+                break
+            context_pack = _build_context_pack(
+                requirement_id=requirement_id,
+                requirement=node,
+                database_schema=database_schema,
+                design_ir=design_ir,
+                frontend_ir=frontend_ir,
+                resolved_targets=resolved_targets,
+                required_layers=required_layers,
+                test_obligations=test_obligations,
+            )
+            artifacts[f"test_context:{requirement_id}"] = (
+                self._artifact_store.write_test_context_pack(requirement_id, context_pack)
+            )
+            decision, sources, validation_errors = self._generate_and_validate(
+                requirement_id,
+                context_pack,
+            )
+            if decision is None:
+                errors.extend(validation_errors)
+                states[requirement_id] = "FAILED"
+                break
+            source_artifacts = self._artifact_store.write_generated_tests(sources)
+            artifacts.update(source_artifacts)
+            test_rows, file_rows = _manifest_rows(
+                requirement_id,
+                node,
+                decision,
+                context_pack,
+            )
+            manifest_tests.extend(test_rows)
+            manifest_files.extend(file_rows)
+            states[requirement_id] = "TESTS_FROZEN"
+
+        has_vitest_files = any(
+            row.get("layer") in {"UNIT", "INTEGRATION"} for row in manifest_files
+        )
+        has_e2e_files = any(row.get("layer") == "E2E" for row in manifest_files)
+        manifest = {
+            "schema_version": TEST_GENERATION_SCHEMA_VERSION,
+            "status": TESTS_FROZEN if not errors else "TEST_GENERATION_FAILED",
+            "environment_status": environment_manifest.get("status"),
+            "code_binding_status": code_binding_registry.get("status"),
+            "requirements": [
+                {
+                    "requirement_id": requirement_id,
+                    "state": states.get(requirement_id, "NOT_GENERATED"),
+                    "test_ids": sorted(
+                        row["test_id"]
+                        for row in manifest_tests
+                        if row["requirement_id"] == requirement_id
+                    ),
+                }
+                for requirement_id in order
+            ],
+            "tests": sorted(manifest_tests, key=lambda row: row["test_id"]),
+            "files": sorted(manifest_files, key=lambda row: row["test_file"]),
+            "freeze_policy": {
+                "tests_are_read_only_during_implementation": True,
+                "integrity": "SHA256",
+            },
+            "validation": {
+                "typecheck": "PASSED" if not errors else "FAILED",
+                "vitest_collection": (
+                    "PASSED" if not errors else "FAILED"
+                ) if has_vitest_files else "NOT_REQUIRED",
+                "playwright_collection": (
+                    "PASSED" if not errors else "FAILED"
+                ) if has_e2e_files else "NOT_REQUIRED",
+                "behavior_executed": False,
+            },
+        }
+        artifacts["test_manifest"] = self._artifact_store.write_test_manifest(manifest)
+        return TestGenerationResult(
+            manifest=manifest,
+            node_states=states,
+            artifacts=artifacts,
+            errors=list(dict.fromkeys(errors)),
+        )
+
+    def _generate_and_validate(
+        self,
+        requirement_id: str,
+        context_pack: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, str], list[str]]:
+        feedback: list[str] = []
+        last_errors: list[str] = []
+        planned_paths = set(context_pack["output_files"].values())
+        for attempt in range(self._retries + 1):
+            payload = copy.deepcopy(context_pack)
+            if feedback:
+                payload["materialization_feedback"] = feedback
+            self._trace(
+                f"MODEL_REQUEST requirement={requirement_id} "
+                f"attempt={attempt + 1}/{self._retries + 1}"
+            )
+            self._trace_json("MODEL_INPUT", requirement_id, payload)
+            started = time.perf_counter()
+            try:
+                decision = self._model.generate_json(
+                    schema_name="arc_requirement_tests",
+                    instructions=TEST_GENERATION_INSTRUCTIONS,
+                    input_payload=payload,
+                    output_schema=TEST_GENERATION_SCHEMA,
+                )
+            except Exception as exc:
+                last_errors = [
+                    f"ARC4421 TEST_MODEL_FAILED: {requirement_id}: {describe_model_error(exc)}"
+                ]
+                feedback = last_errors
+                self._trace("MODEL_ERROR " + "; ".join(last_errors))
+                continue
+            self._trace_json(
+                "MODEL_OUTPUT",
+                requirement_id,
+                decision,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+            )
+            local_errors = _validate_test_decision(decision, context_pack)
+            if local_errors:
+                last_errors = local_errors
+                feedback = local_errors
+                self._trace("MODEL_REJECTED " + "; ".join(local_errors))
+                continue
+            sources = _decision_sources(decision, context_pack)
+            self._remove_requirement_files(planned_paths)
+            self._artifact_store.write_generated_tests(sources)
+            all_test_files = list((self._output_root / "tests").glob("**/*.spec.ts"))
+            has_vitest = any(
+                path.parent.name in {"unit", "integration"} for path in all_test_files
+            )
+            has_e2e = any(path.parent.name == "e2e" for path in all_test_files)
+            static_result = self._validator.validate(
+                has_vitest=has_vitest,
+                has_e2e=has_e2e,
+            )
+            if static_result.ok:
+                self._trace(
+                    f"TESTS_ACCEPTED requirement={requirement_id} attempt={attempt + 1}"
+                )
+                return decision, sources, []
+            last_errors = static_result.errors
+            feedback = [
+                "Only repair TypeScript syntax, imports, symbols, or test collection. "
+                "Do not change expected behavior or weaken assertions.",
+                *static_result.errors,
+            ]
+            self._trace("STATIC_VALIDATION_REJECTED " + "; ".join(static_result.errors))
+        self._remove_requirement_files(planned_paths)
+        return None, {}, last_errors
+
+    def _remove_requirement_files(self, paths: set[str]) -> None:
+        for relative in paths:
+            target = (self._output_root / relative).resolve()
+            if self._output_root in target.parents and target.is_file():
+                target.unlink()
+
+    def _trace(self, message: str) -> None:
+        if self._trace_enabled:
+            self._log.info(message)
+
+    def _trace_json(
+        self,
+        marker: str,
+        requirement_id: str,
+        payload: Any,
+        duration_ms: int | None = None,
+    ) -> None:
+        suffix = f" duration_ms={duration_ms}" if duration_ms is not None else ""
+        self._trace(
+            f"{marker} requirement={requirement_id}{suffix}\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+        )
+
+
+def _build_context_pack(
+    *,
+    requirement_id: str,
+    requirement: dict[str, Any],
+    database_schema: dict[str, Any],
+    design_ir: dict[str, Any],
+    frontend_ir: dict[str, Any],
+    resolved_targets: dict[str, Any],
+    required_layers: list[str],
+    test_obligations: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    contracts = {
+        str(item.get("id", "")): copy.deepcopy(item.get("contract", {}))
+        for item in design_ir.get("requirements", [])
+        if isinstance(item, dict)
+    }
+    target_rows = [
+        copy.deepcopy(row)
+        for row in [
+            *resolved_targets.get("owned_targets", []),
+            *resolved_targets.get("dependency_targets", []),
+        ]
+        if isinstance(row, dict)
+    ]
+    target_ids = {str(row.get("source_ir_id", row.get("module_id", ""))) for row in target_rows}
+    backend_modules = [
+        copy.deepcopy(module)
+        for module in design_ir.get("modules", [])
+        if isinstance(module, dict) and str(module.get("id", "")) in target_ids
+    ]
+    frontend_modules = {
+        table: [
+            copy.deepcopy(item)
+            for item in frontend_ir.get(table, [])
+            if isinstance(item, dict) and str(item.get("id", "")) in target_ids
+        ]
+        for table in ("layouts", "pages", "components", "stores")
+    }
+    output_files = {
+        layer: _test_file(requirement_id, layer)
+        for layer in required_layers
+    }
+    public_seams: dict[str, Any] = {}
+    allowed_imports: dict[str, list[dict[str, Any]]] = {}
+    for layer in required_layers:
+        test_file = output_files[layer]
+        cards = _layer_source_cards(layer, target_rows, test_file)
+        public_seams[layer] = cards
+        imports = [
+            {
+                "specifier": "vitest" if layer != "E2E" else "@playwright/test",
+                "symbols": ["describe", "expect", "test"]
+                if layer != "E2E"
+                else ["expect", "test"],
+            }
+        ]
+        imports.append(
+            {
+                "specifier": _relative_import(test_file, "tests/support/runtime.ts"),
+                "symbols": ["uniqueValue"],
+            }
+        )
+        if layer == "INTEGRATION":
+            imports.extend(
+                [
+                    {"specifier": "supertest", "symbols": ["default"]},
+                    {
+                        "specifier": _relative_import(test_file, "backend/src/app.ts"),
+                        "symbols": ["app"],
+                    },
+                ]
+            )
+        if layer == "UNIT":
+            imports.extend(
+                {
+                    "specifier": card["import_specifier"],
+                    "symbols": [card["symbol"]],
+                }
+                for card in cards
+                if card.get("kind") == "FUNC"
+            )
+            shared_types = sorted(
+                {
+                    str(reference.get("symbol", ""))
+                    for card in cards
+                    for reference in (card.get("input_type"), card.get("output_type"))
+                    if isinstance(reference, dict) and reference.get("symbol")
+                }
+            )
+            if shared_types:
+                imports.append({"specifier": "@arc/shared", "symbols": shared_types})
+        allowed_imports[layer] = imports
+
+    return {
+        "schema_version": 1,
+        "requirement_id": requirement_id,
+        "requirement": {
+            key: copy.deepcopy(requirement.get(key))
+            for key in ("id", "name", "description", "scenarios", "dependencies")
+        },
+        "requirement_contract": contracts.get(requirement_id, {}),
+        "database_schema": schema_for_requirement(database_schema, requirement_id),
+        "backend_modules": backend_modules,
+        "frontend_modules": frontend_modules,
+        "code_targets": {
+            "owned": copy.deepcopy(resolved_targets.get("owned_targets", [])),
+            "dependencies": copy.deepcopy(resolved_targets.get("dependency_targets", [])),
+        },
+        "type_targets": copy.deepcopy(resolved_targets.get("type_targets", [])),
+        "public_seams": public_seams,
+        "required_layers": required_layers,
+        "allowed_layers": required_layers,
+        "test_obligations": copy.deepcopy(test_obligations),
+        "output_files": output_files,
+        "allowed_imports": allowed_imports,
+        "target_modules": sorted(
+            {
+                str(row.get("module_id", ""))
+                for row in target_rows
+                if str(row.get("module_id", ""))
+            }
+        ),
+        "generation_policy": {
+            "preferred_test_count": "1-3",
+            "layer_selection": "REQUIRED_BY_PUBLIC_SEAMS",
+            "scenario_coverage_required": True,
+            "behavior_source": "REQUIREMENT",
+            "invocation_source": "CODE_BINDING_REGISTRY",
+            "implementation_body_available": False,
+            "tests_expected_green": False,
+        },
+    }
+
+
+def _plan_test_obligations(
+    requirement_id: str,
+    resolved_targets: dict[str, Any],
+    design_ir: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    targets = [
+        row
+        for row in [
+            *resolved_targets.get("owned_targets", []),
+            *resolved_targets.get("dependency_targets", []),
+        ]
+        if isinstance(row, dict)
+    ]
+    owned = [
+        row for row in resolved_targets.get("owned_targets", []) if isinstance(row, dict)
+    ]
+    kinds = {str(row.get("kind", "")) for row in owned}
+    module_index = {
+        str(row.get("id", "")): row
+        for row in design_ir.get("modules", [])
+        if isinstance(row, dict)
+    }
+    obligations: dict[str, dict[str, Any]] = {}
+    ui_modules = sorted(
+        str(row.get("module_id", ""))
+        for row in owned
+        if row.get("kind") in {"PAGE", "COMPONENT", "LAYOUT"}
+        and str(row.get("module_id", ""))
+    )
+    if ui_modules:
+        obligations["E2E"] = {
+            "reason": "requirement owns a browser-observable Page/Component/Layout path",
+            "target_modules": ui_modules,
+        }
+
+    api_ids = [str(row.get("source_ir_id", "")) for row in owned if row.get("kind") == "API"]
+    db_ids = [str(row.get("source_ir_id", "")) for row in targets if row.get("kind") == "DB"]
+    write_operation = any(
+        str(effect.get("operation", "")).upper() in {"CREATE", "UPDATE", "DELETE", "WRITE"}
+        for module_id in {*api_ids, *db_ids}
+        for effect in module_index.get(module_id, {}).get("effects", [])
+        if isinstance(effect, dict)
+    )
+    if api_ids and (db_ids or write_operation):
+        obligations["INTEGRATION"] = {
+            "reason": "requirement owns an HTTP API connected to database or persistent effects",
+            "target_modules": sorted(
+                str(row.get("module_id", ""))
+                for row in owned
+                if row.get("kind") == "API" and str(row.get("module_id", ""))
+            ),
+        }
+
+    func_modules = [
+        module_index.get(str(row.get("source_ir_id", "")), {})
+        for row in owned
+        if row.get("kind") == "FUNC"
+    ]
+    rule_pattern = re.compile(
+        r"(?:\b(?:validat|normaliz|calculat|authoriz|decision|rule|ensure|check|derive)\w*|"
+        r"校验|验证|规范|计算|授权|决策|规则|检查|推导)",
+        re.IGNORECASE,
+    )
+    rule_func_ids = sorted(
+        str(module.get("id", ""))
+        for module in func_modules
+        if str(module.get("id", ""))
+        and rule_pattern.search(
+            " ".join(str(module.get(key, "")) for key in ("id", "name", "spec"))
+        )
+    )
+    if rule_func_ids:
+        obligations["UNIT"] = {
+            "reason": "requirement owns independently testable business-rule FUNC modules",
+            "target_modules": rule_func_ids,
+        }
+
+    if not obligations:
+        if "API" in kinds:
+            obligations["INTEGRATION"] = {
+                "reason": "API is the narrowest available public seam",
+                "target_modules": sorted(
+                    str(row.get("module_id", ""))
+                    for row in owned
+                    if row.get("kind") == "API" and str(row.get("module_id", ""))
+                ),
+            }
+        elif "FUNC" in kinds:
+            obligations["UNIT"] = {
+                "reason": "FUNC is the narrowest available public seam",
+                "target_modules": sorted(
+                    str(row.get("module_id", ""))
+                    for row in owned
+                    if row.get("kind") == "FUNC" and str(row.get("module_id", ""))
+                ),
+            }
+        elif kinds & {"PAGE", "COMPONENT", "LAYOUT"}:
+            obligations["E2E"] = {
+                "reason": "browser UI is the available public seam",
+                "target_modules": ui_modules,
+            }
+    return {
+        layer: obligations[layer]
+        for layer in TEST_LAYERS
+        if layer in obligations
+    }
+
+
+def _validate_test_decision(
+    decision: Any,
+    context_pack: dict[str, Any],
+) -> list[str]:
+    requirement_id = str(context_pack["requirement_id"])
+    if not isinstance(decision, dict) or set(decision) != {"files"}:
+        return [f"ARC4422 TEST_OUTPUT_INVALID: {requirement_id} must return only files."]
+    files = decision.get("files")
+    if not isinstance(files, list):
+        return [f"ARC4422 TEST_OUTPUT_INVALID: {requirement_id} files must be a list."]
+    allowed_layers = set(context_pack["allowed_layers"])
+    required_layers = set(context_pack["required_layers"])
+    actual_layers: list[str] = []
+    scenario_rows = context_pack["requirement"].get("scenarios", [])
+    scenario_ids = {
+        str(row.get("id") or row.get("scenario_id"))
+        for row in scenario_rows
+        if isinstance(row, dict)
+    }
+    covered_scenarios: set[str] = set()
+    target_modules = set(context_pack["target_modules"])
+    owned_modules = {
+        str(row.get("module_id", ""))
+        for row in context_pack["code_targets"].get("owned", [])
+        if isinstance(row, dict)
+    }
+    target_kinds = {
+        str(row.get("module_id", "")): str(row.get("kind", ""))
+        for rows in context_pack["code_targets"].values()
+        for row in rows
+        if isinstance(row, dict)
+    }
+    seam_kinds = {
+        "UNIT": {"FUNC"},
+        "INTEGRATION": {"API"},
+        "E2E": {"PAGE", "COMPONENT", "LAYOUT"},
+    }
+    obligation_targets = {
+        layer: {
+            str(value)
+            for value in obligation.get("target_modules", [])
+            if str(value)
+        }
+        for layer, obligation in context_pack.get("test_obligations", {}).items()
+        if isinstance(obligation, dict)
+    }
+    errors: list[str] = []
+    case_count = 0
+    for file_row in files:
+        if not isinstance(file_row, dict) or set(file_row) != {"layer", "cases", "code"}:
+            errors.append(
+                f"ARC4422 TEST_OUTPUT_INVALID: {requirement_id} has a malformed file row."
+            )
+            continue
+        layer = str(file_row.get("layer", "")).upper()
+        actual_layers.append(layer)
+        if layer not in allowed_layers:
+            errors.append(
+                f"ARC4423 TEST_LAYER_INVALID: {requirement_id} cannot generate {layer}."
+            )
+            continue
+        cases = file_row.get("cases")
+        code = file_row.get("code")
+        if not isinstance(cases, list) or not cases or not isinstance(code, str) or not code.strip():
+            errors.append(
+                f"ARC4422 TEST_OUTPUT_INVALID: {requirement_id} {layer} needs cases and code."
+            )
+            continue
+        case_count += len(cases)
+        for case in cases:
+            if not isinstance(case, dict):
+                errors.append(
+                    f"ARC4422 TEST_OUTPUT_INVALID: {requirement_id} {layer} case must be an object."
+                )
+                continue
+            title = str(case.get("title", "")).strip()
+            sources = {str(value) for value in case.get("source_scenario_ids", [])}
+            targets = {str(value) for value in case.get("target_modules", [])}
+            if not title or title not in code:
+                errors.append(
+                    f"ARC4422 TEST_OUTPUT_INVALID: {requirement_id} {layer} title is absent from code: {title!r}."
+                )
+            if sources - scenario_ids:
+                errors.append(
+                    f"ARC4424 TEST_SCENARIO_INVALID: unknown scenarios {sorted(sources - scenario_ids)}."
+                )
+            if scenario_ids and not sources:
+                errors.append(
+                    f"ARC4424 TEST_SCENARIO_INVALID: {title!r} has no source scenario."
+                )
+            covered_scenarios.update(sources)
+            if not targets or targets - target_modules:
+                errors.append(
+                    f"ARC4425 TEST_TARGET_INVALID: {title!r} targets unavailable modules "
+                    f"{sorted(targets - target_modules)}."
+                )
+            elif not (targets & owned_modules):
+                errors.append(
+                    f"ARC4425 TEST_TARGET_INVALID: {title!r} has no requirement-owned target."
+                )
+            elif not any(target_kinds.get(target) in seam_kinds[layer] for target in targets):
+                errors.append(
+                    f"ARC4425 TEST_TARGET_INVALID: {title!r} does not target a {layer} public seam."
+                )
+            elif not (targets & obligation_targets.get(layer, set())):
+                errors.append(
+                    f"ARC4425 TEST_TARGET_INVALID: {title!r} does not target the required "
+                    f"{layer} obligation {sorted(obligation_targets.get(layer, set()))}."
+                )
+        errors.extend(_validate_test_code(layer, code, context_pack))
+
+    if len(actual_layers) != len(set(actual_layers)):
+        errors.append(
+            f"ARC4423 TEST_LAYER_INVALID: {requirement_id} generated duplicate layers "
+            f"{actual_layers}."
+        )
+    if set(actual_layers) != required_layers:
+        errors.append(
+            f"ARC4423 TEST_LAYER_INVALID: {requirement_id} requires one file for "
+            f"{sorted(required_layers)}, received {actual_layers}."
+        )
+    if scenario_ids - covered_scenarios:
+        errors.append(
+            f"ARC4424 TEST_SCENARIO_INVALID: uncovered scenarios "
+            f"{sorted(scenario_ids - covered_scenarios)}."
+        )
+    maximum_cases = max(3, min(6, len(scenario_ids) or 1))
+    if case_count < 1 or case_count > maximum_cases:
+        errors.append(
+            f"ARC4422 TEST_OUTPUT_INVALID: {requirement_id} generated {case_count} cases; "
+            f"allowed 1..{maximum_cases}."
+        )
+    return list(dict.fromkeys(errors))
+
+
+def _validate_test_code(
+    layer: str,
+    code: str,
+    context_pack: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    if "```" in code:
+        errors.append(f"ARC4426 TEST_CODE_INVALID: {layer} contains markdown fences.")
+    if re.search(r"\b(?:test|it|describe)\.(?:only|skip)\b", code):
+        errors.append(f"ARC4426 TEST_CODE_INVALID: {layer} contains focused or skipped tests.")
+    if not re.search(r"\b(?:test|it)\s*\(", code):
+        errors.append(f"ARC4426 TEST_CODE_INVALID: {layer} contains no executable test declaration.")
+    allowed = {
+        str(row.get("specifier", ""))
+        for row in context_pack["allowed_imports"].get(layer, [])
+        if isinstance(row, dict)
+    }
+    imports = re.findall(r"\bfrom\s+[\"']([^\"']+)[\"']", code)
+    imports.extend(
+        re.findall(r"\bimport\s+(?:type\s+)?[\"']([^\"']+)[\"']", code)
+    )
+    imports.extend(
+        re.findall(
+            r"\b(?:import|require)\s*\(\s*[\"']([^\"']+)[\"']\s*\)",
+            code,
+        )
+    )
+    invalid = sorted(
+        specifier
+        for specifier in imports
+        if specifier not in allowed
+    )
+    if invalid:
+        errors.append(
+            f"ARC4427 TEST_IMPORT_INVALID: {layer} imports unavailable specifiers {invalid}."
+        )
+    required_package = "@playwright/test" if layer == "E2E" else "vitest"
+    if required_package not in imports:
+        errors.append(
+            f"ARC4427 TEST_IMPORT_INVALID: {layer} must import {required_package}."
+        )
+    if layer == "INTEGRATION" and (
+        "supertest" not in imports
+        or _relative_import(context_pack["output_files"][layer], "backend/src/app.ts")
+        not in imports
+    ):
+        errors.append(
+            "ARC4427 TEST_IMPORT_INVALID: INTEGRATION must use Supertest and the exported app."
+        )
+    return errors
+
+
+def _decision_sources(
+    decision: dict[str, Any], context_pack: dict[str, Any]
+) -> dict[str, str]:
+    return {
+        str(context_pack["output_files"][str(row["layer"]).upper()]):
+        str(row["code"]).rstrip() + "\n"
+        for row in decision.get("files", [])
+        if isinstance(row, dict)
+    }
+
+
+def _manifest_rows(
+    requirement_id: str,
+    requirement: dict[str, Any],
+    decision: dict[str, Any],
+    context_pack: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    scenarios = {
+        str(row.get("id") or row.get("scenario_id")): row
+        for row in requirement.get("scenarios", [])
+        if isinstance(row, dict)
+    }
+    binding_by_id = {
+        str(row.get("module_id", "")): row
+        for rows in context_pack["code_targets"].values()
+        for row in rows
+        if isinstance(row, dict)
+    }
+    test_rows: list[dict[str, Any]] = []
+    file_rows: list[dict[str, Any]] = []
+    counters = {layer: 0 for layer in TEST_LAYERS}
+    prefixes = {"UNIT": "U", "INTEGRATION": "I", "E2E": "E"}
+    for file_row in decision.get("files", []):
+        layer = str(file_row["layer"]).upper()
+        test_file = str(context_pack["output_files"][layer])
+        file_test_ids: list[str] = []
+        for case in file_row.get("cases", []):
+            counters[layer] += 1
+            test_id = f"{requirement_id}-{prefixes[layer]}{counters[layer]:02d}"
+            file_test_ids.append(test_id)
+            source_ids = [str(value) for value in case.get("source_scenario_ids", [])]
+            targets = [str(value) for value in case.get("target_modules", [])]
+            test_rows.append(
+                {
+                    "test_id": test_id,
+                    "requirement_id": requirement_id,
+                    "title": str(case.get("title", "")),
+                    "source_scenario_ids": source_ids,
+                    "source_scenarios": [
+                        str(scenarios.get(value, {}).get("name", value)) for value in source_ids
+                    ],
+                    "layer": layer,
+                    "target_modules": targets,
+                    "target_files": sorted(
+                        {
+                            str(binding_by_id[target].get("file", ""))
+                            for target in targets
+                            if target in binding_by_id
+                        }
+                    ),
+                    "test_file": test_file,
+                }
+            )
+        file_rows.append(
+            {
+                "test_file": test_file,
+                "requirement_id": requirement_id,
+                "layer": layer,
+                "test_ids": file_test_ids,
+                "content_sha256": hashlib.sha256(
+                    (str(file_row.get("code", "")).rstrip() + "\n").encode("utf-8")
+                ).hexdigest(),
+                "status": "FROZEN",
+            }
+        )
+    return test_rows, file_rows
+
+
+def _layer_source_cards(
+    layer: str,
+    targets: list[dict[str, Any]],
+    test_file: str,
+) -> list[dict[str, Any]]:
+    allowed_kinds = {
+        "UNIT": {"FUNC"},
+        "INTEGRATION": {"API", "FUNC", "DB"},
+        "E2E": {"PAGE", "COMPONENT", "LAYOUT", "API", "API_CLIENT"},
+    }[layer]
+    rows: list[dict[str, Any]] = []
+    for target in targets:
+        if str(target.get("kind", "")) not in allowed_kinds:
+            continue
+        row = {
+            key: copy.deepcopy(target.get(key))
+            for key in (
+                "module_id",
+                "source_ir_id",
+                "kind",
+                "file",
+                "symbol",
+                "public_signature",
+                "input_type",
+                "output_type",
+                "props_type",
+                "route",
+                "callees",
+                "editable",
+            )
+        }
+        row["import_specifier"] = _relative_import(test_file, str(target.get("file", "")))
+        rows.append(row)
+    return sorted(rows, key=lambda row: str(row.get("module_id", "")))
+
+
+def _test_file(requirement_id: str, layer: str) -> str:
+    stem = re.sub(r"[^a-z0-9]+", "-", requirement_id.lower()).strip("-") or "requirement"
+    digest = hashlib.sha256(requirement_id.encode("utf-8")).hexdigest()[:8]
+    return f"tests/{layer.lower()}/{stem}-{digest}.spec.ts"
+
+
+def _relative_import(test_file: str, source_file: str) -> str:
+    relative = posixpath.relpath(source_file, posixpath.dirname(test_file))
+    if not relative.startswith("."):
+        relative = f"./{relative}"
+    return re.sub(r"\.(?:ts|tsx)$", ".js", relative)
+
+
+def _atomic_order(
+    requirement_ir: dict[str, Any], dependency_graph: dict[str, Any]
+) -> list[str]:
+    atomic_ids = {
+        str(value) for value in requirement_ir.get("atomic_units", []) if str(value)
+    }
+    result: list[str] = []
+    for wave in dependency_graph.get("atomic_implementation_waves", []):
+        if not isinstance(wave, list):
+            continue
+        result.extend(
+            value
+            for value in sorted({str(item) for item in wave})
+            if value in atomic_ids and value not in result
+        )
+    result.extend(sorted(atomic_ids - set(result)))
+    return result
+
+
+def _empty_test_manifest(status: str) -> dict[str, Any]:
+    return {
+        "schema_version": TEST_GENERATION_SCHEMA_VERSION,
+        "status": status,
+        "requirements": [],
+        "tests": [],
+        "files": [],
+        "freeze_policy": {
+            "tests_are_read_only_during_implementation": True,
+            "integrity": "SHA256",
+        },
+    }
+
+
+def _command_output(stdout: str | None, stderr: str | None) -> str:
+    value = "\n".join(part.strip() for part in (stdout or "", stderr or "") if part.strip())
+    return value[-6000:] if value else "no command output"
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"JSON file must contain an object: {path}")
+    return payload
+
+
+def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(int(os.environ.get(name, str(default))), maximum))
+    except ValueError:
+        return default
+
+
+def _bounded_float_env(
+    environment: Mapping[str, str],
+    name: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    try:
+        return max(minimum, min(float(environment.get(name, str(default))), maximum))
+    except ValueError:
+        return default
+
+
+def _env_flag(environment: Mapping[str, str], name: str, default: bool) -> bool:
+    value = environment.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+__all__ = [
+    "RequirementTestGenerationPass",
+    "TESTS_FROZEN",
+    "TEST_ENVIRONMENT_READY",
+    "TestEnvironmentInitializer",
+    "TestEnvironmentResult",
+    "TestGenerationResult",
+    "TestStaticValidator",
+]

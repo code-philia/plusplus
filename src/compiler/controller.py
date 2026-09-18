@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import inspect
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from arcbench_agent_runtime.runtime import AgentRuntime
 
 from .artifacts import CompilerArtifactStore
 from .backend_lowering import BackendGlueLowerer
-from .code_binding import CodeBindingLowerer
+from .code_binding import CodeBindingLowerer, validate_code_binding_registry
 from .database_stage import (
     DatabasePassResult,
     DatabaseSchemaPass,
@@ -40,6 +40,7 @@ from .project_build import ProjectBuilder
 from .project_initialization import ProjectInitializer
 from .skeleton_lowering import DatabaseSchemaLowerer, TypeLowerer
 from .symbol_planning import GlobalSymbolPlanner
+from .test_generation import RequirementTestGenerationPass, TestEnvironmentInitializer
 from .visual_reference import VisualReferenceAnalyzer, VisualReferenceResolver
 
 
@@ -68,6 +69,7 @@ class Compiler:
             "FRONTEND": 3,
             "PROJECT": 4,
             "SKELETON": 5,
+            "TESTS": 6,
         }
         start_from = str(request.start_from or "PREPROCESSING").strip().upper()
         if start_from not in stage_order:
@@ -529,8 +531,61 @@ class Compiler:
         assert project_manifest is not None
         await self._log(
             "Compiler",
-            "Project workspace initialized; Skeleton lowering may consume the frozen project manifest.",
+            (
+                "Project workspace and manifest validated for Test Generation."
+                if start_from == "TESTS"
+                else "Project workspace initialized; Skeleton lowering may consume the frozen project manifest."
+            ),
         )
+
+        if start_from == "TESTS":
+            await self._log(
+                "Compiler",
+                "START_PROBE stage=TESTS upstream=CODE_BINDING "
+                "source=.arc/code/code_bindings.json status=VALIDATING",
+            )
+            reusable_bindings, read_error = artifact_store.read_code_bindings()
+            binding_errors = (
+                [f"ARC4308: Cannot reuse Code Binding Registry: {read_error}"]
+                if read_error
+                else validate_code_binding_registry(
+                    reusable_bindings or {},
+                    output_root=request.output_dir,
+                    expected_requirement_ids=set(requirement_ids),
+                )
+            )
+            if binding_errors:
+                for error in binding_errors:
+                    await self._log("Compiler", error, "error")
+                return CompilationResult(
+                    ok=False,
+                    root_id=root_id,
+                    states=states,
+                    failed_nodes=atomic_ids,
+                    artifacts=artifacts,
+                )
+            artifacts["code_bindings"] = str(
+                artifact_store.code_root / "code_bindings.json"
+            )
+            await self._log(
+                "Compiler",
+                "START_PROBE stage=TESTS upstream=CODE_BINDING "
+                "source=.arc/code/code_bindings.json status=VALIDATED",
+            )
+            return await self._generate_tests(
+                request=request,
+                artifact_store=artifact_store,
+                requirement_ir=preprocessing.requirement_ir,
+                dependency_graph=preprocessing.dependency_graph,
+                database_schema=database.schema,
+                design_ir=design.design_ir,
+                frontend_ir=frontend_design_ir,
+                code_binding_registry=reusable_bindings or {},
+                model=model,
+                root_id=root_id,
+                states=states,
+                artifacts=artifacts,
+            )
 
         # ===================================================================
         #                  Skeleton Stage 3.1: Symbol Planning
@@ -924,6 +979,7 @@ class Compiler:
         code_bindings = CodeBindingLowerer().lower(
             output_root=request.output_dir,
             requirement_ir=preprocessing.requirement_ir,
+            dependency_graph=preprocessing.dependency_graph,
             database_schema=database.schema,
             design_ir=design.design_ir,
             frontend_ir=frontend_design_ir,
@@ -957,10 +1013,121 @@ class Compiler:
             "CODE_BINDING_READY: Design IR, TypeScript types, and real source targets are linked.",
         )
 
+        return await self._generate_tests(
+            request=request,
+            artifact_store=artifact_store,
+            requirement_ir=preprocessing.requirement_ir,
+            dependency_graph=preprocessing.dependency_graph,
+            database_schema=database.schema,
+            design_ir=design.design_ir,
+            frontend_ir=frontend_design_ir,
+            code_binding_registry=code_bindings.registry,
+            model=model,
+            root_id=root_id,
+            states=states,
+            artifacts=artifacts,
+        )
+
+    async def _generate_tests(
+        self,
+        *,
+        request: CompilationRequest,
+        artifact_store: CompilerArtifactStore,
+        requirement_ir: dict[str, Any],
+        dependency_graph: dict[str, Any],
+        database_schema: dict[str, Any],
+        design_ir: dict[str, Any],
+        frontend_ir: dict[str, Any],
+        code_binding_registry: dict[str, Any],
+        model: StructuredModel | None,
+        root_id: str | None,
+        states: dict[str, str],
+        artifacts: dict[str, str],
+    ) -> CompilationResult:
+        # ===================================================================
+        #               Stage 4.1: Global Test Environment
+        # ===================================================================
+
         await self._log(
             "Compiler",
-            "DUAL_DESIGN_FROZEN; Backend and Frontend Skeleton Manifests generated; "
-            "project build passed; CODE_BINDING_READY.",
+            "Validating the compiler-owned Vitest, Supertest, and Playwright environment from Project Initialization.",
+        )
+        test_environment = TestEnvironmentInitializer(
+            request.output_dir,
+            backend_port=request.web_port,
+        ).initialize()
+        artifacts["test_environment_manifest"] = (
+            artifact_store.write_test_environment_manifest(test_environment.manifest)
+        )
+        for error in test_environment.errors:
+            await self._log("Compiler", error, "error")
+        if not test_environment.ok:
+            await self._log("Compiler", "TEST_ENVIRONMENT initialization failed.", "error")
+            return CompilationResult(
+                ok=False,
+                root_id=root_id,
+                states=states,
+                artifacts=artifacts,
+            )
+        await self._log(
+            "Compiler",
+            "TEST_ENVIRONMENT_READY: the preinstalled test workspace was reused without npm installation.",
+        )
+
+        # ===================================================================
+        #          Stage 4.2: Requirement-by-Requirement Test Generation
+        # ===================================================================
+
+        try:
+            model = model or Model.from_env()
+        except ModelConfigurationError as exc:
+            await self._log("Compiler", str(exc), "error")
+            return CompilationResult(
+                ok=False,
+                root_id=root_id,
+                states=states,
+                artifacts=artifacts,
+            )
+        await self._log(
+            "Compiler",
+            "Generating bounded UNIT, INTEGRATION, and E2E tests per atomic requirement.",
+        )
+        test_generation = RequirementTestGenerationPass(
+            model,
+            request.output_dir,
+            artifact_store,
+        ).compile(
+            requirement_ir=requirement_ir,
+            dependency_graph=dependency_graph,
+            database_schema=database_schema,
+            design_ir=design_ir,
+            frontend_ir=frontend_ir,
+            code_binding_registry=code_binding_registry,
+            environment_manifest=test_environment.manifest,
+        )
+        states.update(test_generation.node_states)
+        artifacts.update(test_generation.artifacts)
+        for error in test_generation.errors:
+            await self._log("Compiler", error, "error")
+        if not test_generation.ok:
+            await self._log("Compiler", "TEST_GENERATION pass failed.", "error")
+            return CompilationResult(
+                ok=False,
+                root_id=root_id,
+                states=states,
+                failed_nodes=sorted(
+                    node_id for node_id, state in states.items() if state == "FAILED"
+                ),
+                artifacts=artifacts,
+            )
+        self._runtime.traceability.merge_test_links(test_generation.manifest)
+        await self._log(
+            "Compiler",
+            "TESTS_FROZEN: generated tests typecheck and are discoverable without executing assertions.",
+        )
+        await self._log(
+            "Compiler",
+            "Validated lowering and Code Binding Registry; TESTS_FROZEN.",
         )
         return CompilationResult(
             ok=True,
