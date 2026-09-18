@@ -1610,7 +1610,10 @@ def _ordered_waves(atomic_ids: Any, dependency_graph: dict[str, Any]) -> list[li
     declared = {str(item) for item in atomic_ids if str(item)} if isinstance(atomic_ids, list) else set()
     result: list[list[str]] = []
     seen: set[str] = set()
-    for raw_wave in dependency_graph.get("implementation_waves", []):
+    raw_waves = dependency_graph.get("atomic_implementation_waves")
+    if not isinstance(raw_waves, list) or not raw_waves:
+        raw_waves = dependency_graph.get("implementation_waves", [])
+    for raw_wave in raw_waves:
         if not isinstance(raw_wave, list):
             continue
         wave = sorted(({str(item) for item in raw_wave} & declared) - seen)

@@ -62,7 +62,16 @@ class RequirementPreprocessor:
         atomic_ids = sorted(node_id for node_id, node in nodes.items() if node["type"] == "ATOMIC")
         folder_ids = sorted(node_id for node_id, node in nodes.items() if node["type"] == "FOLDER")
         effective_dependencies = self._effective_atomic_dependencies(nodes, atomic_ids, errors)
-        waves = self._topological_waves(atomic_ids, effective_dependencies, errors)
+        requirement_ids = sorted(nodes)
+        requirement_dependencies = self._effective_requirement_dependencies(nodes)
+        waves = self._topological_waves(requirement_ids, requirement_dependencies, errors)
+        atomic_wave_errors: list[str] = []
+        atomic_waves = self._topological_waves(
+            atomic_ids,
+            effective_dependencies,
+            atomic_wave_errors,
+        )
+        errors.extend(error for error in atomic_wave_errors if error not in errors)
 
         requirement_ir = {
             "schema_version": 1,
@@ -83,8 +92,10 @@ class RequirementPreprocessor:
                 node_id: sorted(node["dependencies"])
                 for node_id, node in sorted(nodes.items())
             },
+            "requirement_dependencies": dict(sorted(requirement_dependencies.items())),
             "atomic_dependencies": dict(sorted(effective_dependencies.items())),
             "implementation_waves": waves,
+            "atomic_implementation_waves": atomic_waves,
         }
         if not root_id:
             errors.append(_format_error("ARC1003", "Requirement root id is missing.", source=str(source_path)))
@@ -270,12 +281,40 @@ class RequirementPreprocessor:
         return graph
 
     @staticmethod
+    def _effective_requirement_dependencies(
+        nodes: dict[str, dict[str, Any]],
+    ) -> dict[str, list[str]]:
+        """Build one bottom-up DAG containing both folder and atomic nodes.
+
+        Folder nodes depend on their direct children so detailed leaf design is
+        available before aggregate UI planning. Every node also inherits the
+        explicit dependencies declared by its ancestors. Backend-only passes
+        continue to consume ``atomic_dependencies`` and skip folder nodes.
+        """
+
+        graph: dict[str, list[str]] = {}
+        for node_id, node in sorted(nodes.items()):
+            references = set(node["dependencies"])
+            parent_id = node.get("parent_id")
+            while isinstance(parent_id, str) and parent_id:
+                parent = nodes.get(parent_id)
+                if parent is None:
+                    break
+                references.update(parent["dependencies"])
+                parent_id = parent.get("parent_id")
+            if node["type"] == "FOLDER":
+                references.update(node["children_ids"])
+            references.discard(node_id)
+            graph[node_id] = sorted(reference for reference in references if reference in nodes)
+        return graph
+
+    @staticmethod
     def _topological_waves(
-        atomic_ids: list[str],
+        requirement_ids: list[str],
         dependencies: dict[str, list[str]],
         errors: list[str],
     ) -> list[list[str]]:
-        remaining = set(atomic_ids)
+        remaining = set(requirement_ids)
         completed: set[str] = set()
         waves: list[list[str]] = []
         while remaining:

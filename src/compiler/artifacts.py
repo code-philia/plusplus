@@ -53,6 +53,7 @@ class CompilerArtifactStore:
         if not requirements:
             requirements = [copy.deepcopy(value) for _, value in sorted(nodes.items()) if isinstance(value, dict)]
         atomic_dependencies = dependency_graph.get("atomic_dependencies", {})
+        requirement_dependencies = dependency_graph.get("requirement_dependencies", {})
         wave_by_requirement = {
             str(requirement_id): wave_index
             for wave_index, wave in enumerate(dependency_graph.get("implementation_waves", []), start=1)
@@ -66,6 +67,10 @@ class CompilerArtifactStore:
             }
             if requirement_id in atomic_dependencies:
                 item["effective_atomic_dependencies"] = list(atomic_dependencies[requirement_id])
+            if requirement_id in requirement_dependencies:
+                item["effective_requirement_dependencies"] = list(
+                    requirement_dependencies[requirement_id]
+                )
             if requirement_id in wave_by_requirement:
                 item["implementation_wave"] = wave_by_requirement[requirement_id]
             dependencies.append(item)

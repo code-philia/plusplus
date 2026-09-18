@@ -91,7 +91,15 @@ class Compiler:
         preprocessing = self._preprocessor.compile(request.requirement_path)
         root_id = preprocessing.requirement_ir.get("root_id") if preprocessing.requirement_ir else None
         atomic_ids = list(preprocessing.requirement_ir.get("atomic_units", [])) if preprocessing.requirement_ir else []
-        states = {node_id: ("DISCOVERED" if preprocessing.ok else "FAILED") for node_id in atomic_ids}
+        requirement_ids = (
+            list(preprocessing.requirement_ir.get("node_order", []))
+            if preprocessing.requirement_ir
+            else []
+        )
+        states = {
+            node_id: ("DISCOVERED" if preprocessing.ok else "FAILED")
+            for node_id in requirement_ids
+        }
 
         artifact_store = CompilerArtifactStore(request.output_dir)
         artifacts: dict[str, str] = {}
@@ -113,7 +121,7 @@ class Compiler:
                 ok=False,
                 root_id=root_id,
                 states=states,
-                failed_nodes=atomic_ids,
+                failed_nodes=requirement_ids,
                 artifacts=artifacts,
             )
         if start_from != "PREPROCESSING":
@@ -327,7 +335,7 @@ class Compiler:
                 requirement_links=(
                     self._runtime.traceability.read_frontend_design_links_from_requirements()
                 ),
-                expected_requirement_ids=set(atomic_ids),
+                expected_requirement_ids=set(requirement_ids),
                 backend_api_ids=backend_api_ids,
             )
             if read_error:
@@ -436,7 +444,7 @@ class Compiler:
                     frontend_errors.append(f"ARC4150 DUAL_DESIGN_INVALID: {exc}")
 
         if frontend_errors:
-            for node_id in atomic_ids:
+            for node_id in requirement_ids:
                 states[node_id] = "FAILED"
             for error in frontend_errors:
                 await self._log("Compiler", error, "error")
@@ -445,14 +453,14 @@ class Compiler:
                 ok=False,
                 root_id=root_id,
                 states=states,
-                failed_nodes=atomic_ids,
+                failed_nodes=requirement_ids,
                 artifacts=artifacts,
             )
 
         dual_design_state = (
             "DUAL_DESIGN_REUSED" if frontend_design_reused else "DUAL_DESIGN_FROZEN"
         )
-        for node_id in atomic_ids:
+        for node_id in requirement_ids:
             states[node_id] = dual_design_state
         self._runtime.traceability.merge_frontend_design_links(
             frontend_design_traceability(frontend_design_ir)

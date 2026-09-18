@@ -144,7 +144,7 @@ REQUIREMENT_UI_SCOPE_SCHEMA: dict[str, Any] = {
 }
 
 
-UI_SCOPE_INSTRUCTIONS = """Classify one atomic requirement and plan only its page, layout, and store scope.
+UI_SCOPE_INSTRUCTIONS = """Classify one requirement node and plan only its page, layout, and store scope.
 Return exactly the supplied JSON shape. Use UI_REQUIRED when the requirement directly needs a user-facing page,
 UI_AFFECTING when it changes or reuses an existing UI symbol without introducing a page, and NO_UI only when no UI
 symbol is involved. CREATE allocates a new global symbol; REUSE must name a symbol already present in the registry.
@@ -155,8 +155,11 @@ or loading state into a global store. For REUSE, keep create-only fields as empt
 compiler ignores them. Refer to an existing symbol by copying its registry `name` exactly; do not place the
 PAGE/LAYOUT/STORE prefix in `name`. Refer
 only to Backend API ids and visual reference ids supplied for this requirement. API ids are opaque and must be copied
-exactly. Do not design components, JSX, CSS, files, implementation logic, local store fields, or API bindings. Use []
-whenever a list is empty and return only the structured JSON object.
+exactly. FOLDER requirements are processed after their children: prefer REUSE for child pages already present in the
+registry, and CREATE only UI structure directly required by the folder's own description. FOLDER requirements may
+legitimately receive no Requirement Contract or Backend API. Do not design components, JSX, CSS, files,
+implementation logic, local store fields, or API bindings. Use [] whenever a list is empty and return only the
+structured JSON object.
 """
 
 
@@ -372,25 +375,30 @@ class RequirementUIScopePass:
         visual_references: list[dict[str, Any]],
     ) -> RequirementUIScopeResult:
         nodes = requirement_ir.get("nodes", {})
-        atomic_ids = {
+        requirement_ids = {
             str(value)
-            for value in requirement_ir.get("atomic_units", [])
-            if str(value).strip()
+            for value in requirement_ir.get("node_order", [])
+            if str(value).strip() and str(value) in nodes
         }
+        if not requirement_ids:
+            requirement_ids = {str(value) for value in nodes if str(value).strip()}
         state = FrontendDesignState(visual_references)
         node_states: dict[str, str] = {}
         all_issues: list[FrontendDesignIssue] = []
         contracts = _requirement_contracts(backend_design_ir)
         apis = _backend_apis(backend_design_ir)
-        dependencies = dependency_graph.get("atomic_dependencies", {})
-        requirement_order = _requirement_order(atomic_ids, dependency_graph)
+        atomic_dependencies = dependency_graph.get("atomic_dependencies", {})
+        requirement_order = _requirement_order(requirement_ids, dependency_graph)
 
         for requirement_id in requirement_order:
             requirement = copy.deepcopy(nodes.get(requirement_id, {}))
             requirement["requirement_id"] = requirement_id
-            allowed_owner_ids = {requirement_id} | _dependency_closure(
-                requirement_id,
-                dependencies,
+            is_atomic = str(requirement.get("type", "")).upper() == "ATOMIC"
+            allowed_owner_ids = (
+                {requirement_id}
+                | _dependency_closure(requirement_id, atomic_dependencies)
+                if is_atomic
+                else set()
             )
             allowed_apis = {
                 module_id: module
@@ -405,7 +413,7 @@ class RequirementUIScopePass:
                     str(value) for value in item.get("requirement_ids", [])
                 }
             ]
-            if requirement_id not in contracts:
+            if is_atomic and requirement_id not in contracts:
                 issue = _issue(
                     FrontendDesignErrorCode.REFERENCE_UNKNOWN,
                     f"Backend Design has no Requirement Contract for {requirement_id}.",
@@ -445,10 +453,10 @@ class RequirementUIScopePass:
             )
 
         frontend_ir = state.to_ir()
-        if not all_issues and set(state.requirement_links) == atomic_ids:
+        if not all_issues and set(state.requirement_links) == requirement_ids:
             validation_issues = validate_frontend_design_minimum(
                 frontend_ir,
-                expected_requirement_ids=atomic_ids,
+                expected_requirement_ids=requirement_ids,
                 backend_api_ids=set(apis),
             )
             all_issues.extend(validation_issues)
@@ -702,7 +710,7 @@ def validate_frontend_design_minimum(
     if expected_requirement_ids is not None and set(links) != expected_requirement_ids:
         issues.append(_issue(
             FrontendDesignErrorCode.REQUIREMENT_UNCOVERED,
-            "Frontend requirement links do not match the current atomic requirements.",
+            "Frontend requirement links do not match the current requirement nodes.",
             "FRONTEND_IR_VALIDATION",
             "<requirement-links>",
             missing=sorted(expected_requirement_ids - set(links)),
@@ -1245,7 +1253,7 @@ def _api_owner(module_id: str, module: dict[str, Any]) -> str:
 
 
 def _requirement_order(
-    atomic_ids: set[str],
+    requirement_ids: set[str],
     dependency_graph: dict[str, Any],
 ) -> list[str]:
     result: list[str] = []
@@ -1256,10 +1264,10 @@ def _requirement_order(
             if not isinstance(wave, list):
                 continue
             for requirement_id in sorted(str(value) for value in wave):
-                if requirement_id in atomic_ids and requirement_id not in seen:
+                if requirement_id in requirement_ids and requirement_id not in seen:
                     result.append(requirement_id)
                     seen.add(requirement_id)
-    result.extend(sorted(atomic_ids - seen))
+    result.extend(sorted(requirement_ids - seen))
     return result
 
 
@@ -1281,7 +1289,10 @@ def _model_requirement(requirement: dict[str, Any]) -> dict[str, Any]:
     return {
         "requirement_id": str(requirement.get("requirement_id", "")),
         "name": str(requirement.get("name", "")),
+        "type": str(requirement.get("type", "")),
         "description": str(requirement.get("description", "")),
+        "parent_id": requirement.get("parent_id"),
+        "children_ids": copy.deepcopy(requirement.get("children_ids", [])),
         "scenarios": copy.deepcopy(requirement.get("scenarios", [])),
     }
 

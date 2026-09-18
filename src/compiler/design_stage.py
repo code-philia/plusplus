@@ -1299,10 +1299,22 @@ def _requirement_context(nodes: dict[str, Any], requirement_id: str) -> dict[str
 
 
 def _waves(requirement_ir: dict[str, Any], dependency_graph: dict[str, Any]) -> list[list[str]]:
-    waves = dependency_graph.get("implementation_waves")
+    atomic_ids = {
+        str(item)
+        for item in requirement_ir.get("atomic_units", [])
+        if str(item).strip()
+    }
+    waves = dependency_graph.get("atomic_implementation_waves")
+    if not isinstance(waves, list) or not waves:
+        waves = dependency_graph.get("implementation_waves")
     if isinstance(waves, list) and waves:
-        return [[str(item) for item in wave] for wave in waves]
-    return [[str(item)] for item in requirement_ir.get("atomic_units", [])]
+        return [
+            [str(item) for item in wave if str(item) in atomic_ids]
+            for wave in waves
+            if isinstance(wave, list)
+            and any(str(item) in atomic_ids for item in wave)
+        ]
+    return [[item] for item in sorted(atomic_ids)]
 
 
 def _dependency_closure(node_id: str, dependencies: dict[str, Any]) -> set[str]:
