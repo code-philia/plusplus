@@ -30,6 +30,7 @@ class CodeBindingLowerer:
         *,
         output_root: Path,
         requirement_ir: dict[str, Any],
+        dependency_graph: dict[str, Any],
         database_schema: dict[str, Any],
         design_ir: dict[str, Any],
         frontend_ir: dict[str, Any],
@@ -339,6 +340,7 @@ class CodeBindingLowerer:
             requirement_ids,
             bindings,
             frontend_ir,
+            dependency_graph,
         )
         file_index = _file_index(bindings, type_bindings)
         registry = {
@@ -364,6 +366,11 @@ class CodeTargetResolver:
             for row in registry.get("code_bindings", [])
             if isinstance(row, dict) and row.get("module_id")
         }
+        self._types = {
+            str(row["type_id"]): row
+            for row in registry.get("type_bindings", [])
+            if isinstance(row, dict) and row.get("type_id")
+        }
         self._requirements = {
             str(row["requirement_id"]): row
             for row in registry.get("requirement_targets", [])
@@ -386,21 +393,33 @@ class CodeTargetResolver:
         row = self._bindings.get(str(module_id))
         return copy.deepcopy(row) if row is not None else None
 
+    def resolve_type(self, type_id: str) -> dict[str, Any] | None:
+        row = self._types.get(str(type_id))
+        return copy.deepcopy(row) if row is not None else None
+
     def resolve_requirement_targets(self, requirement_id: str) -> dict[str, Any]:
         row = self._requirements.get(str(requirement_id))
         if row is None:
             raise KeyError(f"Unknown requirement: {requirement_id}")
+        owned_targets = [
+            copy.deepcopy(self._bindings[module_id])
+            for module_id in row.get("owned", [])
+            if module_id in self._bindings
+        ]
+        dependency_targets = [
+            copy.deepcopy(self._bindings[module_id])
+            for module_id in row.get("dependencies", [])
+            if module_id in self._bindings
+        ]
+        type_ids = _referenced_type_ids([*owned_targets, *dependency_targets])
         return {
             **copy.deepcopy(row),
-            "owned_targets": [
-                copy.deepcopy(self._bindings[module_id])
-                for module_id in row.get("owned", [])
-                if module_id in self._bindings
-            ],
-            "dependency_targets": [
-                copy.deepcopy(self._bindings[module_id])
-                for module_id in row.get("dependencies", [])
-                if module_id in self._bindings
+            "owned_targets": owned_targets,
+            "dependency_targets": dependency_targets,
+            "type_targets": [
+                copy.deepcopy(self._types[type_id])
+                for type_id in type_ids
+                if type_id in self._types
             ],
         }
 
@@ -413,6 +432,112 @@ def resolve_requirement_targets(
     registry: dict[str, Any], requirement_id: str
 ) -> dict[str, Any]:
     return CodeTargetResolver(registry).resolve_requirement_targets(requirement_id)
+
+
+def validate_code_binding_registry(
+    registry: dict[str, Any],
+    *,
+    output_root: Path,
+    expected_requirement_ids: set[str] | None = None,
+) -> list[str]:
+    """Validate a persisted registry before a downstream start probe reuses it."""
+
+    errors: list[str] = []
+    if registry.get("schema_version") != CODE_BINDING_SCHEMA_VERSION:
+        errors.append(
+            "ARC4308 CODE_BINDING_REUSE_INVALID: unsupported schema version "
+            f"{registry.get('schema_version')!r}."
+        )
+    if registry.get("status") != CODE_BINDING_READY:
+        errors.append(
+            "ARC4308 CODE_BINDING_REUSE_INVALID: registry status is not "
+            f"{CODE_BINDING_READY}."
+        )
+
+    raw_bindings = registry.get("code_bindings")
+    raw_types = registry.get("type_bindings")
+    raw_requirements = registry.get("requirement_targets")
+    if not isinstance(raw_bindings, list) or any(
+        not isinstance(row, dict) for row in raw_bindings
+    ):
+        errors.append(
+            "ARC4308 CODE_BINDING_REUSE_INVALID: code_bindings must be a list of objects."
+        )
+        bindings: list[dict[str, Any]] = []
+    else:
+        bindings = copy.deepcopy(raw_bindings)
+    if not isinstance(raw_types, list) or any(
+        not isinstance(row, dict) for row in raw_types
+    ):
+        errors.append(
+            "ARC4308 CODE_BINDING_REUSE_INVALID: type_bindings must be a list of objects."
+        )
+        type_bindings: list[dict[str, Any]] = []
+    else:
+        type_bindings = copy.deepcopy(raw_types)
+    if not isinstance(raw_requirements, list) or any(
+        not isinstance(row, dict) for row in raw_requirements
+    ):
+        errors.append(
+            "ARC4308 CODE_BINDING_REUSE_INVALID: requirement_targets must be a list of objects."
+        )
+        requirement_targets: list[dict[str, Any]] = []
+    else:
+        requirement_targets = copy.deepcopy(raw_requirements)
+
+    binding_by_id = _unique_bindings(bindings, errors)
+    type_rows = _deduplicate_type_bindings(type_bindings, errors)
+    requirement_by_id = _index_rows(
+        requirement_targets,
+        "requirement_id",
+        "Code Binding requirement targets",
+        errors,
+    )
+    if expected_requirement_ids is not None and set(requirement_by_id) != set(
+        expected_requirement_ids
+    ):
+        errors.append(
+            "ARC4308 CODE_BINDING_REUSE_INVALID: requirement coverage differs; "
+            f"missing={sorted(expected_requirement_ids - set(requirement_by_id))}, "
+            f"extra={sorted(set(requirement_by_id) - expected_requirement_ids)}."
+        )
+
+    for requirement_id, row in requirement_by_id.items():
+        referenced = set(_strings(row.get("owned"))) | set(
+            _strings(row.get("dependencies"))
+        )
+        unknown = sorted(referenced - set(binding_by_id))
+        if unknown:
+            errors.append(
+                "ARC4308 CODE_BINDING_REUSE_INVALID: "
+                f"{requirement_id} references unknown modules {unknown}."
+            )
+
+    _validate_sources(
+        output_root.expanduser().resolve(),
+        list(binding_by_id.values()),
+        type_rows,
+        errors,
+    )
+    return list(dict.fromkeys(errors))
+
+
+def _referenced_type_ids(targets: list[dict[str, Any]]) -> list[str]:
+    type_ids: set[str] = set()
+    for target in targets:
+        references = [
+            target.get("input_type"),
+            target.get("output_type"),
+            target.get("props_type"),
+            *target.get("store_types", []),
+        ]
+        for reference in references:
+            if not isinstance(reference, dict):
+                continue
+            type_id = str(reference.get("type_id", "")).strip()
+            if type_id:
+                type_ids.add(type_id)
+    return sorted(type_ids)
 
 
 def _backend_type_bindings(
@@ -618,6 +743,7 @@ def _requirement_targets(
     requirement_ids: list[str],
     bindings: list[dict[str, Any]],
     frontend_ir: dict[str, Any],
+    dependency_graph: dict[str, Any],
 ) -> list[dict[str, Any]]:
     by_id = {str(row["module_id"]): row for row in bindings}
     graph: dict[str, set[str]] = {
@@ -642,15 +768,48 @@ def _requirement_targets(
     for consumer, api_ids in consumer_api_ids.items():
         graph.setdefault(consumer, set()).update(value for value in api_ids if value in by_id)
 
-    rows: list[dict[str, Any]] = []
-    for requirement_id in requirement_ids:
-        owned = {
+    owned_by_requirement = {
+        requirement_id: {
             str(row["module_id"])
             for row in bindings
             if requirement_id in _strings(row.get("owner_requirements"))
         }
-        reachable: set[str] = set()
-        pending = list(owned)
+        for requirement_id in requirement_ids
+    }
+    requirement_dependencies = dependency_graph.get("requirement_dependencies", {})
+    atomic_dependencies = dependency_graph.get("atomic_dependencies", {})
+
+    def dependency_closure(requirement_id: str) -> set[str]:
+        source = (
+            atomic_dependencies
+            if requirement_id in atomic_dependencies
+            else requirement_dependencies
+        )
+        result: set[str] = set()
+        pending = [str(value) for value in source.get(requirement_id, [])]
+        while pending:
+            dependency_id = pending.pop()
+            if dependency_id in result or dependency_id == requirement_id:
+                continue
+            result.add(dependency_id)
+            nested_source = (
+                atomic_dependencies
+                if dependency_id in atomic_dependencies
+                else requirement_dependencies
+            )
+            pending.extend(str(value) for value in nested_source.get(dependency_id, []))
+        return result
+
+    rows: list[dict[str, Any]] = []
+    for requirement_id in requirement_ids:
+        owned = owned_by_requirement.get(requirement_id, set())
+        reachable: set[str] = {
+            module_id
+            for dependency_id in dependency_closure(requirement_id)
+            for module_id in owned_by_requirement.get(dependency_id, set())
+            if module_id not in owned
+        }
+        pending = [*owned, *reachable]
         while pending:
             current = pending.pop()
             for dependency in graph.get(current, set()):
@@ -872,4 +1031,5 @@ __all__ = [
     "CodeBindingResult",
     "CodeTargetResolver",
     "resolve_requirement_targets",
+    "validate_code_binding_registry",
 ]

@@ -88,6 +88,10 @@ or SHARED components. Use SHARED only when the same functional contract is genui
 For REUSE, keep create-only fields as an empty string or empty arrays; the compiler ignores them. Inputs are external
 component props expressed with stable semantic ids. Events are callbacks emitted to the parent. Render obligations
 record observable fields, actions, regions, navigation, text, or feedback, not JSX/CSS. Use only supplied visual ids.
+When an input reuses a semantic_id from a requirement or API contract, copy its canonical type exactly. Do not add
+nullability, undefined, optionality, GUESS markers, or other qualifiers unless that exact type is present in the
+contract. `required: false` expresses an optional prop; it does not change the field type. Never emit placeholder
+types such as `string|null.GUESS?`.
 Do not create Stores, routes, API clients, files, nested child components, CSS, or implementation logic. Return only
 the structured object required by the supplied schema.
 """
@@ -264,6 +268,7 @@ class PageLayoutComponentPass:
                 parent_id,
                 decision,
                 allowed_visual_ids=allowed_visual_ids,
+                canonical_types=_canonical_types(requirement_contracts, backend_apis),
             )
             if not issues:
                 self._trace(
@@ -495,6 +500,7 @@ def _component_decision_issues(
     decision: Any,
     *,
     allowed_visual_ids: set[str],
+    canonical_types: dict[str, str] | None = None,
 ) -> list[FrontendDesignIssue]:
     shape_errors = schema_shape_errors(decision, PAGE_LAYOUT_COMPONENT_SCHEMA)
     if shape_errors:
@@ -571,6 +577,12 @@ def _component_decision_issues(
                 code=FrontendDesignErrorCode.COMPONENT_DECISION_INVALID,
                 phase="PAGE_LAYOUT_COMPONENT",
             ))
+            issues.extend(_component_field_type_issues(
+                state,
+                component_id,
+                item["inputs"],
+                canonical_types or {},
+            ))
             event_names = [str(value["name"]) for value in item["events"]]
             if len(event_names) != len(set(event_names)):
                 issues.append(_issue(
@@ -603,6 +615,71 @@ def _component_decision_issues(
                     "PAGE_LAYOUT_COMPONENT",
                     component_id,
                 ))
+    return issues
+
+
+def _canonical_types(
+    requirement_contracts: Iterable[dict[str, Any]],
+    backend_apis: Iterable[dict[str, Any]],
+) -> dict[str, str]:
+    """Build the authoritative semantic-id -> type map visible to a parent."""
+    result: dict[str, str] = {}
+    for owner in [*requirement_contracts, *backend_apis]:
+        if not isinstance(owner, dict):
+            continue
+        for field in [*owner.get("inputs", []), *owner.get("outputs", [])]:
+            if not isinstance(field, dict):
+                continue
+            semantic_id = str(field.get("semantic_id", "")).strip()
+            field_type = str(field.get("type", "")).strip()
+            if semantic_id and field_type:
+                result.setdefault(semantic_id, field_type)
+    return result
+
+
+def _component_field_type_issues(
+    state: FrontendDesignState,
+    component_id: str,
+    fields: Iterable[dict[str, Any]],
+    canonical_types: dict[str, str],
+) -> list[FrontendDesignIssue]:
+    issues: list[FrontendDesignIssue] = []
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        semantic_id = str(field.get("semantic_id", "")).strip()
+        field_type = str(field.get("type", "")).strip()
+        if not semantic_id or not field_type:
+            continue
+        if re.search(r"(?:GUESS|TODO|UNKNOWN|PLACEHOLDER|\?)", field_type, re.IGNORECASE):
+            issues.append(_issue(
+                FrontendDesignErrorCode.BINDING_INCOMPATIBLE,
+                f"{component_id} uses a non-canonical placeholder type {field_type!r} for {semantic_id}.",
+                "FRONTEND_SEMANTIC_VALIDATION",
+                component_id,
+            ))
+        expected = canonical_types.get(semantic_id)
+        if expected and field_type != expected:
+            issues.append(_issue(
+                FrontendDesignErrorCode.BINDING_INCOMPATIBLE,
+                f"{component_id} defines {semantic_id} as {field_type!r}; canonical type is {expected!r}.",
+                "FRONTEND_SEMANTIC_VALIDATION",
+                component_id,
+            ))
+        for existing in state.components.values():
+            for prior in existing.get("inputs", []):
+                if (
+                    isinstance(prior, dict)
+                    and prior.get("semantic_id") == semantic_id
+                    and prior.get("type") != field_type
+                ):
+                    issues.append(_issue(
+                        FrontendDesignErrorCode.BINDING_INCOMPATIBLE,
+                        f"{component_id} conflicts with existing component field {semantic_id}: "
+                        f"{field_type!r} vs {prior.get('type')!r}.",
+                        "FRONTEND_SEMANTIC_VALIDATION",
+                        component_id,
+                    ))
     return issues
 
 
@@ -782,7 +859,9 @@ def _field_catalog(
         ):
             issues.append(_issue(
                 FrontendDesignErrorCode.BINDING_INCOMPATIBLE,
-                f"{owner_id} has conflicting {label} field definitions for {semantic_id}.",
+                f"{owner_id} has conflicting {label} field definitions for {semantic_id}: "
+                f"{existing.get('type')!r}/{existing.get('name')!r} vs "
+                f"{field.get('type')!r}/{field.get('name')!r}.",
                 "FRONTEND_SEMANTIC_VALIDATION",
                 owner_id,
             ))

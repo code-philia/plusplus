@@ -49,6 +49,10 @@ class DependencyCatalog:
     types_react_dom: str = "18.3.7"
     types_express: str = "5.0.3"
     types_better_sqlite3: str = "7.6.13"
+    vitest: str = "3.2.4"
+    playwright: str = "1.55.0"
+    supertest: str = "7.1.4"
+    types_supertest: str = "6.0.3"
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -71,7 +75,117 @@ class DependencyCatalog:
             "@types/react-dom": self.types_react_dom,
             "@types/express": self.types_express,
             "@types/better-sqlite3": self.types_better_sqlite3,
+            "vitest": self.vitest,
+            "@playwright/test": self.playwright,
+            "supertest": self.supertest,
+            "@types/supertest": self.types_supertest,
         }
+
+
+def test_workspace_spec(
+    catalog: DependencyCatalog,
+    *,
+    backend_port: int,
+) -> dict[str, Any]:
+    """Return the compiler-owned test workspace created during project initialization."""
+
+    port = max(1, min(65535, int(backend_port)))
+    return {
+        "package": {
+            "name": "@arc/tests",
+            "private": True,
+            "version": "0.0.0",
+            "type": "module",
+            "scripts": {
+                "typecheck": "tsc --noEmit -p tsconfig.json",
+                "list:vitest": "vitest list --passWithNoTests --config vitest.config.ts",
+                "list:e2e": (
+                    "playwright test --list --pass-with-no-tests "
+                    "--config playwright.config.ts"
+                ),
+                "test:unit": "vitest run --config vitest.config.ts unit",
+                "test:integration": "vitest run --config vitest.config.ts integration",
+                "test:e2e": "playwright test --config playwright.config.ts",
+            },
+            "devDependencies": {
+                "@playwright/test": catalog.playwright,
+                "@types/node": catalog.types_node,
+                "@types/supertest": catalog.types_supertest,
+                "supertest": catalog.supertest,
+                "typescript": catalog.typescript,
+                "vitest": catalog.vitest,
+            },
+        },
+        "tsconfig": {
+            "compilerOptions": {
+                "target": "ES2022",
+                "module": "NodeNext",
+                "moduleResolution": "NodeNext",
+                "strict": True,
+                "noUncheckedIndexedAccess": True,
+                "exactOptionalPropertyTypes": True,
+                "esModuleInterop": True,
+                "resolveJsonModule": True,
+                "skipLibCheck": True,
+                "noEmit": True,
+                "types": ["node", "vitest/globals"],
+            },
+            "include": ["**/*.ts"],
+            "exclude": ["node_modules"],
+        },
+        "text_files": {
+            "vitest.config.ts": (
+                'import { defineConfig } from "vitest/config";\n\n'
+                "export default defineConfig({\n"
+                "  test: {\n"
+                '    include: ["unit/**/*.spec.ts", "integration/**/*.spec.ts"],\n'
+                '    environment: "node",\n'
+                "    testTimeout: 15_000,\n"
+                "    hookTimeout: 15_000,\n"
+                '    setupFiles: ["./support/setup.ts"],\n'
+                "  },\n"
+                "});\n"
+            ),
+            "playwright.config.ts": (
+                'import { defineConfig, devices } from "@playwright/test";\n\n'
+                "export default defineConfig({\n"
+                '  testDir: "./e2e",\n'
+                "  fullyParallel: false,\n"
+                "  workers: 1,\n"
+                "  timeout: 30_000,\n"
+                "  use: {\n"
+                '    baseURL: process.env.ARC_TEST_BASE_URL ?? "http://127.0.0.1:5173",\n'
+                '    trace: "retain-on-failure",\n'
+                "  },\n"
+                '  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],\n'
+                "  webServer: [\n"
+                "    {\n"
+                '      command: "npm run dev -w @arc/backend",\n'
+                f'      url: "http://127.0.0.1:{port}/__arc/health",\n'
+                f'      env: {{ DATABASE_URL: ":memory:", NODE_ENV: "test", PORT: "{port}" }},\n'
+                "      reuseExistingServer: true,\n"
+                "      timeout: 120_000,\n"
+                "    },\n"
+                "    {\n"
+                '      command: "npm run dev -w @arc/frontend -- --host 127.0.0.1",\n'
+                '      url: "http://127.0.0.1:5173",\n'
+                "      reuseExistingServer: true,\n"
+                "      timeout: 120_000,\n"
+                "    },\n"
+                "  ],\n"
+                "});\n"
+            ),
+            "support/runtime.ts": (
+                "export function uniqueValue(prefix: string): string {\n"
+                "  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;\n"
+                "}\n"
+            ),
+            "support/setup.ts": (
+                'process.env.DATABASE_URL ??= ":memory:";\n'
+                'process.env.NODE_ENV ??= "test";\n'
+            ),
+        },
+    }
 
 
 @dataclass(slots=True)
@@ -97,6 +211,7 @@ class ProjectInitializer:
         "frontend",
         "backend",
         "shared",
+        "tests",
     )
 
     def __init__(
@@ -117,6 +232,7 @@ class ProjectInitializer:
         self.project_artifact_root = self.arc_root / "project"
         self._promoted_targets: list[Path] = []
         self._project_artifact_owned = False
+        self._test_browser_installed = False
         self._log = SynchronousLog("ProjectInitializer", workspace_root=self.output_root)
         self._command_timeout_seconds = self._read_command_timeout()
 
@@ -149,6 +265,7 @@ class ProjectInitializer:
             self._validate_staged_project()
             self._promote()
             self._install_promoted_workspace()
+            self._test_browser_installed = self._install_test_browser_if_enabled()
             artifacts = self._emit_manifests()
             self._cleanup_staging()
             return ProjectInitializationResult(ok=True, status=PROJECT_STATUS, artifacts=artifacts)
@@ -241,6 +358,14 @@ class ProjectInitializer:
         self._write_json(self.staged_project / "frontend" / "package.json", self._frontend_package())
         self._write_json(self.staged_project / "backend" / "package.json", self._backend_package())
         self._write_json(self.staged_project / "shared" / "package.json", self._shared_package())
+        test_spec = test_workspace_spec(self.catalog, backend_port=self.web_port)
+        tests_root = self.staged_project / "tests"
+        for directory in ("unit", "integration", "e2e", "support"):
+            (tests_root / directory).mkdir(parents=True, exist_ok=True)
+        self._write_json(tests_root / "package.json", test_spec["package"])
+        self._write_json(tests_root / "tsconfig.json", test_spec["tsconfig"])
+        for relative, content in test_spec["text_files"].items():
+            self._write_text(tests_root / relative, content)
 
         frontend_root = self.staged_project / "frontend"
         for relative in ("public", "eslint.config.js", "README.md", ".gitignore"):
@@ -329,6 +454,31 @@ class ProjectInitializer:
                 f"expected {expected_shared}, resolved {actual_shared}.",
             )
 
+        tests_link = node_modules / "@arc" / "tests"
+        expected_tests = (self.output_root / "tests").resolve()
+        actual_tests = tests_link.resolve()
+        if not tests_link.exists() or actual_tests != expected_tests:
+            raise ProjectInitializationError(
+                "PROJECT_INSTALL_FAILED",
+                "npm did not create a valid @arc/tests workspace link in the promoted project: "
+                f"expected {expected_tests}, resolved {actual_tests}.",
+            )
+
+    def _install_test_browser_if_enabled(self) -> bool:
+        if self.environment.get("ARC_TEST_INSTALL_BROWSER", "1").strip().lower() in {
+            "0",
+            "false",
+            "no",
+            "off",
+            "",
+        }:
+            return False
+        self._run(
+            ["npm", "exec", "-w", "@arc/tests", "--", "playwright", "install", "chromium"],
+            cwd=self.output_root,
+        )
+        return True
+
     def _validate_staged_project(self) -> None:
         expected = (
             "package.json",
@@ -340,6 +490,12 @@ class ProjectInitializer:
             "backend/drizzle.config.ts",
             "shared/package.json",
             "shared/src/index.ts",
+            "tests/package.json",
+            "tests/tsconfig.json",
+            "tests/vitest.config.ts",
+            "tests/playwright.config.ts",
+            "tests/support/runtime.ts",
+            "tests/support/setup.ts",
         )
         missing = [relative for relative in expected if not (self.staged_project / relative).exists()]
         if missing:
@@ -420,6 +576,12 @@ class ProjectInitializer:
                 "orm": "drizzle",
             },
             "shared": {"contracts": "zod", "typescriptProject": True},
+            "tests": {
+                "unit": "vitest",
+                "integration": "vitest+supertest",
+                "e2e": "playwright",
+                "browserInstalled": self._test_browser_installed,
+            },
             "versions": self.catalog.to_dict(),
         }
         project_manifest = {
@@ -429,6 +591,18 @@ class ProjectInitializer:
             "layout": "npm-workspaces",
             "packageManager": "npm",
             "lockfile": "package-lock.json",
+            "testEnvironment": {
+                "status": "TEST_ENVIRONMENT_READY",
+                "workspace": "tests",
+                "browserInstalled": self._test_browser_installed,
+                "versions": {
+                    "typescript": self.catalog.typescript,
+                    "vitest": self.catalog.vitest,
+                    "@playwright/test": self.catalog.playwright,
+                    "supertest": self.catalog.supertest,
+                    "@types/supertest": self.catalog.types_supertest,
+                },
+            },
             "deployment": {
                 "workingDirectory": "backend",
                 "startCommand": "npm run start",
@@ -448,6 +622,11 @@ class ProjectInitializer:
                     "sourceRoot": "shared/src",
                     "packageName": "@arc/shared",
                 },
+                "tests": {
+                    "root": "tests",
+                    "sourceRoot": "tests",
+                    "packageName": "@arc/tests",
+                },
             },
             "owners": {
                 "frontend/src/main.tsx": "PROJECT_INITIALIZER",
@@ -456,6 +635,11 @@ class ProjectInitializer:
                 "shared/src/index.ts": "COMPILER",
                 "backend/src": "SKELETON_COMPILER",
                 "shared/src/contracts": "SKELETON_COMPILER",
+                "tests/package.json": "PROJECT_INITIALIZER",
+                "tests/tsconfig.json": "PROJECT_INITIALIZER",
+                "tests/vitest.config.ts": "PROJECT_INITIALIZER",
+                "tests/playwright.config.ts": "PROJECT_INITIALIZER",
+                "tests/support": "PROJECT_INITIALIZER",
             },
             "allowedOutputRoots": {
                 "skeleton": ["backend/src", "shared/src/contracts", "shared/src/index.ts"],
@@ -466,6 +650,11 @@ class ProjectInitializer:
                     "frontend/src/api",
                     "frontend/src/components",
                     "frontend/src/pages",
+                ],
+                "tests": [
+                    "tests/unit",
+                    "tests/integration",
+                    "tests/e2e",
                 ],
             },
         }
@@ -604,7 +793,7 @@ class ProjectInitializer:
         return {
             "name": "generated-application",
             "private": True,
-            "workspaces": ["frontend", "backend", "shared"],
+            "workspaces": ["frontend", "backend", "shared", "tests"],
             "scripts": {
                 "build": (
                     "npm run build -w @arc/shared && npm run build -w @arc/frontend "
@@ -614,6 +803,14 @@ class ProjectInitializer:
                     "npm run build -w @arc/shared && npm run typecheck -w @arc/frontend "
                     "&& npm run typecheck -w @arc/backend"
                 ),
+                "test:typecheck": "npm run typecheck -w @arc/tests",
+                "test:list": (
+                    "npm run list:vitest -w @arc/tests && "
+                    "npm run list:e2e -w @arc/tests"
+                ),
+                "test:unit": "npm run test:unit -w @arc/tests",
+                "test:integration": "npm run test:integration -w @arc/tests",
+                "test:e2e": "npm run test:e2e -w @arc/tests",
             },
             "engines": {"node": f">={self.catalog.node_major}"},
         }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import shutil
 from pathlib import Path, PurePosixPath
@@ -36,6 +37,7 @@ class CompilerArtifactStore:
         self.backend_root = self.root / "backend"
         self.frontend_root = self.root / "frontend"
         self.code_root = self.root / "code"
+        self.tests_root = self.root / "tests"
 
     def write_preprocessing(
         self,
@@ -565,6 +567,69 @@ class CompilerArtifactStore:
         path = self.code_root / "code_bindings.json"
         write_json_atomic(path, registry)
         return str(path)
+
+    def read_code_bindings(self) -> tuple[dict[str, Any] | None, str | None]:
+        path = self.code_root / "code_bindings.json"
+        if not path.is_file():
+            return None, f"Code Binding Registry does not exist: {path}"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return None, f"Cannot read Code Binding Registry: {exc}"
+        if not isinstance(payload, dict):
+            return None, f"Code Binding Registry must contain an object: {path}"
+        return payload, None
+
+    def write_test_environment_manifest(self, manifest: dict[str, Any]) -> str:
+        path = self.tests_root / "environment_manifest.json"
+        write_json_atomic(path, manifest)
+        return str(path)
+
+    def write_test_context_pack(
+        self,
+        requirement_id: str,
+        context_pack: dict[str, Any],
+    ) -> str:
+        safe_id = "".join(
+            character.lower() if character.isalnum() else "-"
+            for character in str(requirement_id)
+        ).strip("-") or "requirement"
+        digest = hashlib.sha256(str(requirement_id).encode("utf-8")).hexdigest()[:8]
+        path = self.tests_root / "context_packs" / f"{safe_id}-{digest}.json"
+        write_json_atomic(path, context_pack)
+        return str(path)
+
+    def write_test_manifest(self, manifest: dict[str, Any]) -> str:
+        path = self.tests_root / "test_manifest.json"
+        write_json_atomic(path, manifest)
+        return str(path)
+
+    def write_generated_tests(self, sources: dict[str, str]) -> dict[str, str]:
+        output_root = self.root.parent
+        artifacts: dict[str, str] = {}
+        for relative, content in sorted(sources.items()):
+            normalized = str(relative).replace("\\", "/").strip().strip("/")
+            path = PurePosixPath(normalized)
+            if (
+                not normalized
+                or path.is_absolute()
+                or "." in path.parts
+                or ".." in path.parts
+                or not normalized.startswith(
+                    ("tests/unit/", "tests/integration/", "tests/e2e/")
+                )
+                or not normalized.endswith(".spec.ts")
+            ):
+                raise ValueError(f"Invalid generated test path: {relative!r}")
+            target = (output_root / Path(normalized)).resolve()
+            if output_root not in target.parents:
+                raise ValueError(f"Generated test escapes output workspace: {relative!r}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(f"{target.suffix}.tmp")
+            temporary.write_text(content, encoding="utf-8")
+            temporary.replace(target)
+            artifacts[f"generated_test:{normalized}"] = str(target)
+        return artifacts
 
     def write_generated_sources(self, sources: dict[str, str]) -> dict[str, str]:
         """Atomically materialize compiler-planned source files inside the output workspace."""
