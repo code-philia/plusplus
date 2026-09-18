@@ -23,13 +23,10 @@ IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 FIELD_TYPES = {"string", "integer", "number", "boolean", "date", "datetime", "json", "uuid", "foreign_key"}
 RELATIONSHIP_TYPES = {"ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_MANY"}
 CONSTRAINT_TYPES = {
-    "PRIMARY_KEY", "FOREIGN_KEY", "NOT_NULL", "UNIQUE", "COMPOSITE_UNIQUE", "CHECK", "APPLICATION_RULE"
+    "PRIMARY_KEY", "FOREIGN_KEY", "NOT_NULL", "UNIQUE", "COMPOSITE_UNIQUE", "APPLICATION_RULE"
 }
 ENFORCEMENT_VALUES = {"DATABASE", "APPLICATION"}
 FIELD_ORIGINS = {"REQUIREMENT", "RELATIONSHIP", "SYSTEM"}
-CHECK_KINDS = {
-    "min_length", "max_length", "pattern", "date_past", "date_future", "enum", "minimum", "maximum", "format"
-}
 
 
 def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
@@ -136,7 +133,7 @@ CONSTRAINT_DECISION_SCHEMA: dict[str, Any] = {
                 "type": "object", "additionalProperties": False,
                 "required": ["type", "fields", "description", "enforcement"],
                 "properties": {
-                    "type": {"type": "string", "enum": ["UNIQUE", "COMPOSITE_UNIQUE", "CHECK", "APPLICATION_RULE"]},
+                    "type": {"type": "string", "enum": ["UNIQUE", "COMPOSITE_UNIQUE", "APPLICATION_RULE"]},
                     "fields": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                     "description": {"type": "string"},
                     "enforcement": {"type": "string", "enum": sorted(ENFORCEMENT_VALUES)},
@@ -217,13 +214,17 @@ Valid no-relationship output example:
 
 CONSTRAINT_INSTRUCTIONS = """You are Pass 4, CONSTRAINT_RESOLUTION, of a database schema compiler.
 For exactly one atomic requirement, extract integrity rules not already represented by field properties or
-relationships. Use UNIQUE, COMPOSITE_UNIQUE, CHECK, or APPLICATION_RULE and fully qualified entity.field symbols.
-DATABASE enforcement is only for rules a database can enforce without request/session context. Do not create or
-change entities, fields, or relationships, and do not emit SQL. The compiler adds structural constraints itself.
+relationships. Use UNIQUE, COMPOSITE_UNIQUE, or APPLICATION_RULE and fully qualified entity.field symbols.
+Simple length, range, enum, pattern, and date rules belong to field properties and must not be repeated here.
+Use APPLICATION_RULE for cross-field or contextual rules because this response has no executable expression AST.
+DATABASE enforcement is only valid for UNIQUE and COMPOSITE_UNIQUE. Do not create or change entities, fields,
+or relationships, and do not emit SQL. If a rule cannot be expressed with a known field list, omit it; the compiler
+will warn and skip an invalid constraint rather than inventing a database expression. The compiler adds structural
+constraints itself.
 
 Return exactly one JSON object with these keys and no others:
 - requirement_id: copy the supplied requirement.requirement_id exactly.
-- constraints: array of {"type": "UNIQUE" | "COMPOSITE_UNIQUE" | "CHECK" | "APPLICATION_RULE",
+- constraints: array of {"type": "UNIQUE" | "COMPOSITE_UNIQUE" | "APPLICATION_RULE",
   "fields": [one or more fully-qualified entity.field names], "description": string,
   "enforcement": "DATABASE" | "APPLICATION"}. Use [] when no additional business rule exists.
 
@@ -239,8 +240,8 @@ class DatabasePassResult:
     schema: dict[str, Any]
     node_states: dict[str, str]
     errors: list[str] = field(default_factory=list)
-    cache_paths: dict[str, str] = field(default_factory=dict)
     pass_artifacts: dict[str, str] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -258,6 +259,7 @@ class DatabaseSchemaState:
         self.requirement_field_links: dict[str, set[str]] = {}
         self.requirement_relationship_links: dict[str, set[str]] = {}
         self.requirement_constraint_links: dict[str, set[str]] = {}
+        self.warnings: list[str] = []
 
     def entity_headers(self) -> list[dict[str, str]]:
         return [{"key": item["key"], "description": item["description"]} for item in self._ordered_entities()]
@@ -297,8 +299,8 @@ class DatabaseSchemaState:
                 continue
             if key not in self.entities:
                 self.entities[key] = {
-                    "key": key, "table": key, "description": str(raw.get("description", "")).strip(),
-                    "requirement_ids": [], "fields": {}, "relations": {},
+                    "key": key, "description": str(raw.get("description", "")).strip(),
+                    "requirement_ids": [], "fields": {},
                 }
                 self._add_field(key, {
                     "name": "id", "type": "uuid", "nullable": False,
@@ -371,11 +373,7 @@ class DatabaseSchemaState:
                     fk_entity, fk_field = relationship["fk_entity"], relationship["fk_field"]
                     field_item = self.entities[fk_entity]["fields"][fk_field]
                     field_item["nullable"] = not relationship["child_required"]
-                    field_item["required"] = relationship["child_required"]
                     self._link_field(requirement_id, fk_entity, fk_field)
-                    relation = self.entities[fk_entity]["relations"][parent]
-                    relation["required"] = relationship["child_required"]
-                    _append_unique(relation["sources"], requirement_id)
                 if relationship["association_entity"]:
                     association = relationship["association_entity"]
                     self._link_entity(requirement_id, association)
@@ -390,16 +388,20 @@ class DatabaseSchemaState:
             constraint_type = str(raw.get("type", ""))
             enforcement = str(raw.get("enforcement", ""))
             fields = [str(value) for value in raw.get("fields", [])]
-            if constraint_type not in {"UNIQUE", "COMPOSITE_UNIQUE", "CHECK", "APPLICATION_RULE"}:
-                errors.append(_format_error("ARC2241", f"Invalid Pass 4 constraint type: {constraint_type}.", node_id=requirement_id))
+            if constraint_type not in {"UNIQUE", "COMPOSITE_UNIQUE", "APPLICATION_RULE"}:
+                self.warnings.append(_format_error("ARC2240", f"Skipped invalid Pass 4 constraint type: {constraint_type}.", node_id=requirement_id))
             elif enforcement not in ENFORCEMENT_VALUES or (constraint_type == "APPLICATION_RULE" and enforcement != "APPLICATION"):
-                errors.append(_format_error("ARC2242", f"Invalid constraint enforcement: {enforcement}.", node_id=requirement_id))
+                self.warnings.append(_format_error("ARC2240", "Skipped Pass 4 constraint with invalid enforcement.", node_id=requirement_id))
             elif not fields or any(not self._field_exists(ref) for ref in fields):
-                errors.append(_format_error("ARC2243", "Pass 4 constraint references an unknown field.", node_id=requirement_id))
+                self.warnings.append(_format_error("ARC2240", "Skipped Pass 4 constraint with an unknown field.", node_id=requirement_id))
             elif any(ref.partition(".")[0] not in allowed for ref in fields):
-                errors.append(_format_error("ARC2244", "Pass 4 constraint is outside its requirement slice.", node_id=requirement_id))
+                self.warnings.append(_format_error("ARC2240", "Skipped Pass 4 constraint outside its requirement slice.", node_id=requirement_id))
+            elif constraint_type == "UNIQUE" and len(fields) != 1:
+                self.warnings.append(_format_error("ARC2240", "Skipped UNIQUE constraint with the wrong field count.", node_id=requirement_id))
+            elif constraint_type == "COMPOSITE_UNIQUE" and len(fields) < 2:
+                self.warnings.append(_format_error("ARC2240", "Skipped COMPOSITE_UNIQUE constraint with too few fields.", node_id=requirement_id))
             else:
-                self._add_constraint(constraint_type, fields, str(raw.get("description", "")).strip(), enforcement, requirement_id, origin="REQUIREMENT")
+                self._add_constraint(constraint_type, fields, str(raw.get("description", "")).strip(), enforcement, requirement_id)
 
     def add_static_constraints(self) -> None:
         """Lower structural facts to constraints without an LLM call."""
@@ -409,27 +411,20 @@ class DatabaseSchemaState:
                 ref = f"{entity['key']}.{field_item['name']}"
                 for source in field_item["requirement_ids"] or ["SYSTEM"]:
                     if field_item.get("primary_key"):
-                        self._add_constraint("PRIMARY_KEY", [ref], "Entity primary key.", "DATABASE", source, origin="SYSTEM")
+                        self._add_constraint("PRIMARY_KEY", [ref], "Entity primary key.", "DATABASE", source)
                     if not field_item["nullable"]:
-                        self._add_constraint("NOT_NULL", [ref], "Field is required.", "DATABASE", source, origin=field_item["origin"])
+                        self._add_constraint("NOT_NULL", [ref], "Field is required.", "DATABASE", source)
                     if field_item.get("references"):
                         self._add_constraint(
                             "FOREIGN_KEY", [ref, field_item["references"]], "Relationship foreign key.",
-                            "DATABASE", source, origin="RELATIONSHIP",
-                        )
-                    for kind, value in sorted(field_item.get("properties", {}).items()):
-                        if kind == "default":
-                            continue
-                        self._add_constraint(
-                            "CHECK", [ref], f"{kind}={json.dumps(value, ensure_ascii=False, sort_keys=True)}",
-                            "APPLICATION" if kind == "format" else "DATABASE", source, origin=field_item["origin"],
+                            "DATABASE", source,
                         )
         for relationship in self.relationships.values():
             if relationship["type"] == "ONE_TO_ONE" and relationship["fk_entity"] and relationship["fk_field"]:
                 for source in relationship["requirement_ids"] or ["SYSTEM"]:
                     self._add_constraint(
                         "UNIQUE", [f"{relationship['fk_entity']}.{relationship['fk_field']}"],
-                        "One-to-one relationship.", "DATABASE", source, origin="RELATIONSHIP",
+                        "One-to-one relationship.", "DATABASE", source,
                     )
             if relationship["type"] == "MANY_TO_MANY" and relationship["association_entity"]:
                 association = relationship["association_entity"]
@@ -440,7 +435,7 @@ class DatabaseSchemaState:
                 for source in relationship["requirement_ids"] or ["SYSTEM"]:
                     self._add_constraint(
                         "COMPOSITE_UNIQUE", fields, "Association pair must be unique.",
-                        "DATABASE", source, origin="RELATIONSHIP",
+                        "DATABASE", source,
                     )
 
     def to_schema(self, *, status: str) -> dict[str, Any]:
@@ -473,34 +468,11 @@ class DatabaseSchemaState:
 
     def _public_entity(self, entity: dict[str, Any]) -> dict[str, Any]:
         fields = [copy.deepcopy(entity["fields"][name]) for name in sorted(entity["fields"])]
-        indexes: list[dict[str, Any]] = []
-        for constraint in self.constraints.values():
-            refs = constraint["fields"]
-            if constraint["type"] in {"UNIQUE", "COMPOSITE_UNIQUE"} and refs and all(
-                ref.startswith(f"{entity['key']}.") for ref in refs
-            ):
-                indexes.append({
-                    "fields": [ref.partition(".")[2] for ref in refs],
-                    "unique": True,
-                    "sources": list(constraint["requirement_ids"]),
-                })
-        checks: list[dict[str, Any]] = []
-        for field_item in fields:
-            for kind, value in field_item.get("properties", {}).items():
-                if kind in CHECK_KINDS:
-                    checks.append({
-                        "field": field_item["name"], "kind": kind, "value": str(value),
-                        "sources": list(field_item["requirement_ids"]),
-                    })
         return {
-            "key": entity["key"], "name": entity["key"], "table": entity["table"],
+            "key": entity["key"],
             "description": entity["description"],
-            "sources": list(entity["requirement_ids"]), "requirement_ids": list(entity["requirement_ids"]),
+            "requirement_ids": list(entity["requirement_ids"]),
             "fields": fields,
-            # Nested logical relations retain the Stage 2 database-slice contract.
-            "relations": [copy.deepcopy(entity["relations"][name]) for name in sorted(entity["relations"])],
-            "indexes": sorted(indexes, key=lambda item: item["fields"]),
-            "checks": sorted(checks, key=lambda item: (item["field"], item["kind"], item["value"])),
         }
 
     def _link_entity(self, requirement_id: str, key: str) -> None:
@@ -510,7 +482,6 @@ class DatabaseSchemaState:
     def _link_field(self, requirement_id: str, entity_key: str, field_name: str) -> None:
         field_item = self.entities[entity_key]["fields"][field_name]
         _append_unique(field_item["requirement_ids"], requirement_id)
-        _append_unique(field_item["sources"], requirement_id)
         self.requirement_field_links.setdefault(requirement_id, set()).add(f"{entity_key}.{field_name}")
 
     def _add_field(
@@ -533,29 +504,22 @@ class DatabaseSchemaState:
                 errors.append(_format_error("ARC2227", f"Conflicting field declaration: {entity_key}.{name}.", node_id=requirement_id))
                 return
             existing["nullable"] = existing["nullable"] and bool(raw["nullable"])
-            existing["required"] = not existing["nullable"]
             _merge_properties(existing["properties"], raw.get("properties", {}), entity_key, name, requirement_id, errors)
         else:
             existing = {
                 "name": name,
                 "type": field_type,
-                "logical_type": field_type,
                 "nullable": bool(raw["nullable"]),
-                "required": not bool(raw["nullable"]),
-                "unique": name == "id",
-                "case_insensitive": False,
                 "primary_key": name == "id",
                 "description": str(raw.get("description", "")).strip(),
                 "properties": copy.deepcopy(raw.get("properties", {})),
                 "origin": str(raw.get("origin", "REQUIREMENT")),
                 "references": raw.get("references"),
                 "requirement_ids": [],
-                "sources": [],
             }
             self.entities[entity_key]["fields"][name] = existing
         if requirement_id != "SYSTEM":
             _append_unique(existing["requirement_ids"], requirement_id)
-            _append_unique(existing["sources"], requirement_id)
             if trace:
                 self.requirement_field_links.setdefault(requirement_id, set()).add(f"{entity_key}.{name}")
 
@@ -569,19 +533,14 @@ class DatabaseSchemaState:
                 "description": f"Reference to {parent}.", "properties": {}, "origin": "RELATIONSHIP",
                 "references": f"{parent}.id",
             }, requirement_id, errors)
-            self.entities[child]["relations"][parent] = {
-                "name": parent, "target_entity": parent,
-                "cardinality": "ONE_TO_ONE" if relationship["type"] == "ONE_TO_ONE" else "MANY_TO_ONE",
-                "required": relationship["child_required"], "fk_field": field_name, "sources": [requirement_id],
-            }
             return
 
         association = _association_entity_key(parent, child)
         relationship["association_entity"] = association
         if association not in self.entities:
             self.entities[association] = {
-                "key": association, "table": association, "description": f"Association between {parent} and {child}.",
-                "requirement_ids": [], "fields": {}, "relations": {},
+                "key": association, "description": f"Association between {parent} and {child}.",
+                "requirement_ids": [], "fields": {},
             }
             self._add_field(association, {
                 "name": "id", "type": "uuid", "nullable": False,
@@ -595,13 +554,9 @@ class DatabaseSchemaState:
                 "name": name, "type": "foreign_key", "nullable": False, "description": f"Reference to {target}.",
                 "properties": {}, "origin": "RELATIONSHIP", "references": f"{target}.id",
             }, requirement_id, errors)
-            self.entities[association]["relations"][target] = {
-                "name": target, "target_entity": target, "cardinality": "MANY_TO_ONE", "required": True,
-                "fk_field": name, "sources": [requirement_id],
-            }
         self._add_constraint(
             "COMPOSITE_UNIQUE", [f"{association}.{parent}_id", f"{association}.{child}_id"],
-            "Association pair must be unique.", "DATABASE", requirement_id, origin="RELATIONSHIP",
+            "Association pair must be unique.", "DATABASE", requirement_id,
         )
 
     def _add_constraint(
@@ -611,19 +566,16 @@ class DatabaseSchemaState:
         description: str,
         enforcement: str,
         requirement_id: str,
-        *,
-        origin: str,
     ) -> None:
         identity = {"type": constraint_type, "fields": fields, "enforcement": enforcement, "description": description}
         digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:12]
         constraint_id = f"constraint_{constraint_type.lower()}_{digest}"
         constraint = self.constraints.setdefault(constraint_id, {
             "id": constraint_id, "type": constraint_type, "fields": list(fields), "description": description,
-            "enforcement": enforcement, "origin": origin, "requirement_ids": [], "sources": [],
+            "enforcement": enforcement, "requirement_ids": [],
         })
         if requirement_id != "SYSTEM":
             _append_unique(constraint["requirement_ids"], requirement_id)
-            _append_unique(constraint["sources"], requirement_id)
             self.requirement_constraint_links.setdefault(requirement_id, set()).add(constraint_id)
 
     def _field_exists(self, reference: str) -> bool:
@@ -636,9 +588,8 @@ class DatabaseSchemaPass:
     def __init__(self, model: StructuredModel, artifact_root: Path) -> None:
         self._model = model
         self._artifact_root = artifact_root.expanduser().resolve()
-        arc_root = self._artifact_root.parent if self._artifact_root.name == "compiler" else self._artifact_root
-        self._database_root = arc_root / "database"
-        self._log = SynchronousLog("DatabaseSchemaPass", workspace_root=arc_root.parent)
+        self._database_root = self._artifact_root / "database"
+        self._log = SynchronousLog("DatabaseSchemaPass", workspace_root=self._artifact_root.parent)
         self._retry_count = _bounded_env_int("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", 2, 0, 10)
         self._trace_enabled = _enabled_env_flag("ARC_DATABASE_TRACE", default=True)
 
@@ -646,8 +597,6 @@ class DatabaseSchemaPass:
         self,
         requirement_ir: dict[str, Any],
         dependency_graph: dict[str, Any] | None = None,
-        *,
-        resume: bool = False,
     ) -> DatabasePassResult:
         shutil.rmtree(self._database_root, ignore_errors=True)
         nodes = requirement_ir.get("nodes", {})
@@ -659,7 +608,6 @@ class DatabaseSchemaPass:
         effective_dependencies = (dependency_graph or {}).get("atomic_dependencies", {})
         states = {node_id: "DISCOVERED" for node_id in requirements}
         errors: list[str] = []
-        cache_paths: dict[str, str] = {}
         pass_artifacts: dict[str, str] = {}
         state = DatabaseSchemaState()
         for node_id in requirements:
@@ -691,6 +639,7 @@ class DatabaseSchemaPass:
                         phase, node_id, node, nodes, state, effective_dependencies
                     ),
                     errors=errors,
+                    warnings=state.warnings,
                 )
                 if decision is None:
                     states[node_id] = "FAILED"
@@ -717,7 +666,7 @@ class DatabaseSchemaPass:
             self._trace(f"PASS_COMPLETED phase={phase} requirements={len(requirements)}")
             if errors:
                 return DatabasePassResult(
-                    state.to_schema(status="PROPOSED"), states, errors, cache_paths, pass_artifacts
+                    state.to_schema(status="PROPOSED"), states, errors, pass_artifacts, state.warnings
                 )
 
         # Idempotent: Pass 4's checkpoint and the final schema contain the
@@ -727,7 +676,7 @@ class DatabaseSchemaPass:
         errors.extend(validate_database_schema(schema, expected_requirement_ids=set(requirements)))
         schema["status"] = "RESOLVED" if not errors else "PROPOSED"
         states.update({node_id: "SCHEMA_ANALYZED" if not errors else "FAILED" for node_id in requirements})
-        return DatabasePassResult(schema, states, errors, cache_paths, pass_artifacts)
+        return DatabasePassResult(schema, states, errors, pass_artifacts, state.warnings)
 
     def _context_for(
         self,
@@ -766,6 +715,7 @@ class DatabaseSchemaPass:
         node_id: str,
         context: dict[str, Any],
         errors: list[str],
+        warnings: list[str],
     ) -> dict[str, Any] | None:
         feedback: list[str] = []
         for attempt in range(self._retry_count + 1):
@@ -820,6 +770,14 @@ class DatabaseSchemaPass:
                         f"MODEL_NORMALIZED phase={phase} requirement={node_id} "
                         f"action={note}"
                     )
+                    if phase == "pass4_constraints" and note.startswith("skipped_constraint:"):
+                        warnings.append(
+                            _format_error(
+                                "ARC2240",
+                                note.removeprefix("skipped_constraint: "),
+                                node_id=node_id,
+                            )
+                        )
                 feedback = _validate_decision_shape(phase, node_id, decision)
                 feedback.extend(_validate_decision_context(phase, decision, context))
                 if not feedback:
@@ -1001,7 +959,7 @@ def hydrate_database_schema(
     structure: dict[str, Any],
     traceability: dict[str, dict[str, list[str]]],
 ) -> dict[str, Any]:
-    """Restore internal compatibility metadata from compact persisted artifacts."""
+    """Hydrate compiler provenance from compact schema and traceability artifacts."""
 
     schema = copy.deepcopy(structure)
     field_requirements: dict[str, list[str]] = {}
@@ -1026,41 +984,22 @@ def hydrate_database_schema(
 
     entity_map = {str(item.get("key")): item for item in schema.get("entities", []) if isinstance(item, dict)}
     for entity_key, entity in entity_map.items():
-        sources = sorted(set(entity_requirements.get(entity_key, [])))
+        requirement_ids = sorted(set(entity_requirements.get(entity_key, [])))
         entity.update({
-            "name": entity_key,
-            "table": entity_key,
-            "sources": sources,
-            "requirement_ids": sources,
-            "relations": [],
-            "indexes": [],
-            "checks": [],
+            "requirement_ids": requirement_ids,
         })
         for field_item in entity.get("fields", []):
             name = str(field_item.get("name", ""))
             reference = f"{entity_key}.{name}"
-            field_sources = sorted(set(field_requirements.get(reference, [])))
+            field_requirement_ids = sorted(set(field_requirements.get(reference, [])))
             origin = "SYSTEM" if name == "id" else (
                 "RELATIONSHIP" if field_item.get("references") is not None else "REQUIREMENT"
             )
             field_item.update({
-                "logical_type": field_item.get("type"),
-                "required": not bool(field_item.get("nullable")),
-                "unique": name == "id",
-                "case_insensitive": False,
                 "primary_key": name == "id",
                 "origin": origin,
-                "requirement_ids": field_sources,
-                "sources": field_sources,
+                "requirement_ids": field_requirement_ids,
             })
-            for kind, value in sorted(field_item.get("properties", {}).items()):
-                if kind in CHECK_KINDS:
-                    entity["checks"].append({
-                        "field": name,
-                        "kind": kind,
-                        "value": str(value),
-                        "sources": field_sources,
-                    })
 
     relationships: list[dict[str, Any]] = []
     for item in schema.get("relationships", []):
@@ -1079,36 +1018,7 @@ def hydrate_database_schema(
         relationships.append(relationship)
         for requirement_id in requirement_ids:
             internal_links[requirement_id]["relationships"].append(relationship_id)
-        fk_entity = entity_map.get(str(relationship.get("fk_entity", "")))
-        if fk_entity is not None and relationship.get("fk_field"):
-            target = str(relationship.get("parent", ""))
-            fk_entity["relations"].append({
-                "name": target,
-                "target_entity": target,
-                "cardinality": "ONE_TO_ONE" if relationship.get("type") == "ONE_TO_ONE" else "MANY_TO_ONE",
-                "required": bool(relationship.get("child_required")),
-                "fk_field": relationship["fk_field"],
-                "sources": requirement_ids,
-            })
     schema["relationships"] = relationships
-
-    # Association entities do not have a single relationship-level FK slot;
-    # restore their logical relations directly from each persisted FK field.
-    for entity_key, entity in entity_map.items():
-        known_targets = {str(item.get("target_entity", "")) for item in entity["relations"]}
-        for field_item in entity.get("fields", []):
-            target = str(field_item.get("references", "")).partition(".")[0]
-            if not target or target in known_targets:
-                continue
-            entity["relations"].append({
-                "name": target,
-                "target_entity": target,
-                "cardinality": "MANY_TO_ONE",
-                "required": not bool(field_item.get("nullable")),
-                "fk_field": field_item.get("name"),
-                "sources": list(field_item.get("sources", [])),
-            })
-            known_targets.add(target)
 
     constraints: list[dict[str, Any]] = []
     for item in schema.get("constraints", []):
@@ -1123,25 +1033,13 @@ def hydrate_database_schema(
             for reference in constraint.get("fields", [])
             for requirement_id in field_requirements.get(str(reference), [])
         })
-        origin = "SYSTEM" if constraint.get("type") in {"PRIMARY_KEY", "FOREIGN_KEY"} else "REQUIREMENT"
         constraint.update({
             "id": constraint_id,
-            "origin": origin,
             "requirement_ids": requirement_ids,
-            "sources": requirement_ids,
         })
         constraints.append(constraint)
         for requirement_id in requirement_ids:
             internal_links[requirement_id]["constraints"].append(constraint_id)
-        refs = constraint.get("fields", [])
-        if constraint.get("type") in {"UNIQUE", "COMPOSITE_UNIQUE"} and refs:
-            entity_key = str(refs[0]).partition(".")[0]
-            if entity_key in entity_map and all(str(ref).startswith(f"{entity_key}.") for ref in refs):
-                entity_map[entity_key]["indexes"].append({
-                    "fields": [str(ref).partition(".")[2] for ref in refs],
-                    "unique": True,
-                    "sources": requirement_ids,
-                })
     schema["constraints"] = constraints
     schema["traceability"] = {"requirements": internal_links}
     return schema
@@ -1404,7 +1302,7 @@ def _validate_decision_shape(phase: str, node_id: str, decision: Any) -> list[st
             if not isinstance(item, dict):
                 errors.append("Pass 4 constraints contains a non-object")
                 continue
-            if item.get("type") not in {"UNIQUE", "COMPOSITE_UNIQUE", "CHECK", "APPLICATION_RULE"}:
+            if item.get("type") not in {"UNIQUE", "COMPOSITE_UNIQUE", "APPLICATION_RULE"}:
                 errors.append("Pass 4 constraint has an invalid type")
             if item.get("enforcement") not in ENFORCEMENT_VALUES:
                 errors.append("Pass 4 constraint has invalid enforcement")
@@ -1525,22 +1423,10 @@ def _validate_decision_context(
         return errors
 
     if phase == "pass4_constraints":
-        known_fields = {
-            f"{entity.get('key')}.{field_item.get('name')}"
-            for entity in context.get("schema", {}).get("entities", [])
-            if isinstance(entity, dict)
-            for field_item in entity.get("fields", [])
-            if isinstance(field_item, dict)
-        }
-        for item in decision.get("constraints", []):
-            if not isinstance(item, dict):
-                continue
-            references = {str(value) for value in item.get("fields", [])}
-            if references - known_fields:
-                errors.append(
-                    "Pass 4 references unknown fields: "
-                    + ", ".join(sorted(references - known_fields))
-                )
+        # Constraint references are deliberately best-effort.  The state
+        # applicator emits a warning and omits an unlowerable row, while the
+        # entity/field/relationship passes remain hard semantic boundaries.
+        return errors
     return errors
 
 
@@ -1550,6 +1436,51 @@ def _normalize_decision_context(
     context: dict[str, Any],
 ) -> tuple[Any, list[str]]:
     """Repair omissions and repetitions whose meaning is deterministic."""
+
+    if phase == "pass4_constraints" and isinstance(decision, dict):
+        raw_constraints = decision.get("constraints")
+        if not isinstance(raw_constraints, list):
+            return decision, []
+        normalized = copy.deepcopy(decision)
+        constraints: list[dict[str, Any]] = []
+        notes: list[str] = []
+        allowed_types = {"UNIQUE", "COMPOSITE_UNIQUE", "APPLICATION_RULE"}
+        for raw in raw_constraints:
+            if not isinstance(raw, dict):
+                notes.append("skipped_constraint: constraint is not an object")
+                continue
+            constraint_type = str(raw.get("type", "")).strip().upper()
+            enforcement = str(raw.get("enforcement", "")).strip().upper()
+            fields = raw.get("fields")
+            if constraint_type not in allowed_types:
+                notes.append(f"skipped_constraint: unsupported constraint type {constraint_type or '<empty>'}")
+                continue
+            if enforcement not in ENFORCEMENT_VALUES or (
+                constraint_type == "APPLICATION_RULE" and enforcement != "APPLICATION"
+            ):
+                notes.append("skipped_constraint: invalid enforcement")
+                continue
+            if not isinstance(fields, list) or any(not isinstance(value, str) or not value.strip() for value in fields):
+                notes.append("skipped_constraint: fields must be a non-empty string list")
+                continue
+            fields = list(dict.fromkeys(value.strip() for value in fields))
+            if not fields:
+                notes.append("skipped_constraint: fields must be a non-empty string list")
+                continue
+            if constraint_type == "UNIQUE" and len(fields) != 1:
+                notes.append("skipped_constraint: UNIQUE requires exactly one field")
+                continue
+            if constraint_type == "COMPOSITE_UNIQUE" and len(fields) < 2:
+                notes.append("skipped_constraint: COMPOSITE_UNIQUE requires at least two fields")
+                continue
+            constraints.append({
+                "type": constraint_type,
+                "fields": fields,
+                "description": str(raw.get("description", "")).strip(),
+                "enforcement": enforcement,
+            })
+        normalized["constraints"] = constraints
+        return normalized, notes
 
     if phase != "pass2_fields" or not isinstance(decision, dict):
         return decision, []
