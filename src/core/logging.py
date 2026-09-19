@@ -1,31 +1,10 @@
 from __future__ import annotations
 
-import json
 import os
 import sys
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path
-from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-
-def format_json_for_log(value: Any) -> str:
-    try:
-        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
-    except TypeError:
-        return repr(value)
-
-
-def log_to_logger(logger: Any | None, event: str, *, label: str, thread_id: str, body: str = "") -> None:
-    if logger is None:
-        return
-    message = f"{event} label={label or '-'} thread_id={thread_id}"
-    if body:
-        message = f"{message}\n{body}"
-    if hasattr(logger, "info"):
-        logger.info("%s", message)
-    elif callable(logger):
-        logger(message)
 
 
 def append_debug_log(
@@ -96,9 +75,6 @@ class SynchronousLog:
     def info(self, message: str, *, node_id: str | None = None) -> None:
         self._write(message, status=None, node_id=node_id)
 
-    def error(self, message: str, *, node_id: str | None = None) -> None:
-        self._write(message, status="error", node_id=node_id)
-
     def _write(self, message: str, *, status: str | None, node_id: str | None) -> None:
         append_debug_log(
             self._agent_name,
@@ -111,14 +87,9 @@ class SynchronousLog:
 
 
 ANSI_RESET = "\033[0m"
-ANSI_DIM = "\033[2m"
 ANSI_BOLD = "\033[1m"
 ANSI_RED = "\033[31m"
-ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
-ANSI_BLUE = "\033[34m"
-ANSI_MAGENTA = "\033[35m"
-ANSI_CYAN = "\033[36m"
 ANSI_GRAY = "\033[90m"
 
 
@@ -163,15 +134,7 @@ def _agent_color(agent_name: str, message: str, status: str | None) -> str:
         return ANSI_RED + ANSI_BOLD
     if status == "warning":
         return ANSI_YELLOW + ANSI_BOLD
-    if "tool-call>" in normalized:
-        return ANSI_CYAN + ANSI_BOLD
-    if "tool-result>" in normalized:
-        return ANSI_GREEN + ANSI_BOLD
-    if "model>" in normalized or "model-final>" in normalized:
-        return ANSI_MAGENTA + ANSI_BOLD
-    if "agent" in normalized or "agent trace" in normalized:
-        return ANSI_BLUE + ANSI_BOLD
-    if agent_name in {"System", "Compiler", "RequirementLoader"}:
+    if agent_name in {"System", "Compiler"}:
         return ANSI_GRAY + ANSI_BOLD
     return ANSI_BOLD
 
@@ -181,12 +144,4 @@ def _color_message(message: str, status: str | None) -> str:
         return f"{ANSI_RED}{message}{ANSI_RESET}"
     if status == "warning":
         return f"{ANSI_YELLOW}{message}{ANSI_RESET}"
-    if message.startswith("tool-call>"):
-        return f"{ANSI_CYAN}{message}{ANSI_RESET}"
-    if message.startswith("tool-result>"):
-        return f"{ANSI_GREEN}{message}{ANSI_RESET}"
-    if message.startswith("model>") or message.startswith("model-final>"):
-        return f"{ANSI_MAGENTA}{message}{ANSI_RESET}"
-    if message.startswith("agent trace:"):
-        return f"{ANSI_DIM}{message}{ANSI_RESET}"
     return message

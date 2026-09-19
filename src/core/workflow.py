@@ -1,98 +1,67 @@
 from __future__ import annotations
 
 import inspect
-import shutil
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from arcbench_agent_runtime.runtime import AgentRuntime
 from compiler import CompilationRequest, Compiler
-from core.config import set_app_type, set_web_port, set_workspace_root
-from core.service import configure_runtime
+from core.config import set_workspace_root
 
 
 LogCallback = Callable[[str, str, str | None, str | None], Awaitable[None] | None]
 
 
 class ARCWorkflowManager:
-    """Compatibility facade from the existing CLI to the compiler interface."""
+    """Configure one compiler run and expose its result to the CLI."""
 
     def __init__(
         self,
         workspace_path: str,
         requirement_path: str = "",
-        app_type: str = "web",
         web_port: int = 3000,
         log_cb: LogCallback | None = None,
     ) -> None:
         self.workspace_path = Path(workspace_path).expanduser().resolve()
         self.requirement_path = Path(requirement_path).expanduser().resolve()
-        self.app_type = str(app_type or "web").strip().lower()
         self.web_port = int(web_port)
         self.log_cb = log_cb or _default_log_cb
-
-    async def cleanup_workspace(self) -> bool:
-        await self._log("Compiler", "Clear-and-recompile requested. Cleaning workspace...")
-        try:
-            self.workspace_path.mkdir(parents=True, exist_ok=True)
-            for item in self.workspace_path.iterdir():
-                if item.name == "requirements":
-                    continue
-                if item.is_dir():
-                    shutil.rmtree(item)
-                else:
-                    item.unlink()
-            return True
-        except OSError as exc:
-            await self._log("Compiler", f"Failed to clean workspace: {exc}", "error")
-            return False
 
     async def start_compilation(
         self,
         *,
-        clear_all: bool = False,
-        resume_from_queue: bool = False,
         start_from: str = "PREPROCESSING",
-        retry_failed: bool = False,
-        retry_node_ids: list[str] | None = None,
     ) -> dict[str, object]:
         await self._log("Compiler", "ARC compilation started.")
-        if clear_all and not await self.cleanup_workspace():
-            return {"ok": False, "complete": False, "states": {}, "failed_nodes": []}
-
         self.workspace_path.mkdir(parents=True, exist_ok=True)
         set_workspace_root(self.workspace_path)
-        set_app_type(self.app_type)
-        set_web_port(self.web_port)
-        runtime = configure_runtime(
-            project_dir=str(self.workspace_path),
-            app_type=self.app_type,
-            web_port=self.web_port,
-        )
-        runtime.traceability.init_store(reset=False)
-        if resume_from_queue:
-            runtime.events.mark_run_resumed("ARC compiler resumed from processing queue.")
-        else:
-            runtime.events.mark_run_started("ARC deterministic compiler run started.")
+        runtime = AgentRuntime.for_project(self.workspace_path)
+        runtime.traceability.init_store()
+        runtime.events.mark_run_started("ARC deterministic compiler run started.")
 
         compiler = Compiler(runtime, self.log_cb)
         result = await compiler.compile(
             CompilationRequest(
                 requirement_path=self.requirement_path,
                 output_dir=self.workspace_path,
-                app_type=self.app_type,
                 web_port=self.web_port,
-                resume=resume_from_queue,
                 start_from=start_from,
-                retry_failed=retry_failed,
-                retry_node_ids=tuple(retry_node_ids or ()),
             )
         )
-        if result.complete and result.ok:
-            runtime.events.mark_run_completed("ARC compilation completed.")
-            await self._log("Compiler", "Compilation finished successfully.")
-        elif result.ok:
-            runtime.events.mark_run_paused("ARC compilation paused after the latest enabled pass.")
-            await self._log("Compiler", "Compilation paused after the latest enabled pass.", "warning")
+        if result.ok:
+            if result.failed_nodes:
+                runtime.events.mark_run_completed(
+                    "ARC compilation completed with skipped requirements."
+                )
+                await self._log(
+                    "Compiler",
+                    "Compilation finished with skipped requirements: "
+                    f"{sorted(result.failed_nodes)}.",
+                    "warning",
+                )
+            else:
+                runtime.events.mark_run_completed("ARC compilation completed.")
+                await self._log("Compiler", "Compilation finished successfully.")
         else:
             runtime.events.mark_run_failed("ARC compiler pass failed.")
             await self._log("Compiler", "Compilation failed; inspect the compiler log.", "error")

@@ -8,86 +8,10 @@ from typing import Any
 
 from colorama import Fore, Style
 
-_workspace_root = Path(os.environ.get("ARC_WORKSPACE_ROOT", ".")).expanduser().resolve()
-_app_type = os.environ.get("ARC_APP_TYPE", "web").strip().lower() or "web"
-_web_port = int(os.environ.get("ARC_WEB_PORT", "3000") or 3000)
-_android_package = os.environ.get("ARC_ANDROID_PACKAGE", "com.example.template").strip() or "com.example.template"
-
-
-def load_project_env(env_path: str | os.PathLike[str] | None = None) -> None:
-    """Load a simple KEY=VALUE .env file without overriding existing variables."""
-
-    path = Path(env_path) if env_path else Path.cwd() / ".env"
-    if path.exists():
-        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-
-
 def set_workspace_root(path: str | os.PathLike[str]) -> None:
-    global _workspace_root
-    _workspace_root = Path(path).expanduser().resolve()
-    os.environ["ARC_WORKSPACE_ROOT"] = str(_workspace_root)
+    """Publish the active output workspace for compiler logging."""
 
-
-def get_workspace_root() -> str:
-    return str(_workspace_root)
-
-
-def get_abs_path(path: str | os.PathLike[str]) -> str:
-    candidate = Path(path)
-    if candidate.is_absolute():
-        return str(candidate.resolve())
-    return str((_workspace_root / candidate).resolve())
-
-
-def set_app_type(app_type: str) -> None:
-    global _app_type
-    _app_type = (app_type or "web").strip().lower() or "web"
-    os.environ["ARC_APP_TYPE"] = _app_type
-
-
-def get_app_type() -> str:
-    return _app_type
-
-
-def set_web_port(port: int | str) -> None:
-    global _web_port
-    _web_port = int(port)
-    os.environ["ARC_WEB_PORT"] = str(_web_port)
-
-
-def get_web_port() -> int:
-    return _web_port
-
-
-def get_web_base_url() -> str:
-    return f"http://localhost:{_web_port}"
-
-
-def build_web_runtime_env() -> dict[str, str]:
-    return {
-        "PORT": str(_web_port),
-        "ARC_WEB_PORT": str(_web_port),
-        "BASE_URL": get_web_base_url(),
-        "VITE_API_BASE_URL": get_web_base_url(),
-    }
-
-
-def set_android_package(package_name: str) -> None:
-    global _android_package
-    _android_package = str(package_name or "").strip() or "com.example.template"
-    os.environ["ARC_ANDROID_PACKAGE"] = _android_package
-
-
-def get_android_package() -> str:
-    return _android_package
+    os.environ["ARC_WORKSPACE_ROOT"] = str(Path(path).expanduser().resolve())
 
 
 def check_config() -> dict[str, Any]:
@@ -104,8 +28,8 @@ def check_config() -> dict[str, Any]:
     warnings = []
     info = []
 
-    # Model configuration is optional for the deterministic front end. Later
-    # semantic passes may require it, but CLI inspection and parsing must not.
+    # A full compile executes model-backed Database and Design passes. Doctor
+    # reports missing values as warnings so configuration can still be inspected.
     model_vars = {
         "OPENAI_API_KEY": "Main API key for model inference",
         "OPENAI_BASE_URL": "API base URL",
@@ -138,11 +62,6 @@ def check_config() -> dict[str, Any]:
             f"ARC_VISUAL_TIMEOUT_SECONDS must be numeric, got: {visual_timeout}"
         )
 
-    # Check debug flag
-    debug = os.environ.get("ARC_DEBUG", "0").strip().lower()
-    if debug not in {"0", "1", "false", "true", "no", "yes", "off", "on", ""}:
-        warnings.append(f"ARC_DEBUG has unexpected value: {debug} (expected 0 or 1)")
-
     # Check retry count
     retry_count = os.environ.get("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", "2").strip()
     try:
@@ -165,15 +84,15 @@ def check_config() -> dict[str, Any]:
     else:
         info.append(f"Python version: {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
 
-    info.append("Deterministic compiler front end: available")
+    info.append("ARC compiler: available")
 
-    # Check Node.js for web app type
+    # Check Node.js for generated Web workspaces.
     import shutil
     node_path = shutil.which("node")
     if node_path:
         info.append(f"Node.js: available at {node_path}")
     else:
-        warnings.append("Node.js not found (required for app-type=web)")
+        warnings.append("Node.js not found (required for Web project initialization and build)")
 
     return {
         "ok": len(errors) == 0,
@@ -229,8 +148,6 @@ def interactive_config_setup() -> int:
     Interactively create or update .env file with core configuration.
     Returns exit code: 0 on success, 1 on user cancellation.
     """
-    from pathlib import Path
-
     print(f"{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}ARC Configuration Setup{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}\n")
