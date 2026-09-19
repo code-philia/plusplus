@@ -1,1046 +1,408 @@
-你的想法非常适合用“**编译器**”而不是“Agent 写代码”来建模。核心原则应该是：
+# ARC Final Compiler Guide
 
-> **Agent 的自由度主要集中在前期 Design Compile；一旦设计被编译成结构化 IR，后面的 Skeleton、Test、Implementation 都尽可能变成受约束的机械过程。**
+ARC treats a structured requirement tree as source code. The compiler resolves
+its meaning into frozen intermediate representations, lowers those
+representations into a deterministic Web application skeleton, and records the
+result in one auditable workspace.
 
-你上传的需求本身已经很适合这么做。例如 `REQ-1.2` 显式依赖 `REQ-1.1`，`REQ-2.2` 依赖 `REQ-2.1`，而 `REQ-3.1` 同时依赖登录与选车能力，之后 `REQ-3.2` 再依赖 `REQ-3.1`。   
+This document is the authoritative description of the current pipeline. The
+implementation is Web-only and uses React + TypeScript + Vite + Tailwind CSS v4 on the frontend,
+Express + TypeScript on the backend, SQLite + Drizzle for persistence, and one
+npm workspace with one lockfile.
 
-系统正式定义成下面这条流水线：
+## 1. Compiler boundary
 
 ```text
-Requirement YAML
-      ↓
-Requirement AST
-      ↓
-Requirement DAG
-      ↓
-Global Analysis
-      ↓
-Design IR              ← 最重要
-      ↓
-Whole-program Skeleton
-      ↓
-Test IR / Test Code
-      ↓
-Node-by-node TDD Implementation
-      ↓
-Regression + Acceptance
+requirements.yaml
+  -> Requirement IR + dependency graph
+  -> Database Schema IR
+  -> Backend Design IR + API contracts
+  -> Frontend Design IR
+  -> initialized Web workspace
+  -> Backend and Frontend lowering
+  -> npm run build
+  -> Code Binding Registry
+  -> requirement-by-requirement frozen RED tests
+  -> marker-scoped implementation and layered verification
+  -> NODE_ACCEPTED
 ```
 
-其中 Stage 1 负责把 Requirement IR 编译为 Database Schema IR。当前四个 Pass、容错边界、
-静态校验和输出产物见 [Stage 1 数据库 Schema 编译实现指导](stage1_data_schema.md)。
+The model answers small semantic questions during Database, Backend Design,
+Frontend Design, and optional visual-reference analysis. It never chooses
+source paths, generated symbol IDs, imports, routes, package versions, or
+module call edges. Those facts are compiler-owned and deterministic.
 
-Stage 2 先生成精简的 Requirement Contract，再进行 Requirement→API→FUNC→DB 的逐层拆解。模型在每次
-拆解前自行思考当前模块的完成路径，但只返回直接子模块的 `kind/name/spec/inputs/outputs/effects` 固定模板。
-Compiler 根据列表顺序和接口自顶向下物化子模块。最终在 `.arc/design/` 输出四张 JSON 列表符号表：
-`requirement_contracts.json`、`api_modules.json`、`function_modules.json` 和 `db_modules.json`。调用及其 binding
-在内部表示数据流，落盘模块只记录 `callers` 与 `callees`；需求到设计符号的简洁关联写入
-`traceability/requirements.json`。当前不设计 UI。当前实现约束见
-[Stage 2 Design IR](stage_2_design_ir.md)，设计原则见 [Stage 2 指导](stage_2_guide.md)。
+The successful result is `DUAL_DESIGN_FROZEN`, a passing `PROJECT_BUILD` gate,
+a validated `CODE_BINDING_READY` registry, and `NODE_ACCEPTED` for every atomic
+requirement. Test generation and implementation are one vertical node-by-node
+TDD flow: each requirement's tests are frozen and observed RED immediately
+before its constrained implementation loop.
 
----
+## 2. Workspace artifacts
 
-## 1. 技术栈：全部 TypeScript
-
-优先选择一个**尽量简单、静态约束强、前后端共享类型方便**的技术栈。
-
-我建议：
-
-| 层                 | 推荐                                 |
-| ----------------- | ---------------------------------- |
-| Frontend          | React 18 + TypeScript + Vite       |
-| Routing           | React Router                       |
-| Backend           | Node.js + TypeScript + Express     |
-| DB                | SQLite                             |
-| DB access         | Drizzle ORM 或非常薄的 repository layer |
-| Schema validation | Zod                                |
-| API               | REST                               |
-| Unit test         | Vitest                             |
-| Backend API test  | Supertest                          |
-| E2E               | Playwright                         |
-| Package layout    | npm workspace / monorepo           |
-
-也就是：
+Every compilation writes stage-owned artifacts beneath `.arc`:
 
 ```text
-project/
-├── frontend/
+.arc/
+├── preprocessing/
+│   ├── requirement_ir.json
+│   └── dependency_graph.json
+├── database/
+│   ├── database_schema.json
+│   └── relationships.json
+├── design/
+│   ├── requirement_contracts.json
+│   ├── api_contracts.json
+│   ├── backend/
+│   │   ├── api_modules.json
+│   │   ├── function_modules.json
+│   │   └── db_modules.json
+│   └── frontend/
+│       ├── visual_references.json
+│       ├── layouts.json
+│       ├── pages.json
+│       ├── components.json
+│       ├── stores.json
+│       └── api_dependencies.json
+├── project/
+│   └── project-manifest.json
 ├── backend/
-├── shared/
-└── tests/
+│   ├── symbol_registry.json
+│   ├── file_registry.json
+│   ├── type_manifest.json
+│   ├── database_schema_manifest.json
+│   ├── db_modules_manifest.json
+│   ├── func_modules_manifest.json
+│   ├── api_modules_manifest.json
+│   ├── route_registry.json
+│   ├── import_plan.json
+│   └── manifest.json
+├── frontend/
+│   ├── symbol_registry.json
+│   ├── file_registry.json
+│   ├── route_registry.json
+│   ├── import_plan.json
+│   └── manifest.json
+└── traceability/
+    └── requirements.json
 ```
 
-其中我尤其建议：
+`traceability/requirements.json` is the only persistent owner of requirement
+links. Design artifacts do not duplicate those links. The generated workspace
+contains `frontend/`, `backend/`, `shared/`, and the fixed `tests/` workspace
+created during Project Initialization. Lowering also writes
+`.arc/code/code_bindings.json`, the authoritative IR-to-source and TypeScript
+type map used by the node TDD stage. Test materialization adds
+`.arc/tests/environment_manifest.json` and `.arc/tests/test_manifest.json`;
+executable tests are written beneath the
+generated workspace's `tests/unit`, `tests/integration`, and `tests/e2e` roots.
 
-```text
-shared/
-├── contracts/
-├── schemas/
-└── types/
-```
+## 3. Requirement preprocessing
 
-前后端不要各自“理解”API，而是共同依赖编译出来的 contract：
+The preprocessor parses YAML, normalizes FOLDER and ATOMIC nodes, assigns stable
+requirement and scenario IDs, validates dependency references, and emits a
+topological implementation order. Optional visual-reference paths are resolved
+relative to the requirement directory.
 
-```ts
-export const RegisterRequestSchema = z.object({
-  username: z.string(),
-  email: z.string(),
-  password: z.string(),
-  ...
-});
+The dependency graph is the only scheduling input used by later stages. A
+requirement is never sent to a model together with the entire document when a
+local requirement slice is sufficient.
 
-export type RegisterRequest =
-  z.infer<typeof RegisterRequestSchema>;
-```
+## 4. Database Schema IR
 
-这是降低 Agent 自由度非常有效的一步。
+Database design is four serial, stateful passes over each atomic requirement:
 
-> ** TypeScript + Schema + 显式 Contract。**
+1. Entity discovery: reuse or create persistent entities.
+2. Field discovery: reuse or create scalar fields and machine-readable field
+   properties.
+3. Relationship resolution: resolve cardinality and compiler-owned foreign
+   keys.
+4. Constraint resolution: emit `UNIQUE`, `COMPOSITE_UNIQUE`, or
+   `APPLICATION_RULE` constraints.
 
-因为你的目的不是追求开发灵活性，而是追求**可编译性和可约束性**。
+The schema owns only facts that cannot be derived elsewhere:
 
-SQLite 也特别适合 ARC / benchmark 场景，因为部署简单、状态容易重置。
+- Entity `key`, description, fields, and `requirement_ids`.
+- Field name, type, nullability, origin, references, primary-key status,
+  description, and machine-readable properties.
+- Global relationships and global constraints.
+- Requirement traceability.
 
----
+`relations`, `indexes`, `checks`, `sources`, `logical_type`, and duplicate
+entity/table names are not persisted. Relationships, unique indexes, and
+field-property checks are derived during lowering. `APPLICATION_RULE` is kept
+in the database manifest for the implementation boundary and is not rendered
+as SQL. SQLite regex patterns produce a warning and are omitted from DDL
+because SQLite does not provide a portable regex function.
 
-# 2. 最重要的问题：每个节点 Design → Test → Implement，还是整体 Skeleton 后再实现？
-
-我的结论非常明确：
-
-> **不要采用纯粹的 Node-by-Node Design → Test → Implement。**
->
-> 应该采用：
->
-> **Whole-program Design → Whole-program Skeleton → Node-by-node Test & Implementation。**
-
-也就是说
-
-```text
-不是：
-
-REQ1
- Design
- Skeleton
- Test
- Implement
-
-REQ2
- Design
- Skeleton
- Test
- Implement
-
-REQ3
- ...
-
-
-而是：
-
-ALL REQUIREMENTS
-      ↓
-Global Design
-      ↓
-ALL NODE Designs
-      ↓
-Whole-program Skeleton
-      ↓
-
-REQ1 tests → implementation
-REQ2 tests → implementation
-REQ3 tests → implementation
-...
-```
-
-这是整个方案最关键的一点。
-
----
-
-# 3. Skeleton 不应该本身就是 IR
-
-这里我建议你稍微修正一个非常重要的概念。
-
-你提到：
-
-> 是否将 skeleton 类似真实编译过程中的 AST / IR，一旦生成就不能再改变？
-
-我的答案是：
-
-> **不要让 Skeleton 本身成为唯一的 IR。**
->
-> 应该有一个更加抽象的、结构化的 **Design IR**。
-
-关系应该是：
+The compact persisted database tables are:
 
 ```text
-Requirement AST
-       ↓
-Design IR
-       ↓
-Code Skeleton
+.arc/database/database_schema.json
+.arc/database/relationships.json
 ```
 
-Skeleton 是 Design IR 的 **materialization / lowering result**。
+Reuse validation checks only the current schema shape, structural references,
+and requirement coverage. It does not reconstruct or accept an obsolete schema
+format. Invalid model-emitted constraints are warnings (`ARC2240`) and are
+omitted; structural schema errors remain fatal.
 
-就像真正的编译器：
+## 5. Backend Design IR
+
+Backend Design proceeds top-down for each atomic requirement:
 
 ```text
-Source
- ↓
-AST
- ↓
-HIR
- ↓
-MIR
- ↓
-Machine Code
+Requirement Contract -> API modules -> FUNC modules -> DB modules
 ```
 
-不是把机器码当 IR。
+The model returns only local semantic descriptions. The compiler allocates
+module IDs, preserves child order as call order, and derives reverse callers.
+All module interfaces use the same semantic field vocabulary as the requirement
+contract.
+Each interface field carries `semantic_id`, `name`, `type`, and `required`; the
+compiler preserves the `required` flag while materializing child modules.
 
----
-
-# 4. 我建议定义三个不同层次的 IR
-
-这个会让你的论文/系统设计非常漂亮。
-
-### 第一层：Requirement IR
-
-来自 YAML。
-
-例如：
-
-```yaml
-id: REQ-3.1
-dependencies:
-  - REQ-1.2
-  - REQ-2.2
-```
-
-编译成：
-
-```json
-{
-  "id": "REQ-3.1",
-  "type": "ATOMIC",
-  "dependsOn": [
-    "REQ-1.2",
-    "REQ-2.2"
-  ]
-}
-```
-
-形成：
+API contracts and API modules are deliberately different artifacts:
 
 ```text
-REQ-1.1
-   ↓
-REQ-1.2 ─────┐
-             ↓
-           REQ-3.1 → REQ-3.2
-             ↑
-REQ-2.1       │
-   ↓          │
-REQ-2.2 ──────┘
+api_contracts.json       id, spec, inputs, outputs, effects
+backend/api_modules.json id, callees
 ```
 
-而 `FOLDER` 节点我不建议作为实际 compilation unit。
+`api_contracts.json` is the shared frontend/backend interface. Backend API
+modules contain only backend call-graph structure; `callers` is derived when
+the artifact is read. FUNC and DB module rows retain their interface fields and
+`callees`. Allowed edges are API -> FUNC, FUNC -> FUNC/DB, and DB -> leaf.
+Cycles and duplicate edges are rejected because they make deterministic
+lowering impossible.
 
-例如：
+The Backend Design prompt receives only the current requirement, its compact
+database slice, the fixed parent interface, and the immediate module context.
+It does not receive the full design graph or a large output example.
+
+## 6. Frontend Design IR
+
+Frontend Design is a second IR, not a projection of backend source. It consumes
+requirement contracts, shared API contracts, optional visual references, and a
+small global UI registry.
+
+The six frontend tables are:
+
+- `visual_references`: stable content-addressed metadata and optional visual
+  analysis.
+- `layouts`: layout-level observable specification and direct components.
+- `pages`: route, route inputs, layout, direct components, API dependencies,
+  store dependencies, navigation, and render obligations.
+- `components`: page/layout/shared component contracts, inputs, events, and
+  observable render obligations.
+- `stores`: cross-page state and public actions only.
+- `api_dependencies`: consumer-to-shared-API references and best-effort field
+  bindings.
+
+Requirement links remain only in traceability. There are no local data
+contract or composition-edge tables. Component decomposition is one bounded
+model call per Page/Layout; if it is unavailable, an empty component plan is a
+valid deterministic fallback and the rest of the design remains usable.
+
+Visual analysis is optional evidence. Path, media, size, and model failures
+are warnings; valid metadata is retained and the affected reference is simply
+not used for UI scope. Providers that reject `response_format.type=json_schema`
+fall back to `json_object`, followed by the same local shape and reference
+checks.
+
+Frontend validation is intentionally minimal and lowering-oriented:
+
+- frozen JSON shape and stable IDs;
+- unique routes and symbols;
+- closed layout/page/component/store/visual references;
+- API dependencies point to existing shared API contracts;
+- every atomic requirement has one traceability link.
+
+Semantic completeness that can be derived during lowering is not a Design-stage
+blocker. Deterministic repair removes unknown properties, clamps bounded text
+and arrays, filters unavailable references, and normalizes duplicate list
+entries before the minimum checks run.
+
+## 7. Project initialization
+
+After both Design IRs are frozen, `ProjectInitializer` creates the Web project
+in a staging directory using the official ecosystem initializer:
 
 ```text
-REQ-1
-REQ-2
-REQ-3
+npm create vite frontend -- --template react-ts
 ```
 
-主要承担：
+It then creates the Express backend and shared TypeScript workspace, writes one
+root `package.json`, pins formal dependencies, installs once, and emits
+`.arc/project/project-manifest.json`. Initialization does not generate business
+source or a tests directory. The manifest is the sole authority for allowed
+skeleton output roots and workspace locations.
+
+## 8. Deterministic Backend lowering
+
+Backend lowering consumes only frozen Database IR, Backend Design IR, Symbol
+Registry, File Registry, and Project Manifest:
+
+1. Global Symbol Planning allocates shared contract, entity, module, and
+   runtime TypeScript symbols.
+2. Global File Planning assigns every symbol/module to an allowed path.
+3. Type Lowering emits shared DTOs and entity types.
+4. Database Schema Lowering emits SQLite/Drizzle tables and barrels.
+5. DB, FUNC, and API Module Lowering emits typed skeleton modules.
+6. Global Glue Lowering derives HTTP method/path from API effects and module
+   names, then emits routes, app/server glue, barrels, and the import plan.
+7. Backend Manifest records the complete file, symbol, module, route, import,
+   deployment, and generated-file coverage.
+
+No backend lowering pass calls the model. If an upstream registry is invalid,
+the pass fails before writing sources for that pass.
+
+## 9. Deterministic Frontend lowering
+
+Frontend lowering consumes Frontend Design IR, shared API contracts, Backend
+Route Registry, Frontend Symbol Registry, Frontend File Registry, and Project
+Manifest:
+
+1. Frontend Global Symbol Planning allocates Page/Layout/Component symbols,
+   Props/Event types, Store contracts, and only referenced API clients.
+2. Frontend File Planning assigns source paths under the manifest's
+   `frontendSkeleton` roots.
+3. Props, events, stores, and API clients are lowered to TypeScript.
+4. Page/Layout/Component skeletons are emitted with render-obligation
+   placeholders.
+5. Router, barrels, and imports are derived from the frozen registries.
+6. Frontend Manifest records files, symbols, imports, exports, routes, API
+   clients, stores, and design coverage.
+
+The frontend API client uses the Backend Route Registry and shared contract
+types; it never imports backend implementation files. `frontend/vite.config.ts`
+is generated deterministically from the CLI Web port with the pinned
+`@tailwindcss/vite` plugin, so Tailwind utility classes emitted inside editable
+Page/Layout/Component regions and `/api` proxy behavior are consistent in
+development and preview. The compiler-owned `frontend/src/index.css` imports
+Tailwind once; implementation agents never install styling dependencies or
+modify the global CSS entry.
+
+## 10. Requirement-local Test Generation and TDD
+
+Project Initialization creates a fourth npm workspace containing Vitest,
+Supertest, Playwright, and pinned TypeScript tooling, and installs all four
+workspaces with the same root lockfile and `npm ci`. Chromium is installed once
+at that boundary and reused by Test Generation; set
+`ARC_TEST_INSTALL_BROWSER=0` only when browser provisioning is handled
+externally.
+
+Tests are generated serially immediately before implementing each atomic
+requirement. The compiler builds a
+compact context pack containing the requirement text and scenarios, Requirement
+Contract, related Backend and Frontend IR, shared API contracts, the local
+Database Schema slice, and owned/dependency Source Cards from the Code Binding
+Registry. Referenced TypeScript input/output/Props definitions are included as
+type targets, while implementation bodies are never included.
+
+The compiler selects test seams with bounded rules:
+
+- exported FUNC behavior uses Vitest UNIT tests;
+- API plus database behavior uses Supertest INTEGRATION tests through the
+  exported Express `app`;
+- Page/Component/Layout behavior uses Playwright E2E tests through real routes.
+
+The compiler derives required layers from public seams inside each vertical
+requirement. UI routes require E2E, API-to-database/effect paths require
+Integration, and independently testable rule FUNCs require Unit. The model must
+generate one file for every derived layer. This does not mechanically force all
+requirements to emit all three layers: the required set follows the actual
+module graph and business-rule seams.
+The compiler owns test paths and IDs, validates scenario and target coverage,
+rejects unknown imports/modules, and limits each requirement to a small number
+of core cases. Materialization retries may repair syntax, imports, or symbols;
+they may not weaken requirement-derived expectations.
+
+Generated tests must pass TypeScript type checking, Vitest collection, and
+Playwright `--list` before they are frozen. Their assertions are then executed
+as the node's RED baseline before any implementation patch is requested.
+The resulting `.arc/tests/test_manifest.json` has status `TESTS_FROZEN` and
+records Requirement -> Scenario -> Test -> IR target -> real source file.
+
+The same `NodeTDDOrchestrator` instance follows
+`atomic_implementation_waves`. For each node it generates and freezes only that
+node's tests, confirms RED, sends one actionable failure cluster to the bounded
+Implementation Agent, applies the proposed marker-scoped edit through Write
+Guard, and reruns `typecheck -> Unit -> Integration -> E2E`. A node advances to
+`NODE_ACCEPTED` only after its required layers and impacted accepted-node
+regressions pass. Dependency nodes must be accepted before the next node starts.
+
+## 11. Validation and failure policy
+
+After the workspace build succeeds, Code Binding lowering joins the frozen
+Design IR, symbol/file registries, type manifests, routes, and materialized
+sources into `.arc/code/code_bindings.json`. Every Backend module and Frontend
+Page/Layout/Component/Store receives a stable source target. Referenced API
+clients and public TypeScript types are recorded as additional bindings.
+
+The registry is authoritative for requirement-local Test Generation and TDD. It
+records file paths, named exports, public signatures, input/output/Props types,
+routes, callees, ownership, and editable marker regions. Validation checks the
+real source file, named export, module marker, and implementation markers; line
+numbers are deliberately excluded because implementation edits make them
+unstable. A valid registry has status `CODE_BINDING_READY` and exposes both
+Requirement-to-target and file-to-IR reverse indexes.
+
+Validation protects facts required by the next deterministic pass. It does not
+try to prove business behavior that belongs to implementation:
+
+- malformed model shape: repair when lossless, otherwise retry locally;
+- unknown optional visual reference: filter and warn;
+- unsupported database expression: represent it as `APPLICATION_RULE` or warn
+  and omit only the non-executable SQLite expression;
+- missing symbol, file, route, contract, or graph edge: fail the owning pass;
+- generated source build failure: fail the `PROJECT_BUILD` gate;
+- missing source/type binding: fail before node TDD;
+- generated test import, symbol, typecheck, or collection failure: retry only
+  materialization errors, then fail without changing requirement assertions.
+
+All model requests, compact inputs, raw outputs, repairs, and validation
+feedback are written synchronously to the terminal and `.arc/debug.log`.
+
+## 12. Prompt design rules
+
+Every semantic prompt follows the same compact contract:
+
+1. State one task and one ownership boundary.
+2. Provide only the current requirement/module and the smallest relevant
+   database, contract, registry, or visual slice.
+3. State what the model must not decide when the compiler owns it.
+4. Use a small output shape supplied through structured output; the prompt
+   describes meaning, not a repeated large JSON schema.
+5. Give at most one valid example and one empty example where emptiness is
+   meaningful.
+6. Use explicit `[]`, `null`, and exact ID-copy rules.
+7. Return one object and no prose.
+
+The compiler performs all normalization, ID allocation, graph mutation,
+reference filtering, path planning, and reverse-index derivation. This keeps
+the model interface shallow while compiler modules remain deep: callers provide
+a local semantic slice and receive a validated state transition.
+
+## 13. CLI and reproducibility
 
 ```text
-scope
-constraints
-aggregation
-dependency propagation
+arc compile <requirements-dir> -o <workspace>
+arc doctor
+arc config
 ```
 
-真正进入实现队列的应该主要是：
-
-```text
-ATOMIC node
-```
-
----
-
-# 5. 第二层，也是最核心：Design IR
-
-这是整个 ARC Requirement Compiler 的核心资产。
-
-它应该记录的不是自然语言，而是：
-
-```text
-Page
-Component
-API
-Function
-Service
-Repository
-Entity
-Schema
-State
-Data flow
-Dependency
-Ownership
-Contract
-```
-
-比如你的需求经过 Design Compile 后，可以得到：
-
-```yaml
-modules:
-
-  - id: DB.User
-    kind: ENTITY
-    owner: REQ-1.1
-    file: backend/db/schema/user.ts
-
-  - id: DB.Session
-    kind: ENTITY
-    owner: REQ-1.1
-    file: backend/db/schema/session.ts
-
-  - id: AUTH.RegisterService
-    kind: SERVICE
-    owner: REQ-1.1
-    input: RegisterRequest
-    output: AuthSession
-
-  - id: API.Register
-    kind: API
-    owner: REQ-1.1
-    method: POST
-    path: /api/auth/register
-    calls:
-      - AUTH.RegisterService
-
-  - id: PAGE.Register
-    kind: PAGE
-    owner: REQ-1.1
-    route: /register
-    calls:
-      - API.Register
-```
-
-现在关键来了：
-
-REQ-1.2 不允许重新设计 User。
-
-它只能：
-
-```yaml
-- id: AUTH.LoginService
-  owner: REQ-1.2
-  depends_on:
-    - DB.User
-    - DB.Session
-```
-
-这样就变成真正的：
-
-```text
-compile against existing symbols
-```
-
-而不是：
-
-```text
-Agent 看代码然后自己猜怎么改。
-```
-
----
-
-# 6. Module Table 非常值得做，而且我认为它应该成为核心数据结构
-
-你提到“模块表”，这个方向我非常赞同。
-
-我建议字段至少包含：
-
-| Field                 | 含义                                 |
-| --------------------- | ---------------------------------- |
-| module_id             | 全局唯一 ID                            |
-| kind                  | PAGE/API/SERVICE/FUNC/DB/COMPONENT |
-| owner_requirement     | 哪个需求创建                             |
-| file                  | 生成位置                               |
-| exports               | 对外暴露接口                             |
-| inputs                | 输入                                 |
-| outputs               | 输出                                 |
-| dependencies          | 可调用模块                              |
-| side_effects          | DB / Session / File 等              |
-| data_entities         | 使用哪些数据                             |
-| editable_region       | Agent 可以修改哪里                       |
-| contract_status       | OPEN/FROZEN                        |
-| implementation_status | TODO/DONE                          |
-| hash                  | Skeleton/Contract fingerprint      |
-
-例如：
-
-| Module           | Owner   | Type    | Input       | Output       | Depends       |
-| ---------------- | ------- | ------- | ----------- | ------------ | ------------- |
-| `DB.User`        | REQ-1.1 | DB      | —           | User         | —             |
-| `Auth.Register`  | REQ-1.1 | Service | RegisterDTO | Session      | UserRepo      |
-| `API.Register`   | REQ-1.1 | API     | HTTP        | AuthResponse | Auth.Register |
-| `Auth.Login`     | REQ-1.2 | Service | LoginDTO    | Session      | UserRepo      |
-| `Train.Search`   | REQ-2.1 | Service | SearchDTO   | Journey[]    | TrainRepo     |
-| `Booking.Create` | REQ-3.2 | Service | BookingDTO  | Booking      | User, Journey |
-
-这样 Agent 后面不是：
-
-> “请实现 REQ-3.2。”
-
-而是：
-
-> 实现 `Booking.Create`。
->
-> 输入只能使用 `CreateBookingInput`。
->
-> 输出必须是 `BookingResult`。
->
-> 可以调用：
->
-> `BookingRepository`
->
-> `JourneyRepository`
->
-> `CurrentUser`
->
-> 禁止修改其他模块 Contract。
-
-这种 prompt 的确定性会高非常多。
-
----
-
-# 9. Skeleton 到底冻结什么？
-
-这里我认为不能简单说：
-
-> Skeleton 一旦生成，一行都不能修改。
-
-这样会太死。
-
-应该区分：
-
-## Contract Frozen
-
-不能改：
-
-```text
-DB schema
-API path
-API request/response
-function signature
-module ownership
-routing
-module dependencies
-public interface
-shared types
-```
-
-例如：
-
-```ts
-export interface BookingService {
-  createBooking(
-    input: CreateBookingInput
-  ): Promise<CreateBookingResult>;
-}
-```
-
-冻结以后实现 Agent 不能改成：
-
-```ts
-createBooking(userId, trainId, passenger)
-```
-
----
-
-## Structure Frozen
-
-比如：
-
-```text
-backend/
-  modules/
-    booking/
-      booking.service.ts
-      booking.repository.ts
-      booking.routes.ts
-```
-
-后续 Agent 不允许随便：
-
-```text
-新增 booking2.ts
-删除 service
-绕过 repository
-直接在 route 写 SQL
-```
-
----
-
-## Implementation Mutable
-
-例如：
-
-```ts
-export async function createBooking(
-  input: CreateBookingInput
-): Promise<CreateBookingResult> {
-
-  // <IMPLEMENTATION>
-  throw new Error("TODO");
-  // </IMPLEMENTATION>
-}
-```
-
-Agent 只能修改：
-
-```text
-IMPLEMENTATION region
-```
-
-这其实就是：
-
-> **Structural immutability + behavioral mutability**
-
-我认为这是你的方法中非常值得强调的概念。
-
----
-
-# 10. 最好不要让 Agent“直接编辑 repository”
-
-这一点非常关键。
-
-你现在的想法里：
-
-> 严格限定修改范围
-
-我建议真正实现成机器约束，而不是 Prompt 约束。
-
-例如 Agent 返回：
-
-```diff
---- booking.service.ts
-+++ booking.service.ts
-@@ IMPLEMENTATION:BookingService.createBooking
-...
-```
-
-Compiler Controller 检查：
-
-```text
-modified_files ⊆ allowed_files
-modified_regions ⊆ implementation_regions
-```
-
-否则：
-
-```text
-PATCH REJECTED
-```
-
-而不是告诉 Agent：
-
-> 请不要修改其他文件。
-
----
-
-# 11. 甚至可以给 Frozen Skeleton 做 Hash
-
-例如：
-
-```json
-{
-  "module": "BookingService",
-  "contractHash": "sha256:...",
-  "structureHash": "sha256:..."
-}
-```
-
-实现前：
-
-```text
-verify skeleton
-```
-
-实现后：
-
-```text
-verify frozen regions
-```
-
-如果：
-
-```text
-before.contractHash != after.contractHash
-```
-
-直接拒绝。
-
-于是：
-
-```text
-Agent 想自由发挥
-```
-
-也没有机会。
-
-这个机制比 Prompt 强得多。
-
----
-
-# 12. 更进一步：让 Agent 根本看不到不该改的模块
-
-比如处理：
-
-```text
-REQ-3.2
-```
-
-上下文不要把整个 repo 全给它。
-
-给：
-
-```text
-Requirement:
-REQ-3.2
-
-Writable:
-BookingService implementation
-BookingRepository implementation
-
-Readable contracts:
-User
-Session
-Journey
-Booking
-
-Tests:
-REQ-3.2 tests
-```
-
-而不是：
-
-```text
-Here is the whole repository.
-Please implement REQ-3.2.
-```
-
-那么搜索空间会明显下降。
-
-这正好符合你的目标：
-
-> **不是让 Agent 变聪明，而是让 Agent 可选的行为越来越少。**
-
----
-
-# 13. 后续 requirement 如何不修改前面的设计？
-
-这个可以通过一个很像 linker 的机制解决。
-
-假设现在编译：
-
-```text
-REQ-3.2
-```
-
-它需要：
-
-```text
-User
-Journey
-Booking
-```
-
-其中：
-
-```text
-User       已存在
-Journey    已存在
-Booking    全局 Design Pass 已预声明
-```
-
-那么 REQ-3.2 Design Agent 做的不是重新设计，而是：
-
-```text
-resolve symbol User
-resolve symbol Journey
-resolve symbol Booking
-```
-
-如果发现需求需要一个系统里不存在的接口：
-
-```text
-PaymentService
-```
-
-不能自己创建。
-
-返回：
-
-```text
-UNRESOLVED_SYMBOL
-```
-
-由 Design Compiler 决定：
-
-```text
-是否新增模块
-```
-
-这和：
-
-```text
-compiler/linker
-```
-
-非常像。
-
----
-
-
-# 15. 测试生成应该放在哪里？
-
-你的原方案：
-
-```text
-Skeleton
-→ tests
-→ implementation
-```
-
-这个方向是对的。
-
-不过要区分两类测试。
-
-### Requirement tests
-
-来源：
-
-```text
-requirement scenarios
-```
-
-比如你 YAML 已经有：
-
-```text
-GIVEN
-WHEN
-THEN
-```
-
-注册成功要求刷新后仍然保持登录状态。
-
-这些适合：
-
-```text
-Playwright acceptance tests
-```
-
----
-
-## 我建议三个层次使用不同方式
-
-| 阶段                        | 推荐方式                     |      Agent 自由度 |
-| ------------------------- | ------------------------ | -------------: |
-| Requirement / Design Pass | 原生 LLM structured output |             很低 |
-| Test generation           | 原生 LLM / 简单 Agent        |             中低 |
-| TDD Implementation        | DeepAgent / Coding Agent | 中高，但严格 sandbox |
-
-例如 Design 阶段，我甚至**不建议使用 Agent loop**。
-
-而是：
-
-```python
-response = llm.generate(
-    prompt=...,
-    response_schema=ModuleDesignSchema
-)
-```
-
-强制它输出：
-
-```json
-{
-  "modules": [],
-  "entities": [],
-  "apis": [],
-  "dependencies": []
-}
-```
-
-然后：
-
-```text
-LLM output
-     ↓
-JSON Schema Validation
-     ↓
-Semantic Validation
-     ↓
-Compiler accepts/rejects
-```
-
-如果不合法：
-
-```text
-REJECT
-→ 把 validation error 给模型
-→ regenerate
-```
-
-这比：
-
-```text
-Agent 自己想
-Agent 自己写文件
-Agent 自己决定完成
-```
-
-稳定很多。
-
----
-
-# 2. 更困难的问题：需求太大，不可能一次全部放进上下文怎么办？
-
-这里有一个很重要的认识：
-
-> **Whole-program design ≠ 把 whole program 一次性塞给 LLM。**
-
-真正的编译器也从来不是：
-
-```text
-把整个 Linux kernel 源代码
-一次塞进一个函数
-然后输出设计
-```
-
-而是依赖：
-
-```text
-局部解析
-+
-符号表
-+
-索引
-+
-多遍扫描
-+
-链接
-```
-
-你的 Requirement Compiler 也应该一样。
-
-所以你之前说的：
-
-> “先扫一遍”
-
-这个方向其实是对的。
-
-但我建议把“扫一遍确定数据库”扩大成：
-
-> **Global Discovery Pass**
-
-而不是只发现 Database。
-
----
-
-# 3. 大需求下，第一遍不要“设计”，只“提取事实”
-
-假设有：
-
-```text
-5 MB requirement.yaml
-500 个 requirement nodes
-100,000 tokens
-```
-
-不要让模型：
-
-> 请阅读以下全部需求并设计数据库。
-
-而是每个节点独立处理。
-
-例如：
-
-```text
-REQ-001
-        ↓
-Requirement Fact Extractor
-        ↓
-facts-001.json
-
-REQ-002
-        ↓
-Requirement Fact Extractor
-        ↓
-facts-002.json
-```
-
-这里不设计系统。
-
-只抽取这个节点明确需要什么。
-
-比如注册节点：
-
-```yaml
-requirement: REQ-1.1
-
-entities:
-  - User
-  - Session
-
-data_fields:
-  - entity: User
-    field: username
-    constraints:
-      - unique
-      - length: 3..32
-
-  - entity: User
-    field: email
-    constraints:
-      - unique_case_insensitive
-
-operations:
-  - create_account
-  - create_session
-
-ui:
-  pages:
-    - Register
-
-state:
-  persistent:
-    - User
-    - Session
-
-security:
-  - password_authentication
-
-invariants:
-  - invalid_registration_creates_no_account
-
-evidence:
-  - requirement: REQ-1.1
-```
-
-注意：
-
-> **这个阶段不允许模型决定表叫什么、API 是什么、文件叫什么。**
-
-只提取 semantic facts。
-
-这样模型处理上下文：
-
-```text
-2000 tokens
-```
-
-而不是：
-
-```text
-100000 tokens
-```
-
----
-
-# 6. 真正的核心应该是 Global Symbol Table
-
-这跟编译器越来越像了。
-
-第一遍扫描的最终结果不是“数据库 schema”，而是：
-
-```text
-Global Symbol Table
-```
-
-例如：
-
-```yaml
-entities:
-
-  User:
-    discovered_from:
-      - REQ-1.1
-      - REQ-1.2
-      - REQ-3.1
-
-  Session:
-    discovered_from:
-      - REQ-1.1
-      - REQ-1.2
-      - REQ-3.1
-
-  Train:
-    discovered_from:
-      - REQ-2.1
-      - REQ-2.2
-      - REQ-3.1
-
-  Booking:
-    discovered_from:
-      - REQ-3.2
-```
-
-同时有：
-
-```yaml
-operations:
-
-  RegisterUser:
-    requirements:
-      - REQ-1.1
-
-  Login:
-    requirements:
-      - REQ-1.2
-
-  SearchTrain:
-    requirements:
-      - REQ-2.1
-
-  CreateBooking:
-    requirements:
-      - REQ-3.2
-```
-
-还有：
-
-```yaml
-pages:
-apis:
-states:
-permissions:
-cross_cutting_constraints:
-```
-
-这张表本身可以非常大。
-
-没关系。
-
-因为：
-
-> LLM 每次不需要读取整个 Symbol Table。
-
-Compiler 可以 query：
-
-```text
-give me symbols related to Booking
-```
-
-得到：
-
-```text
-Booking
-User
-Session
-Journey
-CreateBooking
-```
+The compiler is synchronous at every pass boundary and serial within each
+requirement wave. `--start-from` is an explicit artifact probe for reusing
+validated current artifacts in an existing workspace; it is not a second
+execution mode and it never converts an invalid artifact into a valid one.
+Use `--start-from tdd` after Skeleton lowering and `PROJECT_BUILD` have
+succeeded. This boundary validates the persisted Project Manifest and Code
+Binding Registry against the current requirements and real source files, skips
+all lowering/build passes, validates the already provisioned test environment,
+and starts node-by-node TDD without another dependency or browser installation.
+
+The only environment values required for a full compile are
+`OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `MODEL`. Visual settings are optional;
+the main model settings are used as fallback. Retry and trace settings only
+control bounded local behavior and do not change the IR protocol.

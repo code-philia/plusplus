@@ -24,8 +24,8 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["src"]
 include = [
-  "app_type_handler",
-  "app_type_handler.*",
+  "arc_agents",
+  "arc_agents.*",
   "arcbench_agent_runtime",
   "arcbench_agent_runtime.*",
   "compiler",

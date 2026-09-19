@@ -16,8 +16,10 @@ Please first check whether a similar issue or pull request already exists.
 
 Useful repository areas:
 
-- `src/arc-agent/`: current CLI-oriented ARC implementation
-- `src/arc-extension/`: VS Code extension and interactive UI work
+- `src/compiler/`: compiler passes, IR validation, and deterministic lowering
+- `src/core/`: CLI presentation, configuration, and workflow orchestration
+- `src/arcbench_agent_runtime/`: artifact I/O and traceability runtime
+- `docs/`: current pipeline contracts and stage guides
 - `README.md`: project overview and research context
 
 ## Submit an Issue
@@ -61,19 +63,8 @@ Please include in the PR:
 For the Python CLI:
 
 ```bash
-cd src/arc-agent
 uv venv
-uv pip install -r requirements.txt
 uv pip install -e .
-```
-
-For the VS Code extension:
-
-```bash
-cd src/arc-extension
-npm install
-npm run compile
-npm run lint
 ```
 
 Run the checks that match your change. If you did not run something important, state that clearly in the PR.
