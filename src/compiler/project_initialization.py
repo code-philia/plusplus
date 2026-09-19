@@ -14,7 +14,7 @@ from core.logging import SynchronousLog
 
 
 PROJECT_STATUS = "PROJECT_INITIALIZED"
-PROJECT_PROFILE_ID = "web-react18-express-drizzle-sqlite"
+PROJECT_PROFILE_ID = "web-react18-tailwind4-express-drizzle-sqlite"
 
 
 class ProjectInitializationError(RuntimeError):
@@ -38,6 +38,8 @@ class DependencyCatalog:
     react_router_dom: str = "7.8.2"
     vite: str = "7.1.4"
     vite_react_plugin: str = "5.0.2"
+    tailwindcss: str = "4.1.13"
+    tailwindcss_vite: str = "4.1.13"
     express: str = "5.1.0"
     zod: str = "4.1.5"
     drizzle_orm: str = "0.44.5"
@@ -64,6 +66,8 @@ class DependencyCatalog:
             "react-router-dom": self.react_router_dom,
             "vite": self.vite,
             "@vitejs/plugin-react": self.vite_react_plugin,
+            "tailwindcss": self.tailwindcss,
+            "@tailwindcss/vite": self.tailwindcss_vite,
             "express": self.express,
             "zod": self.zod,
             "drizzle-orm": self.drizzle_orm,
@@ -80,6 +84,93 @@ class DependencyCatalog:
             "supertest": self.supertest,
             "@types/supertest": self.types_supertest,
         }
+
+
+def frontend_css_source() -> str:
+    """Return the compiler-owned Tailwind entry shared by every web workspace."""
+
+    return (
+        '@import "tailwindcss";\n\n'
+        '@layer base {\n'
+        '  :root { font-family: ui-sans-serif, system-ui, sans-serif; color-scheme: light; }\n'
+        '  * { box-sizing: border-box; }\n'
+        '  html { min-width: 320px; background: #ffffff; }\n'
+        '  body { margin: 0; min-width: 320px; min-height: 100vh; }\n'
+        '  button, input, select, textarea { font: inherit; }\n'
+        '}\n'
+    )
+
+
+def validate_frontend_environment(
+    output_root: Path,
+    project_manifest: dict[str, Any],
+    *,
+    catalog: DependencyCatalog | None = None,
+) -> list[str]:
+    """Reject reused projects whose pinned Tailwind toolchain is absent or stale."""
+
+    expected = catalog or DependencyCatalog()
+    errors: list[str] = []
+    if project_manifest.get("profile") != PROJECT_PROFILE_ID:
+        errors.append(
+            "ARC3202 FRONTEND_ENVIRONMENT_INVALID: project profile does not include "
+            "the compiler-owned Tailwind CSS v4 environment."
+        )
+    frontend_environment = project_manifest.get("frontendEnvironment")
+    expected_versions = {
+        "tailwindcss": expected.tailwindcss,
+        "@tailwindcss/vite": expected.tailwindcss_vite,
+    }
+    if not isinstance(frontend_environment, dict) or (
+        frontend_environment.get("status") != "FRONTEND_ENVIRONMENT_READY"
+        or frontend_environment.get("styling") != "tailwindcss-4"
+        or frontend_environment.get("cssEntry") != "frontend/src/index.css"
+        or frontend_environment.get("versions") != expected_versions
+    ):
+        errors.append(
+            "ARC3202 FRONTEND_ENVIRONMENT_INVALID: frontend environment manifest "
+            "does not match the pinned Tailwind CSS v4 configuration."
+        )
+
+    package_path = output_root / "frontend" / "package.json"
+    try:
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        errors.append(
+            f"ARC3202 FRONTEND_ENVIRONMENT_INVALID: cannot read frontend/package.json: {exc}"
+        )
+        package = {}
+    dev_dependencies = package.get("devDependencies", {})
+    for name, version in expected_versions.items():
+        if not isinstance(dev_dependencies, dict) or dev_dependencies.get(name) != version:
+            errors.append(
+                "ARC3202 FRONTEND_ENVIRONMENT_INVALID: "
+                f"frontend devDependency {name!r} must be pinned to {version}."
+            )
+
+    css_path = output_root / "frontend" / "src" / "index.css"
+    try:
+        css = css_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(
+            f"ARC3202 FRONTEND_ENVIRONMENT_INVALID: cannot read frontend/src/index.css: {exc}"
+        )
+    else:
+        if css != frontend_css_source():
+            errors.append(
+                "ARC3202 FRONTEND_ENVIRONMENT_INVALID: frontend/src/index.css differs "
+                "from the compiler-owned Tailwind entry."
+            )
+
+    for relative in (
+        "node_modules/tailwindcss/package.json",
+        "node_modules/@tailwindcss/vite/package.json",
+    ):
+        if not (output_root / relative).is_file():
+            errors.append(
+                f"ARC3202 FRONTEND_ENVIRONMENT_INVALID: missing installed {relative}."
+            )
+    return list(dict.fromkeys(errors))
 
 
 def test_workspace_spec(
@@ -383,7 +474,7 @@ class ProjectInitializer:
         )
         self._write_text(
             frontend_src / "index.css",
-            ':root { font-family: system-ui, sans-serif; color-scheme: light; }\n* { box-sizing: border-box; }\nbody { margin: 0; }\n',
+            frontend_css_source(),
         )
         self._write_text(
             frontend_src / "main.tsx",
@@ -486,6 +577,7 @@ class ProjectInitializer:
             "package-lock.json",
             "frontend/package.json",
             "frontend/src/main.tsx",
+            "frontend/src/index.css",
             "backend/package.json",
             "backend/tsconfig.json",
             "backend/drizzle.config.ts",
@@ -565,6 +657,7 @@ class ProjectInitializer:
                 "buildTool": "vite",
                 "ui": "react-18",
                 "routing": "react-router",
+                "styling": "tailwindcss-4",
             },
             "backend": {
                 "language": "typescript",
@@ -604,6 +697,15 @@ class ProjectInitializer:
                     "@types/supertest": self.catalog.types_supertest,
                 },
             },
+            "frontendEnvironment": {
+                "status": "FRONTEND_ENVIRONMENT_READY",
+                "styling": "tailwindcss-4",
+                "cssEntry": "frontend/src/index.css",
+                "versions": {
+                    "tailwindcss": self.catalog.tailwindcss,
+                    "@tailwindcss/vite": self.catalog.tailwindcss_vite,
+                },
+            },
             "deployment": {
                 "workingDirectory": "backend",
                 "startCommand": "npm run start",
@@ -631,6 +733,7 @@ class ProjectInitializer:
             },
             "owners": {
                 "frontend/src/main.tsx": "PROJECT_INITIALIZER",
+                "frontend/src/index.css": "PROJECT_INITIALIZER",
                 "frontend/src/App.tsx": "FRONTEND_SKELETON_COMPILER",
                 "frontend/vite.config.ts": "FRONTEND_SKELETON_COMPILER",
                 "shared/src/index.ts": "COMPILER",
@@ -834,6 +937,8 @@ class ProjectInitializer:
                 "@types/react-dom": self.catalog.types_react_dom,
                 "@types/node": self.catalog.types_node,
                 "@vitejs/plugin-react": self.catalog.vite_react_plugin,
+                "@tailwindcss/vite": self.catalog.tailwindcss_vite,
+                "tailwindcss": self.catalog.tailwindcss,
                 "typescript": self.catalog.typescript,
                 "vite": self.catalog.vite,
             },

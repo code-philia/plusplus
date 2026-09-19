@@ -37,7 +37,10 @@ from .model_client import Model, ModelConfigurationError, StructuredModel
 from .models import CompilationRequest, CompilationResult
 from .module_lowering import ModuleSkeletonLowerer
 from .project_build import ProjectBuilder
-from .project_initialization import ProjectInitializer
+from .project_initialization import (
+    ProjectInitializer,
+    validate_frontend_environment,
+)
 from .skeleton_lowering import DatabaseSchemaLowerer, TypeLowerer
 from .symbol_planning import GlobalSymbolPlanner
 from .tdd_orchestrator import NodeTDDOrchestrator
@@ -523,6 +526,27 @@ class Compiler:
             await self._log("Compiler", error, "error")
         if not project_ok:
             await self._log("Compiler", "PROJECT_INITIALIZATION pass failed.", "error")
+            return CompilationResult(
+                ok=False,
+                root_id=root_id,
+                states=states,
+                artifacts=artifacts,
+            )
+        if project_ok and project_manifest is not None:
+            frontend_environment_errors = validate_frontend_environment(
+                request.output_dir,
+                project_manifest,
+            )
+            if frontend_environment_errors:
+                project_ok = False
+                for error in frontend_environment_errors:
+                    await self._log("Compiler", error, "error")
+        if not project_ok:
+            await self._log(
+                "Compiler",
+                "PROJECT_INITIALIZATION validation failed.",
+                "error",
+            )
             return CompilationResult(
                 ok=False,
                 root_id=root_id,

@@ -87,7 +87,9 @@ without the COMPONENT prefix. A Page parent may create PAGE or SHARED components
 or SHARED components. Use SHARED only when the same functional contract is genuinely reusable by multiple parents.
 For REUSE, keep create-only fields as an empty string or empty arrays; the compiler ignores them. Inputs are external
 component props expressed with stable semantic ids. Events are callbacks emitted to the parent. Render obligations
-record observable fields, actions, regions, navigation, text, or feedback, not JSX/CSS. Use only supplied visual ids.
+record observable fields, actions, regions, navigation, text, or feedback, not JSX/CSS. Component specs must retain
+the component's visual role in the parent composition (for example navigation band, bordered form panel, utility
+header, or quiet footer) when supported by supplied visual evidence. Use only supplied visual ids.
 When an input reuses a semantic_id from a requirement or API contract, copy its canonical type exactly. Do not add
 nullability, undefined, optionality, GUESS markers, or other qualifiers unless that exact type is present in the
 contract. `required: false` expresses an optional prop; it does not change the field type. Never emit placeholder
@@ -753,11 +755,9 @@ def _materialize_unassigned_page_apis(
                 continue
             sources = _page_source_fields(state, page_id)
             bindings = _infer_bindings([], sources, api.get("inputs", []))
-            _, source_issues = _field_catalog(sources, page_id, "source")
             _, target_issues = _field_catalog(api.get("inputs", []), api_id, "target")
-            issues.extend(source_issues)
             issues.extend(target_issues)
-            if source_issues or target_issues:
+            if target_issues:
                 continue
             state.api_dependencies.append({
                 "consumer_id": page_id,

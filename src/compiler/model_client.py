@@ -63,6 +63,7 @@ class Model:
         self.api_key = api_key.strip()
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self._structured_output_mode = "json_schema"
         self._client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
@@ -97,29 +98,60 @@ class Model:
             if set(input_payload) == {"context_markdown"} and isinstance(markdown_context, str)
             else json.dumps(input_payload, ensure_ascii=False, separators=(",", ":"))
         )
-        body = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": instructions},
-                {"role": "user", "content": user_input},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": schema_name,
-                    "strict": True,
-                    "schema": output_schema,
-                },
-            },
-        }
+        messages = [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": user_input},
+        ]
+        response = None
+        if self._structured_output_mode == "json_schema":
+            try:
+                response = self._client.chat.completions.create(
+                    model=self.model,
+                    stream=False,
+                    messages=messages,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": schema_name,
+                            "strict": True,
+                            "schema": output_schema,
+                        },
+                    },
+                )
+            except Exception as exc:
+                if not response_format_unavailable(exc):
+                    raise
+                self._structured_output_mode = "json_object"
 
-        response = self._client.chat.completions.create(
-            model=body["model"],
-            stream=False,
-            reasoning_effort="low",
-            messages=body["messages"],
-            response_format=body["response_format"],
+        fallback_instructions = (
+            f"{instructions.rstrip()}\n\n"
+            "Return exactly one JSON object matching this JSON Schema. Include every required "
+            "property, do not add properties, and do not use Markdown:\n"
+            f"{json.dumps(output_schema, ensure_ascii=False, separators=(',', ':'))}"
         )
+        fallback_messages = [
+            {"role": "system", "content": fallback_instructions},
+            {"role": "user", "content": user_input},
+        ]
+        if response is None and self._structured_output_mode == "json_object":
+            try:
+                response = self._client.chat.completions.create(
+                    model=self.model,
+                    stream=False,
+                    messages=fallback_messages,
+                    response_format={"type": "json_object"},
+                )
+            except Exception as exc:
+                if not response_format_unavailable(exc):
+                    raise
+                self._structured_output_mode = "prompt_only"
+
+        if response is None:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                stream=False,
+                messages=fallback_messages,
+            )
         content = response.choices[0].message.content
         if content is None:
             raise ValueError("Structured model response is empty.")
@@ -128,6 +160,28 @@ class Model:
         if not isinstance(parsed, dict):
             raise ValueError("Structured model response must be a JSON object.")
         return parsed
+
+
+def response_format_unavailable(error: BaseException) -> bool:
+    """Recognize an explicit provider rejection of response_format capability."""
+
+    if getattr(error, "status_code", None) != 400:
+        return False
+    parts = [str(error)]
+    body = getattr(error, "body", None)
+    if body is not None:
+        parts.append(json.dumps(body, ensure_ascii=False, default=str))
+    detail = " ".join(parts).lower()
+    unavailable = any(
+        marker in detail
+        for marker in (
+            "unavailable",
+            "unsupported",
+            "not supported",
+            "does not support",
+        )
+    )
+    return "response_format" in detail and unavailable
 
 
 def _positive_env_float(name: str, default: float) -> float:

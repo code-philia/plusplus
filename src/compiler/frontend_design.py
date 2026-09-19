@@ -153,9 +153,17 @@ arrays empty. CREATE allocates a new global symbol; REUSE must name a symbol alr
 Never create a second symbol with an existing name. Names are global English symbol names and must be stable across
 requirements. A CREATE page needs a non-empty absolute route and spec. A CREATE layout or store needs a non-empty
 spec. A CREATE store must define only genuinely cross-page state and its public actions; do not move page-local form
-or loading state into a global store. For REUSE, keep create-only fields as empty strings, empty arrays, or null; the
+or loading state into a global store. A semantic_id is a global typed identity: whenever Store state reuses a
+semantic_id from requirement_contract or backend_apis, copy both its canonical name and type exactly. If Store state
+has a different lifecycle type, such as a nullable current-session projection of a required registration field, it
+is a different semantic value and must use a Store-domain id such as session.username or auth.current_username;
+never reuse traveler.username with a changed type. `required` controls property presence and does not make the value
+nullable; nullability belongs only in `type`. For REUSE, keep create-only fields as empty strings, empty arrays, or null; the
 compiler ignores them. Refer to an existing symbol by copying its registry `name` exactly; do not place the
-PAGE/LAYOUT/STORE prefix in `name`. Refer
+PAGE/LAYOUT/STORE prefix in `name`. Page and Layout specs must describe the intended information hierarchy,
+major regions, content density, and the responsibility of each referenced visual region so later implementation can
+translate the supplied layout/style evidence faithfully. Preserve the product's own requirement content: reference
+images guide composition and visual language, not unrelated data. Refer
 only to Backend API ids and visual reference ids supplied for this requirement. API ids are opaque and must be copied
 exactly. FOLDER requirements are processed after their children: prefer REUSE for child pages already present in the
 registry, and CREATE only UI structure directly required by the folder's own description. FOLDER requirements may
@@ -491,6 +499,10 @@ class RequirementUIScopePass:
     ) -> tuple[dict[str, Any] | None, list[FrontendDesignIssue]]:
         feedback: list[str] = []
         last_raw_decision: Any = {}
+        canonical_fields = _canonical_semantic_fields(
+            requirement_contract,
+            backend_apis.values(),
+        )
         for attempt in range(self._retry_count + 1):
             payload = {
                 "requirement": _model_requirement(requirement),
@@ -505,6 +517,13 @@ class RequirementUIScopePass:
                     )
                 ],
                 "existing_ui_registry": _model_registry(state),
+                "semantic_identity_policy": {
+                    "same_semantic_id_requires_same_name_and_type": True,
+                    "nullable_store_projection_requires_distinct_semantic_id": True,
+                    "canonical_fields": [
+                        canonical_fields[key] for key in sorted(canonical_fields)
+                    ],
+                },
             }
             if feedback:
                 payload["validation_feedback"] = feedback
@@ -564,6 +583,7 @@ class RequirementUIScopePass:
                 state=state,
                 allowed_api_ids=set(backend_apis),
                 allowed_visual_ids={str(item.get("id")) for item in visual_references},
+                canonical_fields=canonical_fields,
             )
             if decision != raw_decision:
                 self._trace(
@@ -582,6 +602,7 @@ class RequirementUIScopePass:
                 state=state,
                 allowed_api_ids=set(backend_apis),
                 allowed_visual_ids={str(item.get("id")) for item in visual_references},
+                canonical_fields=canonical_fields,
             )
             if not validation_issues:
                 self._trace(
@@ -602,6 +623,7 @@ class RequirementUIScopePass:
             state=state,
             allowed_api_ids=set(backend_apis),
             allowed_visual_ids={str(item.get("id")) for item in visual_references},
+            canonical_fields=canonical_fields,
         )
         fallback_issues = _scope_decision_issues(
             fallback,
@@ -609,6 +631,7 @@ class RequirementUIScopePass:
             state=state,
             allowed_api_ids=set(backend_apis),
             allowed_visual_ids={str(item.get("id")) for item in visual_references},
+            canonical_fields=canonical_fields,
         )
         if not fallback_issues:
             self._trace(
@@ -808,6 +831,7 @@ def _scope_decision_issues(
     state: FrontendDesignState,
     allowed_api_ids: set[str],
     allowed_visual_ids: set[str],
+    canonical_fields: dict[str, dict[str, str]] | None = None,
 ) -> list[FrontendDesignIssue]:
     shape_errors = schema_shape_errors(decision, REQUIREMENT_UI_SCOPE_SCHEMA)
     if shape_errors:
@@ -907,6 +931,11 @@ def _scope_decision_issues(
                         symbol_id,
                         "state",
                     ))
+                    issues.extend(_store_canonical_field_issues(
+                        item["state"],
+                        symbol_id,
+                        canonical_fields or {},
+                    ))
                     action_names = [str(value["name"]) for value in item["actions"]]
                     if len(action_names) != len(set(action_names)):
                         issues.append(_issue(
@@ -991,6 +1020,93 @@ def _scope_decision_issues(
     return issues
 
 
+def _canonical_semantic_fields(
+    requirement_contract: dict[str, Any] | None,
+    backend_apis: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """Collect the authoritative typed identities visible to one UI decision."""
+
+    result: dict[str, dict[str, str]] = {}
+    owners: list[dict[str, Any]] = []
+    if isinstance(requirement_contract, dict):
+        owners.append(requirement_contract)
+    owners.extend(value for value in backend_apis if isinstance(value, dict))
+    for owner in owners:
+        for field in [*owner.get("inputs", []), *owner.get("outputs", [])]:
+            if not isinstance(field, dict):
+                continue
+            semantic_id = str(field.get("semantic_id", "")).strip()
+            name = str(field.get("name", "")).strip()
+            field_type = str(field.get("type", "")).strip()
+            if semantic_id and name and field_type:
+                result.setdefault(
+                    semantic_id,
+                    {
+                        "semantic_id": semantic_id,
+                        "name": name,
+                        "type": field_type,
+                    },
+                )
+    return result
+
+
+def _store_canonical_field_issues(
+    fields: Iterable[dict[str, Any]],
+    store_id: str,
+    canonical_fields: dict[str, dict[str, str]],
+) -> list[FrontendDesignIssue]:
+    issues: list[FrontendDesignIssue] = []
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        semantic_id = str(field.get("semantic_id", "")).strip()
+        canonical = canonical_fields.get(semantic_id)
+        if canonical is None:
+            continue
+        actual_name = str(field.get("name", "")).strip()
+        actual_type = str(field.get("type", "")).strip()
+        if actual_name == canonical["name"] and actual_type == canonical["type"]:
+            continue
+        issues.append(_issue(
+            FrontendDesignErrorCode.BINDING_INCOMPATIBLE,
+            f"{store_id} reuses canonical semantic field {semantic_id} as "
+            f"{actual_type!r}/{actual_name!r}; expected "
+            f"{canonical['type']!r}/{canonical['name']!r}. A Store projection with "
+            "different lifecycle or nullability must use a distinct Store-domain semantic_id.",
+            "FRONTEND_SEMANTIC_VALIDATION",
+            store_id,
+        ))
+    return issues
+
+
+def _repair_store_semantic_ids(
+    fields: Iterable[dict[str, Any]],
+    store_name: str,
+    canonical_fields: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Namespace lifecycle projections that are not the canonical contract value."""
+
+    store_token = re.sub(r"(?<!^)(?=[A-Z])", "_", store_name).lower()
+    store_token = re.sub(r"[^a-z0-9_]+", "_", store_token).strip("_") or "state"
+    result: list[dict[str, Any]] = []
+    for raw in fields:
+        field = copy.deepcopy(raw)
+        semantic_id = str(field.get("semantic_id", "")).strip()
+        canonical = canonical_fields.get(semantic_id)
+        if canonical is not None and (
+            str(field.get("name", "")).strip() != canonical["name"]
+            or str(field.get("type", "")).strip() != canonical["type"]
+        ):
+            field_name = re.sub(
+                r"[^a-z0-9_]+",
+                "_",
+                str(field.get("name", "state")).strip().lower(),
+            ).strip("_") or "state"
+            field["semantic_id"] = f"store.{store_token}.{field_name}"
+        result.append(field)
+    return result
+
+
 def _repair_scope_decision(
     decision: Any,
     *,
@@ -999,6 +1115,7 @@ def _repair_scope_decision(
     state: FrontendDesignState,
     allowed_api_ids: set[str],
     allowed_visual_ids: set[str],
+    canonical_fields: dict[str, dict[str, str]],
 ) -> Any:
     """Repair harmless UI-planning defects before enforcing graph invariants."""
 
@@ -1059,12 +1176,17 @@ def _repair_scope_decision(
             continue
         seen_stores.add(symbol_id)
         exists = symbol_id in state.stores
+        store_state = _repair_store_semantic_ids(
+            _valid_schema_rows(raw.get("state"), SEMANTIC_FIELD_SCHEMA),
+            name,
+            canonical_fields,
+        )
         stores.append({
             "action": "REUSE" if exists else "CREATE",
             "name": name,
             "spec": "" if exists else _bounded_text(raw.get("spec"), 800, default_spec),
             "state": _unique_rows(
-                _valid_schema_rows(raw.get("state"), SEMANTIC_FIELD_SCHEMA),
+                store_state,
                 "semantic_id",
             ),
             "actions": _unique_rows(

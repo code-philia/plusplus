@@ -23,19 +23,31 @@ from .frontend_ir import (
     FrontendDesignErrorCode,
     FrontendDesignIssue,
 )
-from .model_client import describe_model_error
+from .model_client import describe_model_error, response_format_unavailable
 
 
 DEFAULT_MAX_VISUAL_BYTES = 20 * 1024 * 1024
 SUPPORTED_MEDIA_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}
 URI_SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
-VISUAL_ANALYSIS_INSTRUCTIONS = """Analyze one UI reference image and return only directly observable facts that
-can guide Frontend Design IR. Identify major semantic regions, visible interactive controls, high-level layout cues,
-high-level style cues, and meaningful visible text. Do not generate JSX, DOM, CSS, pixel measurements, source code,
-routes, API contracts, or component names. Do not infer behavior that is not visible. Copy reference_id exactly from
-the supplied metadata. Use concise strings and [] when a category has no reliable observation. Return only the
-structured JSON object required by the supplied schema.
+VISUAL_ANALYSIS_INSTRUCTIONS = """Analyze one UI reference image and return only directly observable evidence that
+can guide a production frontend implementation. Capture the whole visual system, not only controls and text.
+
+- regions: ordered page regions and their content purpose from top to bottom.
+- visible_controls: control type, visible label, placement, and important visual state.
+- layout_cues: composition, container proportions, grid/columns, alignment, grouping, whitespace rhythm, density,
+  hierarchy, and relationships between regions. Use relative measurements such as narrow/wide or compact/generous.
+- style_cues: concrete reusable observations. Prefix each cue with the most fitting category among Color,
+  Typography, Spacing, Surface, Border, Shape, Elevation, Iconography, or Imagery. Include approximate visible color
+  values when reliable, font character/weight/scale relationships, corner treatment, border weight, and shadows.
+- text_cues: meaningful visible copy in reading order, preserving valid Unicode only when confidently legible.
+
+Describe what should be referenced, not everything that happens to appear in the image. The generated product must
+retain its own requirement data and behavior, so do not infer hidden behavior or copy unrelated names, records, or
+decorative content. Do not emit corrupted OCR text; omit uncertain text instead. Do not generate JSX, DOM, CSS,
+Tailwind classes, source code, routes, API contracts, or component names. Copy reference_id exactly from the supplied
+metadata. Use concise, implementation-useful strings and [] when a category has no reliable observation. Return only
+the structured JSON object required by the supplied schema.
 """
 
 
@@ -79,7 +91,7 @@ class VisualModel:
                 "VISUAL_API_KEY or OPENAI_API_KEY is required for visual-reference analysis."
             )
         self.model = model.strip()
-        self._json_schema_supported: bool | None = None
+        self._structured_output_mode = "json_schema"
         self._client = OpenAI(
             api_key=api_key.strip(),
             base_url=base_url.rstrip("/"),
@@ -114,12 +126,11 @@ class VisualModel:
     ) -> dict[str, Any]:
         messages = _visual_messages(instructions, input_payload, image_data_url)
         response = None
-        if self._json_schema_supported is not False:
+        if self._structured_output_mode == "json_schema":
             try:
                 response = self._client.chat.completions.create(
                     model=self.model,
                     stream=False,
-                    reasoning_effort="low",
                     messages=messages,
                     response_format={
                         "type": "json_schema",
@@ -130,33 +141,43 @@ class VisualModel:
                         },
                     },
                 )
-                self._json_schema_supported = True
             except Exception as exc:
-                if not _is_json_schema_unavailable(exc):
+                if not response_format_unavailable(exc):
                     raise
                 # Capability negotiation is cached for this compiler run. The
                 # pass is synchronous, so later images can skip the known-bad
                 # request without introducing shared-state races.
-                self._json_schema_supported = False
+                self._structured_output_mode = "json_object"
+
+        fallback_instructions = (
+            f"{instructions.rstrip()}\n\n"
+            "Return exactly one JSON object matching this JSON Schema; include every required "
+            "property, do not add properties, and do not use Markdown:\n"
+            f"{json.dumps(output_schema, ensure_ascii=False, separators=(',', ':'))}"
+        )
+        fallback_messages = _visual_messages(
+            fallback_instructions,
+            input_payload,
+            image_data_url,
+        )
+        if response is None and self._structured_output_mode == "json_object":
+            try:
+                response = self._client.chat.completions.create(
+                    model=self.model,
+                    stream=False,
+                    messages=fallback_messages,
+                    response_format={"type": "json_object"},
+                )
+            except Exception as exc:
+                if not response_format_unavailable(exc):
+                    raise
+                self._structured_output_mode = "prompt_only"
 
         if response is None:
-            fallback_instructions = (
-                f"{instructions.rstrip()}\n\n"
-                "The API transport only supports JSON object mode. Return exactly one JSON "
-                "object matching this JSON Schema; include every required property, do not "
-                "add properties, and do not use Markdown:\n"
-                f"{json.dumps(output_schema, ensure_ascii=False, separators=(',', ':'))}"
-            )
             response = self._client.chat.completions.create(
                 model=self.model,
                 stream=False,
-                reasoning_effort="low",
-                messages=_visual_messages(
-                    fallback_instructions,
-                    input_payload,
-                    image_data_url,
-                ),
-                response_format={"type": "json_object"},
+                messages=fallback_messages,
             )
         content = response.choices[0].message.content
         if content is None:
@@ -192,23 +213,6 @@ def _visual_messages(
             ],
         },
     ]
-
-
-def _is_json_schema_unavailable(error: BaseException) -> bool:
-    """Recognize only explicit provider rejection of the requested format type."""
-
-    if getattr(error, "status_code", None) != 400:
-        return False
-    parts = [str(error)]
-    body = getattr(error, "body", None)
-    if body is not None:
-        parts.append(json.dumps(body, ensure_ascii=False, default=str))
-    detail = " ".join(parts).lower()
-    unavailable = any(
-        marker in detail
-        for marker in ("unavailable", "unsupported", "not supported", "does not support")
-    )
-    return "response_format" in detail and unavailable
 
 
 @dataclass(slots=True)

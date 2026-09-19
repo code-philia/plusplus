@@ -736,6 +736,7 @@ class FrontendSkeletonLowerer:
         rows = [
             _import("defineConfig", "vite"),
             _import("react", "@vitejs/plugin-react", import_style="default"),
+            _import("tailwindcss", "@tailwindcss/vite", import_style="default"),
         ]
         backend_target = f"http://127.0.0.1:{backend_port}"
         sources[path] = (
@@ -744,7 +745,7 @@ class FrontendSkeletonLowerer:
             + f"const backendTarget = {json.dumps(backend_target)};\n"
             + "const apiProxy = { target: backendTarget, changeOrigin: true };\n\n"
             + "export default defineConfig({\n"
-            + "  plugins: [react()],\n"
+            + "  plugins: [react(), tailwindcss()],\n"
             + "  server: { proxy: { \"/api\": apiProxy } },\n"
             + "  preview: { proxy: { \"/api\": apiProxy } },\n"
             + "});\n"
