@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-CODE_BINDING_SCHEMA_VERSION = 1
+CODE_BINDING_SCHEMA_VERSION = 2
 CODE_BINDING_READY = "CODE_BINDING_READY"
 
 
@@ -243,6 +243,7 @@ class CodeBindingLowerer:
                     "actions_symbol",
                     "value_symbol",
                     "initial_symbol",
+                    "runtime_symbol",
                 )
                 if str(location.get(key, "")).strip()
             ]
@@ -254,19 +255,25 @@ class CodeBindingLowerer:
                     "owner_requirements": owners,
                     "kind": "STORE",
                     "file": str(location.get("path", "")),
-                    "symbol": str(location.get("value_symbol", "")),
-                    "typescript_kind": "interface",
+                    "symbol": str(location.get("runtime_symbol", "")),
+                    "typescript_kind": "const",
                     "export": "named",
                     "exported_symbols": exported_symbols,
                     "input_type": None,
                     "output_type": None,
                     "props_type": None,
-                    "public_signature": None,
+                    "public_signature": (
+                        f"{location.get('runtime_symbol', '')}: "
+                        f"{location.get('value_symbol', '')}"
+                    ),
                     "route": None,
                     "callees": [],
-                    "editable": False,
+                    "editable": True,
                     "module_marker": f"@arc-module {store_id}",
-                    "implementation_region": None,
+                    "implementation_region": {
+                        "start_marker": f"// ARC-IMPLEMENTATION-BEGIN:{store_id}",
+                        "end_marker": f"// ARC-IMPLEMENTATION-END:{store_id}",
+                    },
                     "store_types": store_types,
                     "state_fields": copy.deepcopy(store.get("state", [])),
                     "actions": copy.deepcopy(store.get("actions", [])),

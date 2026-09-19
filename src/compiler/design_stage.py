@@ -141,6 +141,9 @@ CREATE on `session`, not SESSION_WRITE. Reserve SESSION_WRITE for a non-database
 requirement writes a browser cookie, include COOKIE_WRITE. In particular, checking whether values already exist for
 UNIQUE or COMPOSITE_UNIQUE constraints requires a READ effect even when the database also enforces the constraint. Do
 not hide required effects inside the prose spec.
+Database access is implemented through one compiler-owned client injected into DB modules. Treat schema table symbols
+as Drizzle table definitions, never as repositories or in-memory data containers; do not model table rows through
+properties such as rows, data, or items.
 Do not design modules, calls, steps, bindings, outcomes, guards, or algorithms. Keep every id concise (64 characters
 or fewer). Return only the structured object.
 
@@ -173,6 +176,10 @@ SESSION_WRITE, COOKIE_WRITE, and EXTERNAL_IO are application effects and must ne
 DB child must own at least one database effect. Never invent an effect: when the parent effect table is empty, all
 child effects must be [] and no DB child may be introduced. A child whose spec describes database access must own one
 of the exact effects listed in the parent table.
+
+The compiler supplies every DB leaf with one shared Drizzle `database` client and its relevant schema table imports.
+The table symbols describe SQL tables; they are not data-bearing objects and must never be described as exposing
+rows, data, items, or other in-memory collections. A DB leaf performs its declared effect through that client.
 
 Treat semantic_id as the stable identity of a data value and type as its canonical data type. The name is only a local
 parameter label and may differ between modules. A child output may introduce new data or pass through/refine data that

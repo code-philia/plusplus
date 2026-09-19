@@ -72,8 +72,44 @@ Implementation rules:
 - Address the supplied failure cluster, not future requirements.
 - Prefer the smallest coherent vertical change and avoid speculative refactoring.
 - Preserve async behavior, TypeScript types, observable UI behavior, and declared call edges.
-- For visual failures, use design_context only for layout, hierarchy, spacing, typography, palette,
-  and component style. Preserve functional behavior and never copy unrelated reference-image data.
+- In a DB module, use the compiler-injected `database` Drizzle client together with the imported schema table symbols.
+  READ/CREATE/UPDATE/DELETE effects must execute through database.select/insert/update/delete respectively. A table
+  symbol is schema metadata, not a repository: never inspect rows, data, items, or arbitrary properties on it.
+- Use the injected `eq`, `and`, and `or` Drizzle operators for predicates; do not emulate filtering after loading an
+  entire table when the predicate can be expressed by the database.
+- Never create another SQLite/Drizzle connection, replace persistence with a module-level array or object, or report a
+  successful database write after merely constructing an id or return value. The injected client is the sole owner of
+  the connection, including when DATABASE_URL is `:memory:` during tests.
+- In an HTTP handler, map only expected requirement-level validation and conflict failures to 4xx responses. Rethrow
+  unexpected database, runtime, and compiler-glue errors so the global error handler and test diagnostics preserve the
+  real root cause; never disguise every exception as invalid user input.
+- Every frontend Page, Layout, or Component edit must be a finished, responsive UI implementation, even when the
+  current failure is classified as functional rather than visual. Do not stop at unstyled semantic markup.
+- A generated UI skeleton may contain data-arc-obligation placeholders, but your replacement must remove those
+  placeholders and render real semantic controls/content. A page that only returns labels, spans, or an empty shell is
+  incomplete and must not be proposed as a successful implementation.
+- The frontend styling system is Tailwind CSS v4 through @tailwindcss/vite. Use static Tailwind utility className
+  strings inside the editable function-body region. Do not invent undefined semantic class names, add style tags, or use inline
+  style objects when a Tailwind utility can express the design.
+- Page, Layout, and Component markers contain the complete editable function body, so declare local state, effects,
+  handlers, and the JSX return inside that region. Do not emit another function declaration.
+- Page and Component implementation bodies receive compiler-wired references through `_dependencies`. Destructure and
+  use its hooks, API clients, and runtime Stores; their business call parameters are intentionally left for this
+  implementation step. Do not bypass an available client with ad-hoc fetch calls or create a second persistence store.
+- Implement navigation using the exact design_context.frontend.pages[].navigation[].target_route values. A Home or
+  main-interface transition targets the compiler-owned system route `/`; after a successful action, navigate there.
+- Store reload behavior is defined by design_context.frontend.stores[].persistence. Keep transient state in MEMORY and
+  implement reload-surviving state through the supplied LOCAL_STORAGE runtime Store and storage_key.
+- For a Store target, replace only its runtime implementation region. Preserve its State, Actions, and Value interfaces
+  and the compiler-owned persistence boundary around that region.
+- Translate design_context into an internally coherent visual direction: content hierarchy, page composition,
+  responsive containers, spacing rhythm, typography scale, palette, borders, surfaces, states, and one restrained
+  signature detail appropriate to the product. Keep the direction consistent across all supplied frontend modules.
+- Visual references are guidance for layout, style, and content hierarchy, not source data. Preserve requirement-owned
+  labels, behavior, and records; never copy unrelated image content. If no reference is supplied, derive a deliberate
+  domain-appropriate direction from the requirement instead of using a generic demo-page aesthetic.
+- Preserve accessibility: semantic controls, associated labels, visible keyboard focus, sufficient contrast, and
+  reduced-motion-safe behavior. Ensure navigation between declared pages remains discoverable and coherent.
 - If several supplied failures are consequences of the same root cause, fix that root cause once.
 - A replacement must be complete source text for the inside of its implementation region.
 
@@ -390,6 +426,12 @@ class ImplementationAgent:
                 "tests_are_frozen": True,
                 "output_is_region_replacement_only": True,
                 "side_effects_owned_by_orchestrator": True,
+            },
+            "project_conventions": {
+                "frontend_styling": "Tailwind CSS v4 via @tailwindcss/vite",
+                "frontend_css_entry": "frontend/src/index.css",
+                "frontend_edits_use_static_utility_classes": True,
+                "reference_images_are_visual_guidance_not_content_fixtures": True,
             },
         }
         context_size = len(

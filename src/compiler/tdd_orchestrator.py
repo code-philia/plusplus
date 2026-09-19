@@ -48,13 +48,11 @@ class NodeTDDPolicy:
     max_iterations_per_node: int = 3
     no_progress_limit: int = 3
     infra_retry_count: int = 2
-    visual_refinement_limit: int = 2
 
     def __post_init__(self) -> None:
         for name in (
             "max_iterations_per_node",
             "no_progress_limit",
-            "visual_refinement_limit",
         ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be at least 1.")
@@ -76,9 +74,6 @@ class NodeTDDPolicy:
             ),
             infra_retry_count=_bounded_int(
                 values, "ARC_TDD_INFRA_RETRY_COUNT", 2, 0, 10
-            ),
-            visual_refinement_limit=_bounded_int(
-                values, "ARC_TDD_VISUAL_REFINEMENT_LIMIT", 2, 1, 20
             ),
         )
 
@@ -211,16 +206,36 @@ class NodeTDDOrchestrator:
             self._transition(requirement_id, "TESTS_GENERATED")
             self._transition(requirement_id, "TESTS_FROZEN")
 
+            changed_files: set[str] = set()
+            previous_patch_summary: dict[str, Any] | None = None
+            frontend_implemented, frontend_errors, frontend_summary = (
+                self._preimplement_frontend(requirement_id)
+            )
+            if frontend_errors:
+                return self._finish(
+                    result,
+                    "AGENT_FAILED",
+                    frontend_errors,
+                    changed_files=changed_files,
+                )
+            if frontend_implemented:
+                changed_files.update(frontend_implemented)
+                result.changed_files = sorted(changed_files)
+                previous_patch_summary = frontend_summary
+                self._transition(requirement_id, "FRONTEND_IMPLEMENTED")
+
             baseline = self._run_and_analyze(
                 requirement_id,
                 iteration=0,
                 include_typecheck=False,
-                changed_files=[],
+                changed_files=sorted(changed_files),
             )
             result.infrastructure_retries += baseline.infrastructure_retries
             if baseline.analysis.errors:
                 return self._finish(result, "INTERNAL_ERROR", baseline.analysis.errors)
             if baseline.test_run.ok:
+                if frontend_implemented:
+                    return self._accept_node(result)
                 return self._finish(
                     result,
                     "RED_NOT_OBSERVED",
@@ -243,33 +258,19 @@ class NodeTDDOrchestrator:
             unchanged_failures = 0
             functional_iterations = 0
             visual_iterations = 0
-            patch_iteration = 0
-            changed_files: set[str] = set()
-            previous_patch_summary: dict[str, Any] | None = None
+            patch_iteration = 1 if frontend_implemented else 0
 
             while True:
                 cluster = _selected_cluster(reports)
-                failure_class = cluster[0].failure_class
-                if failure_class == "VISUAL_BEHAVIOR":
-                    if visual_iterations >= self.policy.visual_refinement_limit:
-                        return self._budget_exhausted(
-                            result,
-                            functional_iterations,
-                            visual_iterations,
-                            changed_files,
-                            "visual refinement",
-                        )
-                    visual_iterations += 1
-                else:
-                    if functional_iterations >= self.policy.max_iterations_per_node:
-                        return self._budget_exhausted(
-                            result,
-                            functional_iterations,
-                            visual_iterations,
-                            changed_files,
-                            "implementation",
-                        )
-                    functional_iterations += 1
+                if functional_iterations >= self.policy.max_iterations_per_node:
+                    return self._budget_exhausted(
+                        result,
+                        functional_iterations,
+                        visual_iterations,
+                        changed_files,
+                        "implementation",
+                    )
+                functional_iterations += 1
                 patch_iteration += 1
                 result.iterations = functional_iterations
                 result.visual_iterations = visual_iterations
@@ -381,6 +382,94 @@ class NodeTDDOrchestrator:
                 visual_iterations=result.visual_iterations,
                 changed_files=result.changed_files,
             )
+
+    def _preimplement_frontend(
+        self,
+        requirement_id: str,
+    ) -> tuple[set[str], list[str], dict[str, Any] | None]:
+        """Implement a requirement-owned browser path before its first E2E run."""
+
+        e2e_tests = [
+            str(row.get("test_id", ""))
+            for row in (self.test_manifest or {}).get("tests", [])
+            if isinstance(row, dict)
+            and str(row.get("requirement_id", "")) == requirement_id
+            and str(row.get("layer", "")).upper() == "E2E"
+        ]
+        if not e2e_tests:
+            return set(), [], None
+        resolved = CodeTargetResolver(
+            self.code_binding_registry
+        ).resolve_requirement_targets(requirement_id)
+        frontend_targets = [
+            row
+            for row in resolved.get("owned_targets", [])
+            if isinstance(row, dict)
+            and bool(row.get("editable"))
+            and str(row.get("kind", "")) in {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
+        ]
+        if not frontend_targets:
+            return set(), [], None
+        target_ids = sorted(str(row["module_id"]) for row in frontend_targets)
+        fingerprint = hashlib.sha256(
+            f"{requirement_id}:frontend-bootstrap".encode("utf-8")
+        ).hexdigest()
+        report = TestFailureReport(
+            requirement_id=requirement_id,
+            iteration=0,
+            test_id=e2e_tests[0],
+            test_ids=e2e_tests,
+            layer="E2E",
+            phase="FRONTEND_BOOTSTRAP",
+            failure_class="IMPLEMENTATION_BEHAVIOR",
+            message=(
+                "Implement the complete requirement-owned frontend path immediately after "
+                "test generation and before the first E2E execution."
+            ),
+            stack_frames=[],
+            target_modules=target_ids,
+            writable_targets=copy.deepcopy(frontend_targets),
+            read_only_dependencies=[],
+            changed_files=[],
+            failure_fingerprint=fingerprint,
+            diagnostic_output=(
+                "Build the functional responsive UI, wire the injected API client and runtime "
+                "Store, use declared target_route values, and route successful Home transitions "
+                "to `/`. Do not perform a separate visual-refinement pass."
+            ),
+        )
+        self._transition(requirement_id, "FRONTEND_IMPLEMENTING")
+        implementation = self.implementation_agent.implement(
+            ImplementationRequest(
+                requirement_id=requirement_id,
+                requirement=self.requirement_ir["nodes"][requirement_id],
+                requirement_contract=self._requirement_contract(requirement_id),
+                test_manifest=self.test_manifest or {},
+                code_binding_registry=self.code_binding_registry,
+                failure_reports=(report,),
+                iteration=1,
+                design_context=self._design_context(requirement_id),
+            )
+        )
+        if not implementation.ok or implementation.patch is None:
+            return set(), (
+                implementation.errors
+                or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."]
+            ), None
+        applied = self.write_guard.apply(
+            implementation.patch,
+            code_binding_registry=self.code_binding_registry,
+        )
+        if not applied.ok:
+            return set(), applied.rejected_changes, None
+        changed = {_normalize_path(value) for value in applied.changed_files}
+        return changed, [], {
+            "iteration": 1,
+            "phase": "FRONTEND_BOOTSTRAP",
+            "summary": implementation.summary,
+            "changed_files": applied.changed_files,
+            "changed_modules": applied.changed_modules,
+        }
 
     def _run_and_analyze(
         self,

@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any
 
 
-FRONTEND_IR_SCHEMA_VERSION = 1
+FRONTEND_IR_SCHEMA_VERSION = 2
 UI_SCOPE_VALUES = {"UI_REQUIRED", "UI_AFFECTING", "NO_UI"}
 
 
@@ -200,11 +200,24 @@ EVENT_SCHEMA: dict[str, Any] = {
 NAVIGATION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["trigger", "target", "condition"],
+    "required": ["trigger", "target", "target_route", "condition"],
     "properties": {
         "trigger": {"type": "string", "minLength": 1, "maxLength": 120},
         "target": {"type": "string", "minLength": 1, "maxLength": 200},
+        "target_route": {"type": "string", "pattern": r"^/", "maxLength": 240},
         "condition": _nullable({"type": "string", "minLength": 1, "maxLength": 300}),
+    },
+}
+
+STORE_PERSISTENCE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["kind", "storage_key"],
+    "properties": {
+        "kind": {"type": "string", "enum": ["MEMORY", "LOCAL_STORAGE"]},
+        "storage_key": _nullable(
+            {"type": "string", "minLength": 1, "maxLength": 120}
+        ),
     },
 }
 
@@ -304,12 +317,13 @@ STORE_ACTION_SCHEMA: dict[str, Any] = {
 STORE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["id", "spec", "state", "actions", "requirement_ids"],
+    "required": ["id", "spec", "state", "actions", "persistence", "requirement_ids"],
     "properties": {
         "id": {"type": "string", "pattern": r"^STORE\.[A-Za-z][A-Za-z0-9]*$"},
         "spec": {"type": "string", "minLength": 1, "maxLength": 800},
         "state": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
         "actions": {"type": "array", "items": STORE_ACTION_SCHEMA},
+        "persistence": STORE_PERSISTENCE_SCHEMA,
         "requirement_ids": _string_list(),
     },
 }

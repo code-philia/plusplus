@@ -110,6 +110,9 @@ Testing rules:
   compiler-imposed maximum case count. Avoid redundant cases that exercise exactly the same behavior at the same seam.
 - UNIT uses Vitest and directly invokes an exported FUNC symbol.
 - INTEGRATION uses Vitest + Supertest against the exported Express `app` and the supplied HTTP route.
+- Every Supertest status assertion must include the serialized response body as Vitest's assertion message, for
+  example `expect(response.status, JSON.stringify(response.body)).toBeLessThan(400)`, so implementation failures retain
+  the server diagnostic in the fixed feedback loop.
 - E2E uses @playwright/test and the supplied frontend route/observable labels.
 - Tests may fail because implementation regions still throw or are incomplete. Do not weaken assertions.
 - Code must be complete TypeScript with imports and test declarations, without markdown fences.
@@ -981,23 +984,46 @@ def _plan_test_obligations(
         for row in owned
         if row.get("kind") == "FUNC"
     ]
-    rule_pattern = re.compile(
-        r"(?:\b(?:validat|normaliz|calculat|authoriz|decision|rule|ensure|check|derive)\w*|"
-        r"校验|验证|规范|计算|授权|决策|规则|检查|推导)",
-        re.IGNORECASE,
-    )
-    rule_func_ids = sorted(
+    pure_cache: dict[str, bool] = {}
+
+    def is_unit_seam(module_id: str, visiting: set[str] | None = None) -> bool:
+        """Accept callable FUNC closures with no declared or delegated side effects."""
+
+        if module_id in pure_cache:
+            return pure_cache[module_id]
+        module = module_index.get(module_id, {})
+        if str(module.get("kind", "")).upper() != "FUNC":
+            pure_cache[module_id] = False
+            return False
+        if any(isinstance(effect, dict) for effect in module.get("effects", [])):
+            pure_cache[module_id] = False
+            return False
+        active = set(visiting or ())
+        if module_id in active:
+            pure_cache[module_id] = False
+            return False
+        active.add(module_id)
+        for callee_id in module.get("callees", []):
+            callee = str(callee_id)
+            if not callee or not is_unit_seam(callee, active):
+                pure_cache[module_id] = False
+                return False
+        pure_cache[module_id] = True
+        return True
+
+    unit_func_ids = sorted(
         str(module.get("id", ""))
         for module in func_modules
         if str(module.get("id", ""))
-        and rule_pattern.search(
-            " ".join(str(module.get(key, "")) for key in ("id", "name", "spec"))
-        )
+        and is_unit_seam(str(module.get("id", "")))
     )
-    if rule_func_ids:
+    if unit_func_ids:
         obligations["UNIT"] = {
-            "reason": "requirement owns independently testable business-rule FUNC modules",
-            "target_modules": rule_func_ids,
+            "reason": (
+                "requirement owns independently callable FUNC modules whose transitive "
+                "dependency closure has no declared side effects"
+            ),
+            "target_modules": unit_func_ids,
         }
 
     if not obligations:
@@ -1008,15 +1034,6 @@ def _plan_test_obligations(
                     str(row.get("module_id", ""))
                     for row in owned
                     if row.get("kind") == "API" and str(row.get("module_id", ""))
-                ),
-            }
-        elif "FUNC" in kinds:
-            obligations["UNIT"] = {
-                "reason": "FUNC is the narrowest available public seam",
-                "target_modules": sorted(
-                    str(row.get("module_id", ""))
-                    for row in owned
-                    if row.get("kind") == "FUNC" and str(row.get("module_id", ""))
                 ),
             }
         elif kinds & {"PAGE", "COMPONENT", "LAYOUT"}:

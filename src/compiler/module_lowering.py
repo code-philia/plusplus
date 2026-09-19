@@ -485,6 +485,29 @@ def _render_module(
             "type_only": False,
         }
     )
+    # DB modules always use the single compiler-owned connection.  The table
+    # imports below are schema descriptions only; keeping the connection as a
+    # real import prevents the generated skeleton from accidentally treating a
+    # Drizzle table as an in-memory repository.
+    if kind == "DB" and database_rows:
+        database_client_path = "backend/src/db/client.ts"
+        imports.append(
+            {
+                "symbol": "database",
+                "from": database_client_path,
+                "specifier": _relative_specifier(current_path, database_client_path),
+                "type_only": False,
+            }
+        )
+        for operator in ("and", "eq", "or"):
+            imports.append(
+                {
+                    "symbol": operator,
+                    "from": "drizzle-orm",
+                    "specifier": "drizzle-orm",
+                    "type_only": False,
+                }
+            )
     for row in [*dependencies, *database_rows]:
         imports.append(
             {
@@ -522,8 +545,13 @@ def _render_module(
             ]
         )
     elif database_rows:
-        database_symbols = ", ".join(row["symbol"] for row in database_rows)
-        lines.extend([f"const database = {{ {database_symbols} }} as const;", "void database;", ""])
+        lines.extend(
+            [
+                "// The imported database is the compiler-owned Drizzle client.",
+                "// Use database.select/insert/update/delete with the schema table imports.",
+                "",
+            ]
+        )
 
     if kind == "API":
         request_body = input_name or "unknown"

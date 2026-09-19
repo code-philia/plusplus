@@ -9,7 +9,7 @@ from typing import Any
 
 
 TYPE_MANIFEST_SCHEMA_VERSION = 1
-DATABASE_MANIFEST_SCHEMA_VERSION = 2
+DATABASE_MANIFEST_SCHEMA_VERSION = 4
 TYPES_GENERATED = "TYPES_GENERATED"
 DATABASE_SCHEMA_LOWERED = "DATABASE_SCHEMA_LOWERED"
 
@@ -239,6 +239,13 @@ class DatabaseSchemaLowerer:
             "dialect": "sqlite",
             "orm": "drizzle",
             "tables": tables,
+            "initialization": {
+                "mode": "create_if_not_exists",
+                "statements": _sqlite_initialization_statements(
+                    database_schema,
+                    warnings,
+                ) if not errors else [],
+            },
             "application_constraints": application_constraints,
             "planned_files": sorted(sources),
             "generated_files": [] if errors else sorted(sources),
@@ -745,6 +752,11 @@ def _field_checks(
         for kind, value in sorted(properties.items()):
             if value is None or value is False or kind in {"default", "format", "pattern"}:
                 continue
+            # SQLite rejects non-deterministic date/time functions in CHECK
+            # constraints at write time. Relative temporal constraints are
+            # materialized as INSERT/UPDATE triggers by the initialization plan.
+            if kind in {"date_past", "date_future"} and value is True:
+                continue
             if value == "" or value == []:
                 warnings.append(
                     f"ARC3412 DATABASE_CHECK_UNSUPPORTED: empty {kind} for {name}; skipped."
@@ -803,10 +815,6 @@ def _property_check_expression(
             return None
         values = ", ".join(_sql_literal(item) for item in value)
         return f"{field} in ({values})"
-    if kind == "date_past" and value is True:
-        return f"{field} < datetime('now')"
-    if kind == "date_future" and value is True:
-        return f"{field} > datetime('now')"
     warnings.append(
         f"ARC3412 DATABASE_CHECK_UNSUPPORTED: cannot lower {kind} for {field_name}; skipped."
     )
@@ -831,6 +839,169 @@ def _sql_literal(value: Any) -> str:
         return str(value)
     text = str(value).replace("'", "''").replace("`", "\\`").replace("${", "\\${")
     return "'" + text + "'"
+
+
+def _sqlite_initialization_statements(
+    database_schema: dict[str, Any],
+    warnings: list[str],
+) -> list[str]:
+    """Lower the frozen schema to an idempotent, same-connection bootstrap.
+
+    Drizzle table objects describe a schema but do not materialize it.  These
+    statements are executed by the generated database client, which is
+    especially important for SQLite ``:memory:`` databases: a separate
+    migration process would operate on a different database.
+    """
+
+    constraints = [
+        item
+        for item in database_schema.get("constraints", [])
+        if isinstance(item, dict)
+    ]
+    statements: list[str] = []
+    temporal_triggers: list[str] = []
+    entities = [
+        item
+        for item in database_schema.get("entities", [])
+        if isinstance(item, dict)
+    ]
+    for entity in sorted(entities, key=lambda item: str(item.get("key", ""))):
+        entity_key = str(entity.get("key", ""))
+        single_unique, composite_unique = _unique_constraints(entity_key, constraints)
+        definitions: list[str] = []
+        fields = [
+            item
+            for item in entity.get("fields", [])
+            if isinstance(item, dict)
+        ]
+        for field_item in fields:
+            name = str(field_item.get("name", ""))
+            parts = [
+                _quote_sqlite_identifier(name),
+                _sqlite_storage_type(str(field_item.get("type", ""))),
+            ]
+            if bool(field_item.get("primary_key")):
+                parts.append("PRIMARY KEY")
+            elif not bool(field_item.get("nullable")):
+                parts.append("NOT NULL")
+            if name in single_unique and not bool(field_item.get("primary_key")):
+                parts.append("UNIQUE")
+            properties = field_item.get("properties", {})
+            if isinstance(properties, dict) and properties.get("default") is not None:
+                parts.extend(["DEFAULT", _sqlite_default_literal(properties["default"])])
+            reference = str(field_item.get("references", ""))
+            target_entity, separator, target_field = reference.partition(".")
+            if separator:
+                parts.append(
+                    "REFERENCES "
+                    f"{_quote_sqlite_identifier(target_entity)}"
+                    f"({_quote_sqlite_identifier(target_field)})"
+                )
+            definitions.append(" ".join(parts))
+
+        for names in composite_unique:
+            suffix = "_".join(names)
+            columns = ", ".join(_quote_sqlite_identifier(name) for name in names)
+            definitions.append(
+                f"CONSTRAINT {_quote_sqlite_identifier(f'{entity_key}_{suffix}_unique')} "
+                f"UNIQUE ({columns})"
+            )
+
+        for field_item in fields:
+            name = str(field_item.get("name", ""))
+            properties = field_item.get("properties", {})
+            if not isinstance(properties, dict):
+                continue
+            for kind, value in sorted(properties.items()):
+                if value is None or value is False or kind in {"default", "format", "pattern"}:
+                    continue
+                if kind in {"date_past", "date_future"} and value is True:
+                    temporal_triggers.extend(
+                        _sqlite_temporal_trigger_statements(
+                            entity_key,
+                            name,
+                            kind,
+                            str(field_item.get("type", "date")),
+                        )
+                    )
+                    continue
+                expression = _property_check_expression(name, kind, value, warnings)
+                if expression is None:
+                    continue
+                expression = expression.replace(
+                    f"${{table.{name}}}",
+                    _quote_sqlite_identifier(name),
+                )
+                constraint_name = f"{entity_key}_{name}_{kind}_check"
+                definitions.append(
+                    f"CONSTRAINT {_quote_sqlite_identifier(constraint_name)} "
+                    f"CHECK ({expression})"
+                )
+
+        body = ",\n  ".join(definitions)
+        statements.append(
+            f"CREATE TABLE IF NOT EXISTS {_quote_sqlite_identifier(entity_key)} (\n"
+            f"  {body}\n"
+            ");"
+        )
+    statements.extend(temporal_triggers)
+    return statements
+
+
+def _sqlite_temporal_trigger_statements(
+    entity_key: str,
+    field_name: str,
+    kind: str,
+    field_type: str,
+) -> list[str]:
+    """Enforce relative temporal constraints at DML time, where `now` is legal."""
+
+    table = _quote_sqlite_identifier(entity_key)
+    field = _quote_sqlite_identifier(field_name)
+    temporal_function = "datetime" if field_type == "datetime" else "date"
+    comparison = ">=" if kind == "date_past" else "<="
+    direction = "past" if kind == "date_past" else "future"
+    invalid = (
+        f"{temporal_function}(NEW.{field}) IS NULL OR "
+        f"{temporal_function}(NEW.{field}) {comparison} {temporal_function}('now')"
+    )
+    message = _sql_literal(f"{entity_key}.{field_name} must be in the {direction}")
+    statements: list[str] = []
+    for operation in ("insert", "update"):
+        trigger_name = _quote_sqlite_identifier(
+            f"{entity_key}_{field_name}_{kind}_{operation}_trigger"
+        )
+        event = "INSERT" if operation == "insert" else f"UPDATE OF {field}"
+        statements.append(
+            f"CREATE TRIGGER IF NOT EXISTS {trigger_name}\n"
+            f"BEFORE {event} ON {table}\n"
+            "FOR EACH ROW\n"
+            f"WHEN NEW.{field} IS NOT NULL AND ({invalid})\n"
+            "BEGIN\n"
+            f"  SELECT RAISE(ABORT, {message});\n"
+            "END;"
+        )
+    return statements
+
+
+def _sqlite_storage_type(field_type: str) -> str:
+    if field_type in {"integer", "boolean"}:
+        return "INTEGER"
+    if field_type == "number":
+        return "REAL"
+    return "TEXT"
+
+
+def _sqlite_default_literal(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, (dict, list)):
+        return _sql_literal(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    return _sql_literal(value)
+
+
+def _quote_sqlite_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
 
 
 def _escape_string(value: str) -> str:

@@ -20,6 +20,7 @@ from .frontend_ir import (
     RENDER_OBLIGATION_SCHEMA,
     SEMANTIC_FIELD_SCHEMA,
     STORE_ACTION_SCHEMA,
+    STORE_PERSISTENCE_SCHEMA,
     FrontendDesignErrorCode,
     FrontendDesignIssue,
     repair_schema_shape,
@@ -72,13 +73,14 @@ UI_SCOPE_LAYOUT_SCHEMA: dict[str, Any] = {
 UI_SCOPE_STORE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["action", "name", "spec", "state", "actions"],
+    "required": ["action", "name", "spec", "state", "actions", "persistence"],
     "properties": {
         "action": _ACTION_SCHEMA,
         "name": {"type": "string", "minLength": 1, "maxLength": 80},
         "spec": {"type": "string", "maxLength": 800},
         "state": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
         "actions": {"type": "array", "items": STORE_ACTION_SCHEMA},
+        "persistence": STORE_PERSISTENCE_SCHEMA,
     },
 }
 
@@ -153,7 +155,10 @@ arrays empty. CREATE allocates a new global symbol; REUSE must name a symbol alr
 Never create a second symbol with an existing name. Names are global English symbol names and must be stable across
 requirements. A CREATE page needs a non-empty absolute route and spec. A CREATE layout or store needs a non-empty
 spec. A CREATE store must define only genuinely cross-page state and its public actions; do not move page-local form
-or loading state into a global store. A semantic_id is a global typed identity: whenever Store state reuses a
+or loading state into a global store. Every CREATE store must choose an explicit persistence strategy. Use MEMORY for
+state that may disappear on reload. Use LOCAL_STORAGE with a stable product-specific storage_key when the requirement
+states that authentication or other state survives reload/browser navigation. Never claim reload persistence in prose
+while returning MEMORY. A semantic_id is a global typed identity: whenever Store state reuses a
 semantic_id from requirement_contract or backend_apis, copy both its canonical name and type exactly. If Store state
 has a different lifecycle type, such as a nullable current-session projection of a required registration field, it
 is a different semantic value and must use a Store-domain id such as session.username or auth.current_username;
@@ -165,7 +170,9 @@ major regions, content density, and the responsibility of each referenced visual
 translate the supplied layout/style evidence faithfully. Preserve the product's own requirement content: reference
 images guide composition and visual language, not unrelated data. Refer
 only to Backend API ids and visual reference ids supplied for this requirement. API ids are opaque and must be copied
-exactly. FOLDER requirements are processed after their children: prefer REUSE for child pages already present in the
+exactly. Every navigation edge must provide a concrete absolute target_route. Use "/" for the compiler-owned system
+main interface when a requirement says Home, HomePage, main screen, or equivalent and no requirement-owned home page
+is being created. FOLDER requirements are processed after their children: prefer REUSE for child pages already present in the
 registry, and CREATE only UI structure directly required by the folder's own description. FOLDER requirements may
 legitimately receive no Requirement Contract or Backend API. Do not design components, JSX, CSS, files,
 implementation logic, local store fields, or API bindings. Use [] whenever a list is empty and return only the
@@ -308,6 +315,7 @@ class FrontendDesignState:
                     "spec": str(item["spec"]).strip(),
                     "state": copy.deepcopy(item["state"]),
                     "actions": copy.deepcopy(item["actions"]),
+                    "persistence": copy.deepcopy(item["persistence"]),
                     "requirement_ids": [requirement_id],
                 }
             else:
@@ -772,6 +780,20 @@ def validate_frontend_design_minimum(
             if backend_api_ids is not None and str(api_id) not in backend_api_ids:
                 issues.append(_unknown_reference(page_id, "Backend API", str(api_id)))
 
+    available_routes = set(routes) | {"/"}
+    for page in frontend_ir["pages"]:
+        page_id = str(page["id"])
+        for navigation in page.get("navigation", []):
+            target_route = str(navigation.get("target_route", ""))
+            if target_route not in available_routes:
+                issues.append(_issue(
+                    FrontendDesignErrorCode.REFERENCE_UNKNOWN,
+                    f"{page_id} navigation targets unavailable route {target_route!r}.",
+                    "FRONTEND_IR_VALIDATION",
+                    page_id,
+                    target_route=target_route,
+                ))
+
     for component in frontend_ir["components"]:
         component_id = str(component["id"])
         page_owner = component.get("owner_page_id")
@@ -944,6 +966,23 @@ def _scope_decision_issues(
                             "REQUIREMENT_UI_SCOPE",
                             symbol_id,
                         ))
+                    persistence = item.get("persistence", {})
+                    persistence_kind = str(persistence.get("kind", ""))
+                    storage_key = persistence.get("storage_key")
+                    if persistence_kind == "LOCAL_STORAGE" and not str(storage_key or "").strip():
+                        issues.append(_issue(
+                            FrontendDesignErrorCode.UI_SCOPE_DECISION_INVALID,
+                            f"CREATE {symbol_id} with LOCAL_STORAGE requires storage_key.",
+                            "REQUIREMENT_UI_SCOPE",
+                            symbol_id,
+                        ))
+                    if persistence_kind == "MEMORY" and storage_key is not None:
+                        issues.append(_issue(
+                            FrontendDesignErrorCode.UI_SCOPE_DECISION_INVALID,
+                            f"CREATE {symbol_id} with MEMORY must set storage_key to null.",
+                            "REQUIREMENT_UI_SCOPE",
+                            symbol_id,
+                        ))
             elif symbol_id not in registry:
                 issues.append(_issue(
                     FrontendDesignErrorCode.UI_SCOPE_REUSE_MISSING,
@@ -994,6 +1033,15 @@ def _scope_decision_issues(
                         "store",
                         store_id,
                         phase="REQUIREMENT_UI_SCOPE",
+                    ))
+            for navigation in item.get("navigation", []):
+                target_route = str(navigation.get("target_route", ""))
+                if not target_route.startswith("/"):
+                    issues.append(_issue(
+                        FrontendDesignErrorCode.UI_SCOPE_DECISION_INVALID,
+                        f"CREATE {page_id} navigation requires an absolute target_route.",
+                        "REQUIREMENT_UI_SCOPE",
+                        page_id,
                     ))
             _validate_api_ids(
                 issues,
@@ -1193,6 +1241,7 @@ def _repair_scope_decision(
                 _valid_schema_rows(raw.get("actions"), STORE_ACTION_SCHEMA),
                 "name",
             ),
+            "persistence": _normalized_store_persistence(raw.get("persistence"), name),
         })
         store_ids.add(symbol_id)
 
@@ -1460,10 +1509,28 @@ def _model_registry(state: FrontendDesignState) -> dict[str, Any]:
                 "spec": item["spec"],
                 "state": copy.deepcopy(item["state"]),
                 "actions": copy.deepcopy(item["actions"]),
+                "persistence": copy.deepcopy(item["persistence"]),
             }
             for item in (state.stores[key] for key in sorted(state.stores))
         ],
     }
+
+
+def _normalized_store_persistence(value: Any, store_name: str) -> dict[str, Any]:
+    if isinstance(value, dict):
+        kind = str(value.get("kind", "")).upper()
+        storage_key = value.get("storage_key")
+        if kind == "LOCAL_STORAGE":
+            key = str(storage_key or "").strip()
+            if not key:
+                key = f"arc.{_store_storage_segment(store_name)}"
+            return {"kind": "LOCAL_STORAGE", "storage_key": key[:120]}
+    return {"kind": "MEMORY", "storage_key": None}
+
+
+def _store_storage_segment(value: str) -> str:
+    words = [word.lower() for word in re.findall(r"[A-Za-z0-9]+", value)]
+    return "-".join(words) or "store"
 
 
 def _provider_output_schema(schema: dict[str, Any]) -> dict[str, Any]:

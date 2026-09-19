@@ -10,11 +10,11 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-FRONTEND_SYMBOL_REGISTRY_SCHEMA_VERSION = 1
-FRONTEND_FILE_REGISTRY_SCHEMA_VERSION = 1
-FRONTEND_MANIFEST_SCHEMA_VERSION = 1
-FRONTEND_ROUTE_REGISTRY_SCHEMA_VERSION = 1
-FRONTEND_IMPORT_PLAN_SCHEMA_VERSION = 1
+FRONTEND_SYMBOL_REGISTRY_SCHEMA_VERSION = 2
+FRONTEND_FILE_REGISTRY_SCHEMA_VERSION = 2
+FRONTEND_MANIFEST_SCHEMA_VERSION = 2
+FRONTEND_ROUTE_REGISTRY_SCHEMA_VERSION = 2
+FRONTEND_IMPORT_PLAN_SCHEMA_VERSION = 2
 
 FRONTEND_SYMBOLS_PLANNED = "FRONTEND_SYMBOLS_PLANNED"
 FRONTEND_FILES_PLANNED = "FRONTEND_FILES_PLANNED"
@@ -36,6 +36,7 @@ _SYSTEM_FILES = (
     ("frontend/src/api/index.ts", "API_BARREL"),
     ("frontend/src/components/index.ts", "COMPONENT_BARREL"),
     ("frontend/src/pages/index.ts", "PAGE_BARREL"),
+    ("frontend/src/pages/system-main-page.tsx", "SYSTEM_MAIN_PAGE"),
 )
 
 
@@ -193,6 +194,7 @@ class FrontendGlobalSymbolPlanner:
         actions_id = f"STORE_ACTIONS::{store_id}"
         value_id = f"STORE_VALUE::{store_id}"
         initial_id = f"STORE_INITIAL::{store_id}"
+        runtime_id = f"STORE_RUNTIME::{store_id}"
         state_symbol = self._register(
             state_id,
             "STORE_STATE",
@@ -223,6 +225,13 @@ class FrontendGlobalSymbolPlanner:
             f"initial{base}State",
             owner_id=store_id,
         )
+        runtime_symbol = self._register(
+            runtime_id,
+            "STORE_RUNTIME",
+            "const",
+            f"{base[:1].lower() + base[1:]}Store",
+            owner_id=store_id,
+        )
         self._store_bindings[store_id] = {
             "store_id": store_id,
             "state_symbol_id": state_id,
@@ -233,6 +242,8 @@ class FrontendGlobalSymbolPlanner:
             "value_symbol": value_symbol,
             "initial_symbol_id": initial_id,
             "initial_symbol": initial_symbol,
+            "runtime_symbol_id": runtime_id,
+            "runtime_symbol": runtime_symbol,
         }
 
     def _plan_api_client(
@@ -397,6 +408,7 @@ class FrontendFilePlanner:
                 "actions_symbol_id",
                 "value_symbol_id",
                 "initial_symbol_id",
+                "runtime_symbol_id",
             ):
                 self._place_symbol(str(binding[key]), symbols, path, "STORE_SKELETON", "BODY_ONLY")
             self._store_locations[store_id] = {**copy.deepcopy(binding), "path": path}
@@ -636,11 +648,20 @@ class FrontendSkeletonLowerer:
                 pages,
                 components,
                 ui_locations,
+                store_locations,
+                api_locations,
                 owner_requirements,
                 sources,
                 imports_by_path,
                 exports_by_path,
                 errors,
+            )
+            self._lower_system_main_page(
+                stores,
+                store_locations,
+                sources,
+                imports_by_path,
+                exports_by_path,
             )
 
         frontend_routes = self._lower_router(
@@ -868,6 +889,7 @@ class FrontendSkeletonLowerer:
             actions_symbol = str(location["actions_symbol"])
             value_symbol = str(location["value_symbol"])
             initial_symbol = str(location["initial_symbol"])
+            runtime_symbol = str(location["runtime_symbol"])
             state_fields = _render_fields(store.get("state", []))
             action_lines = []
             for action in store.get("actions", []):
@@ -885,6 +907,51 @@ class FrontendSkeletonLowerer:
                 initial_lines.append(
                     f"  {name}: {_default_value(str(field_item.get('type', 'unknown')))},"
                 )
+            persistence = store.get("persistence", {})
+            persistence_kind = str(persistence.get("kind", "MEMORY"))
+            storage_key = (
+                str(persistence.get("storage_key"))
+                if persistence_kind == "LOCAL_STORAGE" and persistence.get("storage_key")
+                else None
+            )
+            runtime_lines = [
+                f"  let currentState = load{state_symbol}();",
+                "  const persist = () => {",
+                "    if (storageKey && typeof window !== \"undefined\") {",
+                "      window.localStorage.setItem(storageKey, JSON.stringify(currentState));",
+                "    }",
+                "  };",
+                f"  const actions: {actions_symbol} = {{",
+            ]
+            for action in store.get("actions", []):
+                if not isinstance(action, dict):
+                    continue
+                name = _safe_property(str(action.get("name", "action")))
+                has_input = bool(action.get("input_type"))
+                if name.lower().startswith(("clear", "reset", "signout", "logout")):
+                    runtime_lines.extend([
+                        f"    {name}: () => {{",
+                        f"      currentState = {{ ...{initial_symbol} }};",
+                        "      persist();",
+                        "    },",
+                    ])
+                elif has_input:
+                    runtime_lines.extend([
+                        f"    {name}: (input) => {{",
+                        "      const patch = typeof input === \"object\" && input !== null ? input : {};",
+                        f"      currentState = {{ ...currentState, ...patch }} as {state_symbol};",
+                        "      persist();",
+                        "    },",
+                    ])
+                else:
+                    runtime_lines.append(f"    {name}: () => undefined,")
+            runtime_lines.extend([
+                "  };",
+                "  return {",
+                "    get state() { return currentState; },",
+                "    actions,",
+                "  };",
+            ])
             sources[path] = (
                 "/**\n"
                 + f" * @arc-module {store_id}\n"
@@ -899,10 +966,31 @@ class FrontendSkeletonLowerer:
                 "}\n\n"
                 f"export const {initial_symbol}: {state_symbol} = {{\n"
                 + ("\n".join(initial_lines) if initial_lines else "  // No global state was designed.")
-                + "\n};\n"
+                + "\n};\n\n"
+                + f"const storageKey: string | null = {json.dumps(storage_key)};\n"
+                + f"function load{state_symbol}(): {state_symbol} {{\n"
+                + "  if (!storageKey || typeof window === \"undefined\") "
+                + f"return {{ ...{initial_symbol} }};\n"
+                + "  try {\n"
+                + "    const value = window.localStorage.getItem(storageKey);\n"
+                + f"    return value ? {{ ...{initial_symbol}, ...JSON.parse(value) }} : {{ ...{initial_symbol} }};\n"
+                + "  } catch {\n"
+                + f"    return {{ ...{initial_symbol} }};\n"
+                + "  }\n}\n\n"
+                + f"export const {runtime_symbol}: {value_symbol} = (() => {{\n"
+                + f"  // ARC-IMPLEMENTATION-BEGIN:{store_id}\n"
+                + "\n".join(runtime_lines)
+                + f"\n  // ARC-IMPLEMENTATION-END:{store_id}\n"
+                + "})();\n"
             )
             imports[path] = []
-            exports[path] = [state_symbol, actions_symbol, value_symbol, initial_symbol]
+            exports[path] = [
+                state_symbol,
+                actions_symbol,
+                value_symbol,
+                initial_symbol,
+                runtime_symbol,
+            ]
 
     @staticmethod
     def _lower_ui_modules(
@@ -910,6 +998,8 @@ class FrontendSkeletonLowerer:
         pages: dict[str, dict[str, Any]],
         components: dict[str, dict[str, Any]],
         locations: dict[str, dict[str, Any]],
+        store_locations: dict[str, dict[str, Any]],
+        api_locations: dict[str, dict[str, Any]],
         owner_requirements: dict[str, list[str]],
         sources: dict[str, str],
         imports: dict[str, list[dict[str, Any]]],
@@ -927,10 +1017,17 @@ class FrontendSkeletonLowerer:
             props_symbol = str(location["props_symbol"])
             kind = str(location["ui_kind"])
             rows: list[dict[str, Any]] = []
+            implementation_dependencies: list[str] = []
             props_lines: list[str] = []
             if kind == "LAYOUT":
                 rows.append(_import("ReactNode", "react", type_only=True))
                 props_lines.append("  children?: ReactNode;")
+            else:
+                rows.extend([
+                    _import("useEffect", "react"),
+                    _import("useState", "react"),
+                ])
+                implementation_dependencies.extend(["useEffect", "useState"])
             fields = item.get("route_inputs", []) if kind == "PAGE" else item.get("inputs", [])
             props_lines.extend(_render_fields(fields).splitlines() if fields else [])
             if kind == "COMPONENT":
@@ -945,6 +1042,28 @@ class FrontendSkeletonLowerer:
                         if payload else f"() => {result_type}"
                     )
                     props_lines.append(f"  {event_name}?: {callback};")
+
+            if kind == "PAGE":
+                for api_id in item.get("api_dependencies", []):
+                    api_location = api_locations.get(str(api_id))
+                    if api_location is not None:
+                        client_symbol = str(api_location["client_symbol"])
+                        rows.append(_import(
+                            client_symbol,
+                            _relative_specifier(path, str(api_location["path"])),
+                            source=str(api_location["path"]),
+                        ))
+                        implementation_dependencies.append(client_symbol)
+                for store_id in item.get("store_dependencies", []):
+                    store_location = store_locations.get(str(store_id))
+                    if store_location is not None:
+                        runtime_symbol = str(store_location["runtime_symbol"])
+                        rows.append(_import(
+                            runtime_symbol,
+                            _relative_specifier(path, str(store_location["path"])),
+                            source=str(store_location["path"]),
+                        ))
+                        implementation_dependencies.append(runtime_symbol)
 
             child_ids = [
                 str(value) for value in item.get("component_ids", [])
@@ -994,7 +1113,15 @@ class FrontendSkeletonLowerer:
                 else "mx-auto flex min-h-[60vh] w-full max-w-6xl flex-col gap-6 rounded-3xl "
                 "bg-slate-50 p-6 text-slate-900 shadow-xl ring-1 ring-slate-200 sm:p-10"
             )
-            sources[path] = (
+            default_body = (
+                ("\n".join(declarations) + "\n" if declarations else "")
+                + "  return (\n"
+                + f"    <{tag} className={json.dumps(shell_class)} data-arc-{kind.lower()}={{{json.dumps(ui_id)}}}>\n"
+                + "\n".join(body_lines)
+                + f"\n    </{tag}>\n"
+                + "  );"
+            )
+            module_prefix = (
                 ("\n".join(_render_imports(rows)) + "\n\n" if rows else "")
                 + "/**\n"
                 + f" * @arc-module {ui_id}\n"
@@ -1003,18 +1130,148 @@ class FrontendSkeletonLowerer:
                 + f"export interface {props_symbol} {{\n"
                 + ("\n".join(props_lines) if props_lines else "  // No external props were designed.")
                 + "\n}\n"
-                + f"\nexport function {function_symbol}(_props: {props_symbol}) {{\n"
-                + ("\n".join(declarations) + "\n" if declarations else "")
-                + "  return (\n"
-                + f"    <{tag} className={json.dumps(shell_class)} data-arc-{kind.lower()}={{{json.dumps(ui_id)}}}>\n"
-                + f"      {{/* ARC-IMPLEMENTATION-BEGIN:{ui_id} */}}\n"
-                + "\n".join(body_lines)
-                + f"\n      {{/* ARC-IMPLEMENTATION-END:{ui_id} */}}\n"
-                + f"    </{tag}>\n"
-                + "  );\n}\n"
             )
+            dependency_symbols = list(dict.fromkeys(implementation_dependencies))
+            if dependency_symbols:
+                dependency_symbol = (
+                    f"{function_symbol[:1].lower() + function_symbol[1:]}Dependencies"
+                )
+                implementation_symbol = f"{function_symbol}Implementation"
+                dependency_body = "\n".join(
+                    f"  {symbol}," for symbol in dependency_symbols
+                )
+                sources[path] = (
+                    module_prefix
+                    + f"\nconst {dependency_symbol} = {{\n{dependency_body}\n}} as const;\n"
+                    + f"\nexport function {function_symbol}(_props: {props_symbol}) {{\n"
+                    + f"  return <{implementation_symbol} props={{_props}} "
+                    + f"dependencies={{{dependency_symbol}}} />;\n"
+                    + "}\n"
+                    + f"\nfunction {implementation_symbol}({{\n"
+                    + "  props: _props,\n"
+                    + "  dependencies: _dependencies,\n"
+                    + "}: {\n"
+                    + f"  props: {props_symbol};\n"
+                    + f"  dependencies: typeof {dependency_symbol};\n"
+                    + "}) {\n"
+                    + f"  // ARC-IMPLEMENTATION-BEGIN:{ui_id}\n"
+                    + default_body
+                    + f"\n  // ARC-IMPLEMENTATION-END:{ui_id}\n"
+                    + "}\n"
+                )
+            else:
+                sources[path] = (
+                    module_prefix
+                    + f"\nexport function {function_symbol}(_props: {props_symbol}) {{\n"
+                    + f"  // ARC-IMPLEMENTATION-BEGIN:{ui_id}\n"
+                    + default_body
+                    + f"\n  // ARC-IMPLEMENTATION-END:{ui_id}\n"
+                    + "}\n"
+                )
             imports[path] = rows
             exports[path] = [function_symbol, props_symbol]
+
+    @staticmethod
+    def _lower_system_main_page(
+        stores: dict[str, dict[str, Any]],
+        store_locations: dict[str, dict[str, Any]],
+        sources: dict[str, str],
+        imports: dict[str, list[dict[str, Any]]],
+        exports: dict[str, list[str]],
+    ) -> None:
+        """Materialize the compiler-owned landing page used by Home navigation."""
+
+        path = "frontend/src/pages/system-main-page.tsx"
+        auth_store_id: str | None = None
+        username_field: str | None = None
+        clear_action: str | None = None
+        for store_id, store in sorted(stores.items()):
+            state_names = {
+                str(row.get("name", ""))
+                for row in store.get("state", [])
+                if isinstance(row, dict)
+            }
+            candidate_username = next(
+                (
+                    value
+                    for value in ("current_username", "username", "display_name")
+                    if value in state_names
+                ),
+                None,
+            )
+            looks_like_session = "session_id" in state_names or any(
+                token in store_id.lower() for token in ("auth", "session")
+            )
+            if candidate_username and looks_like_session:
+                auth_store_id = store_id
+                username_field = candidate_username
+                actions = [
+                    str(row.get("name", ""))
+                    for row in store.get("actions", [])
+                    if isinstance(row, dict) and not row.get("input_type")
+                ]
+                clear_action = next(
+                    (
+                        value
+                        for value in actions
+                        if value.lower().startswith(("clear", "reset", "signout", "logout"))
+                    ),
+                    None,
+                )
+                break
+
+        rows: list[dict[str, Any]] = []
+        runtime_symbol: str | None = None
+        if auth_store_id is not None:
+            location = store_locations.get(auth_store_id)
+            if location is not None:
+                runtime_symbol = str(location["runtime_symbol"])
+                rows.append(_import(
+                    runtime_symbol,
+                    _relative_specifier(path, str(location["path"])),
+                    source=str(location["path"]),
+                ))
+
+        username_expression = (
+            f"{runtime_symbol}.state[{json.dumps(username_field)}]"
+            if runtime_symbol and username_field
+            else "null"
+        )
+        sign_out = ""
+        if runtime_symbol and clear_action:
+            sign_out = (
+                "\n        <button\n"
+                "          type=\"button\"\n"
+                "          className=\"rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold "
+                "text-slate-700 shadow-sm transition hover:border-slate-400 hover:bg-slate-50 "
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500\"\n"
+                f"          onClick={{() => {{ {runtime_symbol}.actions.{_safe_property(clear_action)}(); "
+                "window.location.assign(\"/login\"); }}\n"
+                "        >\n          Sign out\n        </button>"
+            )
+        sources[path] = (
+            ("\n".join(_render_imports(rows)) + "\n\n" if rows else "")
+            + "export function SystemMainPage() {\n"
+            + f"  const username = {username_expression};\n"
+            + "  return (\n"
+            + "    <main className=\"min-h-screen bg-slate-950 px-6 py-16 text-slate-100\">\n"
+            + "      <section className=\"mx-auto flex w-full max-w-5xl flex-col gap-8 rounded-3xl "
+            + "border border-white/10 bg-white/5 p-8 shadow-2xl backdrop-blur sm:p-12\">\n"
+            + "        <p className=\"text-sm font-semibold uppercase tracking-[0.24em] text-indigo-300\">Workspace</p>\n"
+            + "        <div className=\"space-y-3\">\n"
+            + "          <h1 className=\"text-4xl font-semibold tracking-tight sm:text-5xl\">System main interface</h1>\n"
+            + "          <p className=\"max-w-2xl text-base leading-7 text-slate-300\">"
+            + "Your session is ready. Continue with the available product workflows.</p>\n"
+            + "          {username ? <p className=\"text-sm text-slate-400\">Signed in as {String(username)}</p> : null}\n"
+            + "        </div>"
+            + sign_out
+            + "\n      </section>\n"
+            + "    </main>\n"
+            + "  );\n"
+            + "}\n"
+        )
+        imports[path] = rows
+        exports[path] = ["SystemMainPage"]
 
     @staticmethod
     def _lower_router(
@@ -1028,7 +1285,14 @@ class FrontendSkeletonLowerer:
     ) -> list[dict[str, Any]]:
         router_path = "frontend/src/app/router.tsx"
         app_path = "frontend/src/App.tsx"
-        rows = [_import("createBrowserRouter", "react-router-dom")]
+        rows = [
+            _import("createBrowserRouter", "react-router-dom"),
+            _import(
+                "SystemMainPage",
+                _relative_specifier(router_path, "frontend/src/pages/system-main-page.tsx"),
+                source="frontend/src/pages/system-main-page.tsx",
+            ),
+        ]
         route_rows: list[dict[str, Any]] = []
         route_source: list[str] = []
         for page_id, page in sorted(pages.items(), key=lambda value: str(value[1].get("route", ""))):
@@ -1074,10 +1338,19 @@ class FrontendSkeletonLowerer:
                 "layout_symbol": layout_symbol,
                 "navigation": copy.deepcopy(page.get("navigation", [])),
             })
-        if not route_source:
-            route_source.append(
-                '  { path: "*", element: <main data-arc-empty>No UI pages planned.</main> },'
-            )
+        if not any(str(page.get("route", "")) == "/" for page in pages.values()):
+            route_source.append('  { path: "/", element: <SystemMainPage /> },')
+            route_rows.append({
+                "route_id": "FRONTEND_ROUTE::SYSTEM_MAIN",
+                "page_id": "SYSTEM_MAIN",
+                "path": "/",
+                "page_symbol": "SystemMainPage",
+                "page_source": "frontend/src/pages/system-main-page.tsx",
+                "layout_id": None,
+                "layout_symbol": None,
+                "navigation": [],
+            })
+        route_source.append('  { path: "*", element: <SystemMainPage /> },')
         sources[router_path] = (
             "\n".join(_render_imports(rows))
             + "\n\nexport const router = createBrowserRouter([\n"
@@ -1111,6 +1384,7 @@ class FrontendSkeletonLowerer:
     ) -> None:
         page_paths = sorted(
             {str(row["path"]) for row in ui_locations.values() if row.get("ui_kind") == "PAGE"}
+            | {"frontend/src/pages/system-main-page.tsx"}
         )
         component_paths = sorted(
             {str(row["path"]) for row in ui_locations.values() if row.get("ui_kind") != "PAGE"}
