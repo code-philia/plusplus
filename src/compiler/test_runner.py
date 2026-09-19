@@ -574,7 +574,8 @@ def _test_workspace_path(test_file: str) -> str:
     return normalized.removeprefix("tests/")
 
 
-def _bounded_output(value: str | bytes | None, limit: int = 12000) -> str:
+def _bounded_output(value: str | bytes | None, limit: int = 100_000) -> str:
+    """Retain enough runner output for assertion diagnostics and agent repair."""
     if value is None:
         return ""
     text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value

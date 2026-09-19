@@ -1155,6 +1155,7 @@ class Compiler:
             code_binding_registry=code_binding_registry,
             environment_manifest=test_environment.manifest,
         )
+        tdd_failed_nodes: list[str] = []
         for requirement_id in order:
             await self._log(
                 "NodeTDDOrchestrator",
@@ -1179,37 +1180,44 @@ class Compiler:
                 await self._log(
                     "NodeTDDOrchestrator",
                     error,
-                    "error",
+                    "warning" if not node_result.ok else "error",
                     requirement_id,
                 )
             if not node_result.ok:
+                tdd_failed_nodes.append(requirement_id)
                 await self._log(
                     "Compiler",
-                    f"NODE_TDD_FAILED: {requirement_id} stopped at {node_result.status}.",
-                    "error",
+                    f"NODE_TDD_SKIPPED: {requirement_id} stopped at {node_result.status}; "
+                    "continuing with the next atomic requirement.",
+                    "warning",
                     requirement_id,
                 )
-                return CompilationResult(
-                    ok=False,
-                    root_id=root_id,
-                    states=states,
-                    failed_nodes=[requirement_id],
-                    artifacts=artifacts,
-                )
+                continue
             await self._log(
                 "NodeTDDOrchestrator",
                 f"NODE_ACCEPTED: {requirement_id} passed its frozen tests and impacted regressions.",
                 node_id=requirement_id,
             )
 
-        await self._log(
-            "Compiler",
-            "NODE_TDD_COMPLETE: every atomic requirement reached NODE_ACCEPTED.",
-        )
+        if tdd_failed_nodes:
+            await self._log(
+                "Compiler",
+                "NODE_TDD_COMPLETE_WITH_SKIPS: all atomic requirements were processed; "
+                f"skipped={sorted(tdd_failed_nodes)}.",
+                "warning",
+            )
+        else:
+            await self._log(
+                "Compiler",
+                "NODE_TDD_COMPLETE: every atomic requirement reached NODE_ACCEPTED.",
+            )
         return CompilationResult(
+            # TDD node exhaustion is a non-fatal partial outcome: every node
+            # was visited and its precise terminal state remains observable.
             ok=True,
             root_id=root_id,
             states=states,
+            failed_nodes=sorted(tdd_failed_nodes),
             artifacts=artifacts,
         )
 

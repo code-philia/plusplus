@@ -364,7 +364,7 @@ def _render_contract_file(symbols: list[dict[str, Any]], errors: list[str]) -> s
             errors.append(f"ARC3306 DATA_CONTRACT_INVALID: malformed contract {symbol.get('id')}.")
             continue
         lines.append(f"export interface {name} {{")
-        for field_item in fields:
+        for field_item in _coalesce_render_fields(fields, symbol, errors):
             if not isinstance(field_item, dict):
                 errors.append(
                     f"ARC3306 DATA_CONTRACT_INVALID: malformed field in {symbol.get('id')}."
@@ -381,6 +381,37 @@ def _render_contract_file(symbols: list[dict[str, Any]], errors: list[str]) -> s
             lines.append(f"  {field_name}{optional}: {type_name};")
         lines.extend(["}", ""])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _coalesce_render_fields(
+    fields: list[Any],
+    symbol: dict[str, Any],
+    errors: list[str],
+) -> list[Any]:
+    """Defensively keep stale registries from emitting duplicate properties."""
+
+    by_name: dict[str, dict[str, Any]] = {}
+    result: list[Any] = []
+    for field_item in fields:
+        if not isinstance(field_item, dict):
+            result.append(field_item)
+            continue
+        name = str(field_item.get("name", "")).strip()
+        existing = by_name.get(name)
+        if existing is None:
+            by_name[name] = field_item
+            result.append(field_item)
+            continue
+        if existing.get("type") != field_item.get("type"):
+            errors.append(
+                f"ARC3306 DATA_CONTRACT_INVALID: property {name!r} has incompatible "
+                f"types in {symbol.get('id')}."
+            )
+            continue
+        existing["required"] = bool(existing.get("required")) or bool(
+            field_item.get("required")
+        )
+    return result
 
 
 def _render_entity_type_file(symbol: dict[str, Any], errors: list[str]) -> str:

@@ -976,7 +976,10 @@ class FrontendSkeletonLowerer:
                 if isinstance(value, dict) and str(value.get("label", "")).strip()
             ]
             obligation_lines = [
-                f"      <span data-arc-obligation={{{json.dumps(label)}}}>{{{json.dumps(label)}}}</span>"
+                "      <span "
+                f"className=\"rounded-lg border border-slate-200 bg-white/80 px-4 py-3 text-sm "
+                f"font-medium text-slate-700 shadow-sm\" data-arc-obligation={{{json.dumps(label)}}}>"
+                f"{{{json.dumps(label)}}}</span>"
                 for label in obligations
             ]
             body_lines = [*obligation_lines, *child_lines]
@@ -985,6 +988,12 @@ class FrontendSkeletonLowerer:
             if not body_lines:
                 body_lines.append("      <span>Implementation pending</span>")
             tag = "main" if kind == "PAGE" else "section"
+            shell_class = (
+                "min-h-screen bg-slate-950 px-4 py-8 text-slate-100 sm:px-8"
+                if kind == "LAYOUT"
+                else "mx-auto flex min-h-[60vh] w-full max-w-6xl flex-col gap-6 rounded-3xl "
+                "bg-slate-50 p-6 text-slate-900 shadow-xl ring-1 ring-slate-200 sm:p-10"
+            )
             sources[path] = (
                 ("\n".join(_render_imports(rows)) + "\n\n" if rows else "")
                 + "/**\n"
@@ -997,7 +1006,7 @@ class FrontendSkeletonLowerer:
                 + f"\nexport function {function_symbol}(_props: {props_symbol}) {{\n"
                 + ("\n".join(declarations) + "\n" if declarations else "")
                 + "  return (\n"
-                + f"    <{tag} data-arc-{kind.lower()}={{{json.dumps(ui_id)}}}>\n"
+                + f"    <{tag} className={json.dumps(shell_class)} data-arc-{kind.lower()}={{{json.dumps(ui_id)}}}>\n"
                 + f"      {{/* ARC-IMPLEMENTATION-BEGIN:{ui_id} */}}\n"
                 + "\n".join(body_lines)
                 + f"\n      {{/* ARC-IMPLEMENTATION-END:{ui_id} */}}\n"

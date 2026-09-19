@@ -177,7 +177,9 @@ of the exact effects listed in the parent table.
 Treat semantic_id as the stable identity of a data value and type as its canonical data type. The name is only a local
 parameter label and may differ between modules. A child output may introduce new data or pass through/refine data that
 is already available, such as returning account.id after verifying its password. When reusing a semantic_id, preserve
-its type exactly. Do not invent a new semantic_id merely to represent that an existing value passed validation.
+its type exactly. Within one module interface, different semantic_id values must use different name values; for example,
+call a stored account password `stored_password` when the supplied login password is already named `password`. Do not
+invent a new semantic_id merely to represent that an existing value passed validation.
 
 Do not output any fields beyond the six listed above. The compiler derives symbol IDs and graph relationships. Return
 only the structured `{\"modules\": [...]}` object.
@@ -908,6 +910,7 @@ def _simple_interface_field_issues(
 ) -> list[DesignIssue]:
     issues: list[DesignIssue] = []
     seen: set[str] = set()
+    names: dict[str, dict[str, Any]] = {}
     for item in fields:
         semantic_id = str(item.get("semantic_id", ""))
         if semantic_id in seen:
@@ -918,6 +921,23 @@ def _simple_interface_field_issues(
                 blame,
             ))
         seen.add(semantic_id)
+        name = str(item.get("name", "")).strip()
+        prior = names.get(name)
+        if prior is not None and prior.get("type") != item.get("type"):
+            issues.append(_issue(
+                "DUPLICATE_FIELD_NAME_TYPE_CONFLICT",
+                f"{label} maps property name {name!r} to incompatible types",
+                "MODULE_DECOMPOSITION",
+                blame,
+            ))
+        elif prior is not None:
+            issues.append(_issue(
+                "DUPLICATE_FIELD_NAME",
+                f"{label} reuses property name {name!r}; use distinct names for distinct semantic values",
+                "MODULE_DECOMPOSITION",
+                blame,
+            ))
+        names[name] = item
     return issues
 
 

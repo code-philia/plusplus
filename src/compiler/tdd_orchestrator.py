@@ -45,8 +45,8 @@ TERMINAL_NODE_STATES = {
 class NodeTDDPolicy:
     """Budgets for one non-resumable requirement-local TDD run."""
 
-    max_iterations_per_node: int = 8
-    no_progress_limit: int = 2
+    max_iterations_per_node: int = 3
+    no_progress_limit: int = 3
     infra_retry_count: int = 2
     visual_refinement_limit: int = 2
 
@@ -69,10 +69,10 @@ class NodeTDDPolicy:
         values = os.environ if environment is None else environment
         return cls(
             max_iterations_per_node=_bounded_int(
-                values, "ARC_TDD_MAX_ITERATIONS_PER_NODE", 8, 1, 50
+                values, "ARC_TDD_MAX_ITERATIONS_PER_NODE", 3, 1, 50
             ),
             no_progress_limit=_bounded_int(
-                values, "ARC_TDD_NO_PROGRESS_LIMIT", 2, 1, 10
+                values, "ARC_TDD_NO_PROGRESS_LIMIT", 3, 1, 10
             ),
             infra_retry_count=_bounded_int(
                 values, "ARC_TDD_INFRA_RETRY_COUNT", 2, 0, 10
@@ -408,6 +408,13 @@ class NodeTDDOrchestrator:
                 iteration=iteration,
                 changed_files=changed_files,
             )
+            self._write_iteration_diagnostics(
+                requirement_id=requirement_id,
+                iteration=iteration,
+                retry=retries,
+                test_run=test_run,
+                analysis=analysis,
+            )
             has_infrastructure_failure = any(
                 report.failure_class == "INFRASTRUCTURE"
                 for report in analysis.reports
@@ -420,6 +427,25 @@ class NodeTDDOrchestrator:
             ):
                 return _RunAnalysis(test_run, analysis, retries)
             retries += 1
+
+    def _write_iteration_diagnostics(
+        self,
+        *,
+        requirement_id: str,
+        iteration: int,
+        retry: int,
+        test_run: TestRunResult,
+        analysis: FailureAnalysisResult,
+    ) -> None:
+        """Persist exact runner feedback before it is summarized for control flow."""
+
+        diagnostics_root = self._node_root(requirement_id) / "iterations"
+        stem = f"iteration-{max(0, int(iteration)):03d}-retry-{max(0, int(retry)):02d}"
+        write_json_atomic(diagnostics_root / f"{stem}-test-run.json", test_run.to_dict())
+        write_json_atomic(
+            diagnostics_root / f"{stem}-failure-analysis.json",
+            analysis.to_dict(),
+        )
 
     def _accept_node(self, result: NodeTDDResult) -> NodeTDDResult:
         requirement_id = result.requirement_id
@@ -468,15 +494,15 @@ class NodeTDDOrchestrator:
         dependencies = self.dependency_graph.get("atomic_dependencies", {}).get(
             requirement_id, []
         )
-        unaccepted = [
+        unprocessed = [
             str(value)
             for value in dependencies
-            if self.node_states.get(str(value)) != "NODE_ACCEPTED"
+            if self.node_states.get(str(value)) not in TERMINAL_NODE_STATES
         ]
-        if unaccepted:
+        if unprocessed:
             return (
                 f"ARC4542 NODE_TDD_DEPENDENCY_BLOCKED: {requirement_id} requires "
-                f"accepted nodes {sorted(unaccepted)}."
+                f"previously processed nodes {sorted(unprocessed)}."
             )
         return None
 

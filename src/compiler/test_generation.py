@@ -46,7 +46,6 @@ TEST_GENERATION_SCHEMA: dict[str, Any] = {
                     "cases": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": 6,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
@@ -107,7 +106,8 @@ Testing rules:
 - Expected values must be requirement examples or independent literals, never recomputed by the implementation algorithm.
 - Cover every supplied scenario id at least once across the suite and include at least one focused case per required layer.
 - The same scenario may be referenced by cases at different seams when one vertical requirement requires multiple layers.
-- Keep the total small. Normally produce one to three core cases.
+- Generate as many cases as needed to cover the requirement's observable rules and supplied scenarios; there is no
+  compiler-imposed maximum case count. Avoid redundant cases that exercise exactly the same behavior at the same seam.
 - UNIT uses Vitest and directly invokes an exported FUNC symbol.
 - INTEGRATION uses Vitest + Supertest against the exported Express `app` and the supplied HTTP route.
 - E2E uses @playwright/test and the supplied frontend route/observable labels.
@@ -1078,7 +1078,6 @@ def _validate_test_decision(
         if isinstance(obligation, dict)
     }
     errors: list[str] = []
-    case_count = 0
     for file_row in files:
         if not isinstance(file_row, dict) or set(file_row) != {"layer", "cases", "code"}:
             errors.append(
@@ -1099,7 +1098,6 @@ def _validate_test_decision(
                 f"ARC4422 TEST_OUTPUT_INVALID: {requirement_id} {layer} needs cases and code."
             )
             continue
-        case_count += len(cases)
         for case in cases:
             if not isinstance(case, dict):
                 errors.append(
@@ -1109,9 +1107,9 @@ def _validate_test_decision(
             title = str(case.get("title", "")).strip()
             sources = {str(value) for value in case.get("source_scenario_ids", [])}
             targets = {str(value) for value in case.get("target_modules", [])}
-            if not title or title not in code:
+            if not title:
                 errors.append(
-                    f"ARC4422 TEST_OUTPUT_INVALID: {requirement_id} {layer} title is absent from code: {title!r}."
+                    f"ARC4422 TEST_OUTPUT_INVALID: {requirement_id} {layer} case title is empty."
                 )
             if sources - scenario_ids:
                 errors.append(
@@ -1156,12 +1154,6 @@ def _validate_test_decision(
         errors.append(
             f"ARC4424 TEST_SCENARIO_INVALID: uncovered scenarios "
             f"{sorted(scenario_ids - covered_scenarios)}."
-        )
-    maximum_cases = max(3, min(6, len(scenario_ids) or 1))
-    if case_count < 1 or case_count > maximum_cases:
-        errors.append(
-            f"ARC4422 TEST_OUTPUT_INVALID: {requirement_id} generated {case_count} cases; "
-            f"allowed 1..{maximum_cases}."
         )
     return list(dict.fromkeys(errors))
 

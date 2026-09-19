@@ -92,11 +92,13 @@ def frontend_css_source() -> str:
     return (
         '@import "tailwindcss";\n\n'
         '@layer base {\n'
-        '  :root { font-family: ui-sans-serif, system-ui, sans-serif; color-scheme: light; }\n'
+        '  :root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color-scheme: light; '
+        '--arc-ink: #0f172a; --arc-muted: #64748b; --arc-accent: #f97316; }\n'
         '  * { box-sizing: border-box; }\n'
-        '  html { min-width: 320px; background: #ffffff; }\n'
-        '  body { margin: 0; min-width: 320px; min-height: 100vh; }\n'
+        '  html { min-width: 320px; background: #f8fafc; }\n'
+        '  body { margin: 0; min-width: 320px; min-height: 100vh; background: #f8fafc; color: var(--arc-ink); }\n'
         '  button, input, select, textarea { font: inherit; }\n'
+        '  ::selection { background: #fed7aa; color: #7c2d12; }\n'
         '}\n'
     )
 
@@ -956,7 +958,7 @@ class ProjectInitializer:
                 "typecheck": (
                     "npm run build -w @arc/shared && tsc --noEmit -p tsconfig.json"
                 ),
-                "start": "node ./dist/server.js",
+                "start": "npm run build -w @arc/shared && npm run build && node ./dist/server.js",
                 "db:generate": "drizzle-kit generate",
                 "db:migrate": "drizzle-kit migrate",
             },

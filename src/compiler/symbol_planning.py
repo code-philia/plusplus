@@ -317,6 +317,11 @@ class GlobalSymbolPlanner:
                 continue
             seen_semantics.add(semantic_id)
             normalized_fields.append(normalized)
+        normalized_fields = self._coalesce_contract_field_names(
+            normalized_fields,
+            module_id=module_id,
+            direction=direction,
+        )
         if not normalized_fields:
             return None
         normalized_fields.sort(key=lambda value: value["semantic_id"])
@@ -353,6 +358,54 @@ class GlobalSymbolPlanner:
         )
         self._symbols[contract_id]["symbol"] = symbol
         return contract_id
+
+    def _coalesce_contract_field_names(
+        self,
+        fields: list[dict[str, Any]],
+        *,
+        module_id: str,
+        direction: str,
+    ) -> list[dict[str, Any]]:
+        """Make the wire-level TypeScript property surface unambiguous.
+
+        Different semantic values can legitimately refer to the same payload
+        property (for example ``login.password`` and ``account.password`` in
+        an authentication function).  Rendering both rows would emit invalid
+        TypeScript.  Equal-name/equal-type rows are therefore one property;
+        requiredness is the union of all semantic occurrences and the
+        required semantic value remains the canonical binding.  Equal names
+        with incompatible types are rejected before file lowering.
+        """
+
+        by_name: dict[str, dict[str, Any]] = {}
+        result: list[dict[str, Any]] = []
+        for field in fields:
+            name = str(field.get("name", "")).strip()
+            existing = by_name.get(name)
+            if existing is None:
+                by_name[name] = field
+                result.append(field)
+                continue
+            if existing.get("type") != field.get("type"):
+                self._errors.append(
+                    f"ARC3115 MODULE_INTERFACE_NAME_CONFLICT: {module_id} {direction.lower()} "
+                    f"maps property {name!r} to incompatible types "
+                    f"{existing.get('type')!r} and {field.get('type')!r}."
+                )
+                continue
+            # Prefer the required semantic field as canonical.  This keeps
+            # authentication inputs such as `password` required even when a
+            # stored-account projection also contributes an optional alias.
+            if bool(field.get("required")) and not bool(existing.get("required")):
+                field["required"] = True
+                by_name[name] = field
+                index = result.index(existing)
+                result[index] = field
+            else:
+                existing["required"] = bool(existing.get("required")) or bool(
+                    field.get("required")
+                )
+        return result
 
     def _normalize_interface_field(
         self,

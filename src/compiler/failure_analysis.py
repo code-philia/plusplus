@@ -12,7 +12,7 @@ from .test_generation import TESTS_FROZEN
 from .test_runner import TestCommandResult, TestRunResult
 
 
-FAILURE_ANALYSIS_SCHEMA_VERSION = 1
+FAILURE_ANALYSIS_SCHEMA_VERSION = 2
 FAILURE_CLASSES = (
     "INFRASTRUCTURE",
     "TEST_MATERIALIZATION",
@@ -48,6 +48,7 @@ class TestFailureReport:
     changed_files: list[str]
     failure_fingerprint: str
     command: list[str] = field(default_factory=list)
+    diagnostic_output: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -220,6 +221,7 @@ class FailureAnalyzer:
             changed_files=sorted({_normalize_relative(value) for value in changed_files}),
             failure_fingerprint=fingerprint,
             command=list(command_result.command),
+            diagnostic_output=output,
         )
 
     def _report_for_runner_failure(
@@ -273,6 +275,7 @@ class FailureAnalyzer:
             read_only_dependencies=read_only_targets,
             changed_files=sorted({_normalize_relative(value) for value in changed_files}),
             failure_fingerprint=fingerprint,
+            diagnostic_output=message,
         )
 
     def _stack_frames(self, output: str) -> list[StackFrame]:
