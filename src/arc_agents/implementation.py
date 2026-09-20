@@ -342,11 +342,23 @@ class ImplementationAgent:
             if isinstance(target, dict) and str(target.get("module_id", ""))
         }
         focus_ids = reported_writable_ids & writable_ids
-        # Stack frames and test target metadata are hints, not authority. A failure
-        # observed at an API or Page often originates in an owned caller, callee,
-        # or sibling module. Give the model the full requirement-owned writable
-        # surface while keeping WriteGuard's requirement ownership restriction.
         relevant_writable = set(writable_ids)
+        first_failure_repair = (
+            mode == "TDD"
+            and bool(focus_ids)
+            and all(int(report.get("iteration", -1)) == 0 for report in reports)
+            and all(
+                str(report.get("phase", "")) != "FRONTEND_BOOTSTRAP"
+                for report in reports
+            )
+        )
+        frontend_kinds = {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
+        focus_contains_frontend = any(
+            str(bindings.get(module_id, {}).get("kind", "")) in frontend_kinds
+            for module_id in focus_ids
+        )
+        if first_failure_repair and not focus_contains_frontend:
+            relevant_writable = _one_hop_writable(focus_ids, writable_ids, bindings)
         if not relevant_writable:
             errors.append(
                 f"ARC4530 IMPLEMENTATION_CONTEXT_INVALID: {requirement_id} has no writable targets."
@@ -417,9 +429,16 @@ class ImplementationAgent:
         ]
         frozen_tests, test_errors = ([], [])
         if mode == "TDD":
+            failed_layers = {
+                str(report.get("layer", "")).upper()
+                for report in reports
+                if str(report.get("layer", "")).upper()
+                in {"UNIT", "INTEGRATION", "E2E"}
+            }
             frozen_tests, test_errors = self._frozen_tests(
                 requirement_id,
                 request.test_manifest,
+                layers=failed_layers,
             )
         errors.extend(test_errors)
         if errors:
@@ -445,6 +464,12 @@ class ImplementationAgent:
             "policy": {
                 "one_failure_cluster": True,
                 "tests_are_frozen": mode == "TDD",
+                "tests_limited_to_failed_layers": mode == "TDD",
+                "writable_context_scope": (
+                    "FAILURE_TARGET_PLUS_ONE_HOP"
+                    if relevant_writable != writable_ids
+                    else "ALL_REQUIREMENT_OWNED"
+                ),
                 "aggregate_mode_uses_design_and_binding_authority": mode == "AGGREGATE",
                 "output_is_region_replacement_only": True,
                 "side_effects_owned_by_orchestrator": True,
@@ -486,6 +511,8 @@ class ImplementationAgent:
         self,
         requirement_id: str,
         manifest: dict[str, Any],
+        *,
+        layers: set[str],
     ) -> tuple[list[dict[str, Any]], list[str]]:
         tests: list[dict[str, Any]] = []
         errors: list[str] = []
@@ -494,10 +521,15 @@ class ImplementationAgent:
             for row in manifest.get("files", [])
             if isinstance(row, dict)
             and str(row.get("requirement_id", "")) == requirement_id
+            and (
+                not layers
+                or str(row.get("layer", "")).upper() in layers
+            )
         ]
         if not rows:
             return [], [
-                f"ARC4530 IMPLEMENTATION_CONTEXT_INVALID: no frozen tests for {requirement_id}."
+                "ARC4530 IMPLEMENTATION_CONTEXT_INVALID: no frozen tests for "
+                f"{requirement_id} in failed layers {sorted(layers)}."
             ]
         for row in rows:
             relative = _safe_workspace_file(str(row.get("test_file", "")), source=False)
@@ -603,6 +635,33 @@ def _report_dict(value: Any) -> dict[str, Any] | None:
         serialized = serializer()
         return serialized if isinstance(serialized, dict) else None
     return None
+
+
+def _one_hop_writable(
+    focus_ids: set[str],
+    writable_ids: set[str],
+    bindings: dict[str, dict[str, Any]],
+) -> set[str]:
+    """Return focused writable modules plus direct writable callers/callees."""
+
+    result = set(focus_ids) & writable_ids
+    for module_id in list(result):
+        binding = bindings.get(module_id, {})
+        result.update(
+            str(value)
+            for key in ("callers", "callees")
+            for value in binding.get(key, [])
+            if str(value) in writable_ids
+        )
+    result.update(
+        candidate_id
+        for candidate_id in writable_ids
+        if any(
+            str(value) in focus_ids
+            for value in bindings.get(candidate_id, {}).get("callees", [])
+        )
+    )
+    return result
 
 
 def _source_card(binding: dict[str, Any], *, digest: str | None) -> dict[str, Any]:
