@@ -89,7 +89,7 @@ def build_compile_parser(subparsers) -> None:
         "--port",
         type=int,
         default=3000,
-        help="Generated Web server port (default: 3000)",
+        help="Generated Web server port (overridden by ARC_WEB_PORT; default: 3000)",
     )
     parser.add_argument(
         "--clean",
@@ -118,6 +118,7 @@ def build_compile_parser(subparsers) -> None:
 async def cmd_compile(args: argparse.Namespace) -> int:
     """Execute compile subcommand."""
     _ensure_dotenv_loaded()
+    web_port = _resolve_web_port(args.port)
     
     if args.clean and args.start_from != "preprocessing":
         print("Error: --clean cannot be combined with --start-from after preprocessing")
@@ -146,7 +147,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         requirement_path=requirement_path,
         clear_all=args.clean,
         log_path=log_path,
-        web_port=args.port,
+        web_port=web_port,
     )
     
     # Run compilation
@@ -154,7 +155,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     workflow_manager = ARCWorkflowManager(
         workspace_path=output_dir,
         requirement_path=requirement_path,
-        web_port=args.port,
+        web_port=web_port,
         log_cb=cli_log,
     )
     result = await workflow_manager.start_compilation(start_from=start_from)
@@ -163,6 +164,16 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     print_compilation_summary(result, output_dir, elapsed)
     
     return 0 if result.get("ok") else 1
+
+
+def _resolve_web_port(cli_port: int) -> int:
+    """Resolve one port for generated deployment, frontend, and E2E targets."""
+
+    raw = os.environ.get("ARC_WEB_PORT", "").strip()
+    value = int(raw) if raw else int(cli_port)
+    if not 1 <= value <= 65535:
+        raise ValueError("ARC_WEB_PORT/--port must be between 1 and 65535")
+    return value
 
 
 # ============================================================

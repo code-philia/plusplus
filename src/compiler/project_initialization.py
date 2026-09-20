@@ -245,28 +245,20 @@ def test_workspace_spec(
                 '  testDir: "./e2e",\n'
                 "  fullyParallel: false,\n"
                 "  workers: 1,\n"
-                "  timeout: 10_000,\n"
+                "  timeout: 30_000,\n"
                 "  expect: { timeout: 10_000 },\n"
                 "  use: {\n"
-                '    baseURL: process.env.ARC_TEST_BASE_URL ?? "http://127.0.0.1:5173",\n'
+                f'    baseURL: process.env.ARC_TEST_BASE_URL ?? "http://127.0.0.1:{port}",\n'
                 '    trace: "retain-on-failure",\n'
                 "  },\n"
                 '  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],\n'
-                "  webServer: [\n"
-                "    {\n"
-                '      command: "npm run dev -w @arc/backend",\n'
+                "  webServer: {\n"
+                '      command: "npm run build -w @arc/frontend && npm run start -w @arc/backend",\n'
                 f'      url: "http://127.0.0.1:{port}/__arc/health",\n'
                 f'      env: {{ DATABASE_URL: ":memory:", NODE_ENV: "test", PORT: "{port}" }},\n'
                 "      reuseExistingServer: true,\n"
-                "      timeout: 10_000,\n"
+                "      timeout: 60_000,\n"
                 "    },\n"
-                "    {\n"
-                '      command: "npm run dev -w @arc/frontend -- --host 127.0.0.1",\n'
-                '      url: "http://127.0.0.1:5173",\n'
-                "      reuseExistingServer: true,\n"
-                "      timeout: 10_000,\n"
-                "    },\n"
-                "  ],\n"
                 "});\n"
             ),
             "support/runtime.ts": (
@@ -714,6 +706,7 @@ class ProjectInitializer:
                 "serverEntry": "backend/dist/server.js",
                 "frontendDist": "frontend/dist",
                 "spaFallback": "frontend/dist/index.html",
+                "e2eBaseUrl": f"http://127.0.0.1:{self.web_port}",
             },
             "workspaces": {
                 "frontend": {"root": "frontend", "sourceRoot": "frontend/src"},
@@ -958,7 +951,9 @@ class ProjectInitializer:
                 "typecheck": (
                     "npm run build -w @arc/shared && tsc --noEmit -p tsconfig.json"
                 ),
-                "start": "npm run build -w @arc/shared && npm run build && node ./dist/server.js",
+                "start": (
+                    "npm run build -w @arc/shared && npm run build && node ./dist/server.js"
+                ),
                 "db:generate": "drizzle-kit generate",
                 "db:migrate": "drizzle-kit migrate",
             },

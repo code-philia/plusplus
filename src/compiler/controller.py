@@ -1241,6 +1241,27 @@ class Compiler:
                 "IMPLEMENTATION_COMPLETE: every atomic and aggregate requirement reached "
                 "NODE_ACCEPTED.",
             )
+
+        await self._log(
+            "Compiler",
+            "Running final PROJECT_BUILD so frontend/dist contains the implemented UI served by the backend.",
+        )
+        final_build = ProjectBuilder(request.output_dir).build()
+        for error in final_build.errors:
+            await self._log("Compiler", error, "error")
+        if not final_build.ok:
+            await self._log("Compiler", "FINAL_PROJECT_BUILD failed.", "error")
+            return CompilationResult(
+                ok=False,
+                root_id=root_id,
+                states=states,
+                failed_nodes=failed_nodes,
+                artifacts=artifacts,
+            )
+        await self._log(
+            "Compiler",
+            "FINAL_PROJECT_BUILD completed; backend static hosting now points at the current frontend/dist.",
+        )
         return CompilationResult(
             # TDD node exhaustion is a non-fatal partial outcome: every node
             # was visited and its precise terminal state remains observable.
