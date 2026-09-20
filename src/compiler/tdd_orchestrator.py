@@ -625,24 +625,21 @@ class NodeTDDOrchestrator:
             {},
         )
         frontend_ids = {
-            str(value) for value in frontend_link.get("symbol_ids", []) if str(value)
+            str(row.get("id", ""))
+            for table in ("screens", "shared_state_policies")
+            for row in self.frontend_ir.get(table, [])
+            if isinstance(row, dict) and str(row.get("id", ""))
         } | module_ids
         frontend_rows: dict[str, list[dict[str, Any]]] = {}
         visual_ids = {
             str(value)
-            for value in frontend_link.get("visual_reference_ids", [])
+            for row in self.frontend_ir.get("screens", [])
+            if isinstance(row, dict)
+            for value in row.get("visual_reference_ids", [])
             if str(value)
         }
-        for table in ("layouts", "pages", "components", "stores"):
-            rows = [
-                copy.deepcopy(row)
-                for row in self.frontend_ir.get(table, [])
-                if isinstance(row, dict)
-                and (
-                    str(row.get("id", "")) in frontend_ids
-                    or str(row.get("requirement_id", "")) == requirement_id
-                )
-            ]
+        for table in ("screens", "journeys", "api_usages", "shared_state_policies"):
+            rows = [copy.deepcopy(row) for row in self.frontend_ir.get(table, []) if isinstance(row, dict)]
             frontend_rows[table] = rows
             visual_ids.update(
                 str(value)
@@ -650,12 +647,12 @@ class NodeTDDOrchestrator:
                 for value in row.get("visual_reference_ids", [])
                 if str(value)
             )
-        frontend_rows["api_dependencies"] = [
+        frontend_rows["api_usages"] = [
             copy.deepcopy(row)
-            for row in self.frontend_ir.get("api_dependencies", [])
+            for row in self.frontend_ir.get("api_usages", [])
             if isinstance(row, dict)
             and (
-                str(row.get("consumer_id", "")) in frontend_ids
+                str(row.get("screen_id", "")) in frontend_ids
                 or str(row.get("api_id", "")) in module_ids
             )
         ]
@@ -678,6 +675,8 @@ class NodeTDDOrchestrator:
             "requirement_id": requirement_id,
             "module_ids": sorted(module_ids),
             "backend_modules": backend_modules,
+            "frontend_scope": "CONNECTED_PRODUCT_GRAPH",
+            "active_requirement_link": frontend_link,
             "frontend": frontend_rows,
         }
 

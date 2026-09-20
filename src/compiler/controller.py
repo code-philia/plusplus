@@ -21,12 +21,11 @@ from .database_stage import (
 from .design_stage import DesignPass, DesignPassResult, design_traceability
 from .design_projection import project_api_contracts
 from .file_planning import GlobalFilePlanner
-from .frontend_component_design import (
-    PageLayoutComponentPass,
-    finalize_frontend_design,
+from .frontend_thin_design import (
+    ThinFrontendDesignPass,
     frontend_design_traceability,
+    project_frontend_runtime_ir,
 )
-from .frontend_design import RequirementUIScopePass
 from .frontend_lowering import (
     FrontendFilePlanner,
     FrontendGlobalSymbolPlanner,
@@ -351,11 +350,10 @@ class Compiler:
                 frontend_design_ir = reusable_frontend or {}
                 for table_name in (
                     "visual_references",
-                    "layouts",
-                    "pages",
-                    "components",
-                    "stores",
-                    "api_dependencies",
+                    "screens",
+                    "journeys",
+                    "api_usages",
+                    "shared_state_policies",
                 ):
                     artifacts[f"frontend_design_{table_name}"] = str(
                         artifact_store.frontend_design_root / f"{table_name}.json"
@@ -406,9 +404,9 @@ class Compiler:
             if not frontend_errors:
                 await self._log(
                     "Compiler",
-                    "Running REQUIREMENT UI SCOPE and Page/Layout/Store planning.",
+                    "Running one-pass THIN FRONTEND DESIGN for screens, journeys, API usages, shared state, and visual evidence.",
                 )
-                ui_scope = RequirementUIScopePass(model, artifact_store.root).compile(
+                ui_scope = ThinFrontendDesignPass(model, artifact_store.root).compile(
                     preprocessing.requirement_ir,
                     preprocessing.dependency_graph,
                     design.design_ir,
@@ -418,29 +416,7 @@ class Compiler:
                     frontend_errors.extend(ui_scope.errors)
                     states.update(ui_scope.node_states)
                 else:
-                    await self._log(
-                        "Compiler",
-                        "Running PAGE/LAYOUT TO COMPONENT decomposition.",
-                    )
-                    components = PageLayoutComponentPass(
-                        model,
-                        artifact_store.root,
-                    ).compile(ui_scope.frontend_ir, design.design_ir)
-                    if not components.ok:
-                        frontend_errors.extend(components.errors)
-                    else:
-                        await self._log(
-                            "Compiler",
-                            "Finalizing Frontend Design indexes and best-effort API bindings.",
-                        )
-                        finalized = finalize_frontend_design(
-                            components.frontend_ir,
-                            design.design_ir,
-                        )
-                        if not finalized.ok:
-                            frontend_errors.extend(finalized.errors)
-                        else:
-                            frontend_design_ir = finalized.frontend_ir
+                    frontend_design_ir = ui_scope.frontend_ir
 
             if not frontend_errors:
                 try:
@@ -883,10 +859,11 @@ class Compiler:
 
         await self._log(
             "Compiler",
-            "Running deterministic FRONTEND_GLOBAL_SYMBOL_PLANNING over Frontend Design IR.",
+            "Projecting Thin Frontend IR to compiler runtime seams for routes, API clients, and editable screen modules.",
         )
+        frontend_runtime_ir = project_frontend_runtime_ir(frontend_design_ir)
         frontend_symbols = FrontendGlobalSymbolPlanner().plan(
-            frontend_design_ir,
+            frontend_runtime_ir,
             project_api_contracts(design.design_ir),
             symbol_planning.registry,
             project_manifest,
@@ -914,7 +891,7 @@ class Compiler:
             "Running deterministic FRONTEND_FILE_PLANNING over the Frontend Symbol Registry.",
         )
         frontend_files = FrontendFilePlanner(request.output_dir).plan(
-            frontend_design_ir,
+            frontend_runtime_ir,
             frontend_symbols.registry,
             project_manifest,
         )
@@ -941,7 +918,7 @@ class Compiler:
             "Running deterministic FRONTEND_SKELETON_LOWERING for Props, Events, Stores, API Clients, UI modules, Routes, Barrels, and Imports.",
         )
         frontend_lowering = FrontendSkeletonLowerer().lower(
-            frontend_design_ir,
+            frontend_runtime_ir,
             project_api_contracts(design.design_ir),
             backend_glue.route_registry,
             frontend_symbols.registry,
@@ -1007,7 +984,7 @@ class Compiler:
             dependency_graph=preprocessing.dependency_graph,
             database_schema=database.schema,
             design_ir=design.design_ir,
-            frontend_ir=frontend_design_ir,
+            frontend_ir=frontend_runtime_ir,
             backend_symbol_registry=symbol_planning.registry,
             backend_type_manifest=type_lowering.manifest,
             backend_module_manifests={

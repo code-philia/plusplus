@@ -159,29 +159,19 @@ class TraceabilityStore:
 
     def read_frontend_design_links_from_requirements(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
-        symbol_keys = ("layout_ids", "page_ids", "component_ids", "store_ids")
         for requirement_id, row in sorted(self._read_requirements().items()):
             if not isinstance(row, dict):
                 continue
             frontend = row.get("frontend_design")
             if not isinstance(frontend, dict):
                 continue
-            symbol_ids = {
-                str(symbol_id).strip()
-                for key in symbol_keys
-                for symbol_id in _as_list(frontend.get(key))
-                if str(symbol_id).strip()
-            }
-            result.append(
-                {
-                    "requirement_id": str(requirement_id),
-                    "ui_scope": str(frontend.get("ui_scope", "NO_UI")).strip().upper(),
-                    "symbol_ids": sorted(symbol_ids),
-                    "visual_reference_ids": sorted(
-                        set(_as_str_list(frontend.get("visual_reference_ids")))
-                    ),
-                }
-            )
+            result.append({
+                "requirement_id": str(requirement_id),
+                "ui_scope": str(frontend.get("ui_scope", "NO_UI")).strip().upper(),
+                "screen_ids": sorted(set(_as_str_list(frontend.get("page_ids")))),
+                "shared_state_ids": sorted(set(_as_str_list(frontend.get("store_ids")))),
+                "visual_reference_ids": sorted(set(_as_str_list(frontend.get("visual_reference_ids")))),
+            })
         return result
 
     def store_requirement_tree(self, requirement_tree: dict[str, Any]) -> None:

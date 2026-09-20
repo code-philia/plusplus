@@ -826,9 +826,13 @@ def _build_context_pack(
         table: [
             copy.deepcopy(item)
             for item in frontend_ir.get(table, [])
-            if isinstance(item, dict) and str(item.get("id", "")) in target_ids
+            if isinstance(item, dict) and (
+                str(item.get("id", "")) in target_ids
+                or requirement_id in {str(value) for value in item.get("requirement_ids", [])}
+                or str(item.get("requirement_id", "")) == requirement_id
+            )
         ]
-        for table in ("layouts", "pages", "components", "stores")
+        for table in ("screens", "journeys", "api_usages", "shared_state_policies")
     }
     output_files = {
         layer: _test_file(requirement_id, layer)

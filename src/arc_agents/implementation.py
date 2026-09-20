@@ -96,9 +96,9 @@ Implementation rules:
 - Page and Component implementation bodies receive compiler-wired references through `_dependencies`. Destructure and
   use its hooks, API clients, and runtime Stores; their business call parameters are intentionally left for this
   implementation step. Do not bypass an available client with ad-hoc fetch calls or create a second persistence store.
-- Implement navigation using the exact design_context.frontend.pages[].navigation[].target_route values. A Home or
+- Implement navigation using the exact design_context.frontend.screens[].navigation_targets[].target_route values. A Home or
   main-interface transition targets the compiler-owned system route `/`; after a successful action, navigate there.
-- Store reload behavior is defined by design_context.frontend.stores[].persistence. Keep transient state in MEMORY and
+- Store reload behavior is defined by design_context.frontend.shared_state_policies[].persistence. Keep transient state in MEMORY and
   implement reload-surviving state through the supplied LOCAL_STORAGE runtime Store and storage_key.
 - For a Store target, replace only its runtime implementation region. Preserve its State, Actions, and Value interfaces
   and the compiler-owned persistence boundary around that region.
@@ -110,6 +110,8 @@ Implementation rules:
   domain-appropriate direction from the requirement instead of using a generic demo-page aesthetic.
 - Preserve accessibility: semantic controls, associated labels, visible keyboard focus, sufficient contrast, and
   reduced-motion-safe behavior. Ensure navigation between declared pages remains discoverable and coherent.
+- Treat screens and journeys as one connected product graph. Keep navigation, shared visual language, API usage, and
+  cross-page state coherent across every supplied screen; choose layout and internal component decomposition here.
 - If several supplied failures are consequences of the same root cause, fix that root cause once.
 - A replacement must be complete source text for the inside of its implementation region.
 

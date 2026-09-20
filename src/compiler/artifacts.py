@@ -13,8 +13,8 @@ from .design_projection import (
     project_api_modules,
     project_backend_module,
 )
-from .frontend_design import validate_frontend_design_minimum
-from .frontend_ir import (
+from .frontend_thin_design import validate_thin_frontend_design
+from .frontend_thin_ir import (
     FRONTEND_DESIGN_TABLE_SCHEMAS,
     FRONTEND_IR_SCHEMA_VERSION,
     schema_shape_errors,
@@ -375,7 +375,7 @@ class CompilerArtifactStore:
     ) -> dict[str, str]:
         """Persist Frontend tables; requirement links remain in traceability."""
 
-        issues = validate_frontend_design_minimum(frontend_ir)
+        issues = validate_thin_frontend_design(frontend_ir)
         if issues:
             raise ValueError(f"Cannot persist invalid Frontend Design IR: {issues[0].format()}")
         tables = {
@@ -429,7 +429,7 @@ class CompilerArtifactStore:
             **tables,
             "requirement_links": copy.deepcopy(requirement_links),
         }
-        issues = validate_frontend_design_minimum(
+        issues = validate_thin_frontend_design(
             frontend_ir,
             expected_requirement_ids=expected_requirement_ids,
             backend_api_ids=backend_api_ids,
