@@ -110,10 +110,10 @@ SEMANTIC_FIELD_SCHEMA: dict[str, Any] = {
     "properties": {
         "semantic_id": {
             "type": "string",
-            "pattern": r"^[a-z][a-z0-9_.]*$",
+            "minLength": 1,
             "maxLength": 120,
         },
-        "name": {"type": "string", "pattern": r"^[a-z][a-z0-9_]*$", "maxLength": 64},
+        "name": {"type": "string", "minLength": 1, "maxLength": 64},
         "type": {"type": "string", "minLength": 1, "maxLength": 160},
         "required": {"type": "boolean"},
     },
@@ -173,14 +173,14 @@ RENDER_OBLIGATION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["id", "kind", "label", "semantic_id", "required"],
     "properties": {
-        "id": {"type": "string", "pattern": r"^[a-z][a-z0-9_]*$", "maxLength": 80},
+        "id": {"type": "string", "minLength": 1, "maxLength": 80},
         "kind": {
             "type": "string",
             "enum": ["ACTION", "FEEDBACK", "FIELD", "NAVIGATION", "REGION", "TEXT"],
         },
         "label": {"type": "string", "minLength": 1, "maxLength": 200},
         "semantic_id": _nullable(
-            {"type": "string", "pattern": r"^[a-z][a-z0-9_.]*$", "maxLength": 120}
+            {"type": "string", "minLength": 1, "maxLength": 120}
         ),
         "required": {"type": "boolean"},
     },
@@ -191,7 +191,7 @@ EVENT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["name", "payload_type", "async"],
     "properties": {
-        "name": {"type": "string", "pattern": r"^[a-z][A-Za-z0-9]*$", "maxLength": 64},
+        "name": {"type": "string", "minLength": 1, "maxLength": 64},
         "payload_type": _nullable({"type": "string", "minLength": 1, "maxLength": 120}),
         "async": {"type": "boolean"},
     },
@@ -309,7 +309,7 @@ STORE_ACTION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["name", "input_type"],
     "properties": {
-        "name": {"type": "string", "pattern": r"^[a-z][A-Za-z0-9]*$", "maxLength": 64},
+        "name": {"type": "string", "minLength": 1, "maxLength": 64},
         "input_type": _nullable({"type": "string", "minLength": 1, "maxLength": 120}),
     },
 }
