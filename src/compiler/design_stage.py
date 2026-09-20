@@ -20,6 +20,11 @@ from .model_client import StructuredModel, describe_model_error
 PRIMITIVE_TYPES = {"string", "integer", "number", "boolean", "date", "datetime", "uuid", "json"}
 DATABASE_EFFECT_OPERATIONS = {"READ", "CREATE", "UPDATE", "DELETE"}
 EFFECT_OPERATIONS = DATABASE_EFFECT_OPERATIONS | {"SESSION_WRITE", "COOKIE_WRITE", "EXTERNAL_IO"}
+OBLIGATION_KINDS = {
+    "VALIDATION", "AUTHORIZATION", "COMPUTATION", "STATE_TRANSITION",
+    "PERSISTENCE", "TRANSACTION", "IDEMPOTENCY", "EXTERNAL_INTERACTION",
+    "ERROR_MAPPING",
+}
 REPAIR_CURRENT = "REPAIR_CURRENT"
 REOPEN_PARENT = "REOPEN_PARENT"
 UNRESOLVED = "UNRESOLVED"
@@ -54,16 +59,29 @@ EFFECT_SCHEMA: dict[str, Any] = {
     },
 }
 
+OBLIGATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["id", "kind", "description", "scenario_ids"],
+    "properties": {
+        "id": {"type": "string", "maxLength": 64, "pattern": r"^[a-z][a-z0-9_]*$"},
+        "kind": {"type": "string", "enum": sorted(OBLIGATION_KINDS)},
+        "description": {"type": "string", "maxLength": 300},
+        "scenario_ids": {"type": "array", "items": {"type": "string", "maxLength": 160}},
+    },
+}
+
 REQUIREMENT_CONTRACT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["requirement_id", "spec", "inputs", "outputs", "effects"],
+    "required": ["requirement_id", "spec", "inputs", "outputs", "effects", "obligations"],
     "properties": {
         "requirement_id": {"type": "string"},
         "spec": {"type": "string", "maxLength": 800},
         "inputs": {"type": "array", "items": FIELD_SCHEMA},
         "outputs": {"type": "array", "items": FIELD_SCHEMA},
         "effects": {"type": "array", "items": EFFECT_SCHEMA},
+        "obligations": {"type": "array", "items": OBLIGATION_SCHEMA},
     },
 }
 
@@ -97,7 +115,7 @@ MODULE_EFFECT_SCHEMA: dict[str, Any] = {
 DECOMPOSED_MODULE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["kind", "name", "spec", "inputs", "outputs", "effects"],
+    "required": ["kind", "name", "spec", "inputs", "outputs", "effects", "obligation_ids"],
     "properties": {
         "kind": {"type": "string", "enum": ["FUNC", "DB"]},
         "name": {"type": "string", "maxLength": 64, "pattern": r"^[A-Za-z][A-Za-z0-9]*$"},
@@ -105,6 +123,7 @@ DECOMPOSED_MODULE_SCHEMA: dict[str, Any] = {
         "inputs": {"type": "array", "items": MODULE_INTERFACE_FIELD_SCHEMA},
         "outputs": {"type": "array", "items": MODULE_INTERFACE_FIELD_SCHEMA},
         "effects": {"type": "array", "items": MODULE_EFFECT_SCHEMA},
+        "obligation_ids": {"type": "array", "items": {"type": "string", "maxLength": 64}},
     },
 }
 
@@ -132,7 +151,12 @@ API_DECOMPOSITION_SCHEMA: dict[str, Any] = {
 
 REQUIREMENT_CONTRACT_INSTRUCTIONS = """Analyze one atomic requirement as a black box and fill the supplied fixed
 template. Keep every required key and use [] when a section is empty. Describe only the requirement spec, external
-inputs, observable outputs, and required effects. Represent database reads as READ effects and state changes as their
+inputs, observable outputs, required effects, and behavioral obligations. Every supplied scenario id must be covered
+by at least one obligation. Obligations capture validation, authorization, computation, state transition, persistence,
+transaction, idempotency, external interaction, or error mapping responsibilities; keep them implementation-neutral.
+Whenever the contract contains a READ, CREATE, UPDATE, or DELETE effect, include at least one PERSISTENCE obligation
+covering that database responsibility.
+Represent database reads as READ effects and state changes as their
 corresponding effect operation. Use only supplied database entities and fields. Constraints in the context must be
 reflected in the spec when they affect behavior; do not return constraint ids or allocate constraints to modules.
 Every database access required to satisfy observable behavior must appear as a READ, CREATE, UPDATE, or DELETE effect.
@@ -148,23 +172,23 @@ Do not design modules, calls, steps, bindings, outcomes, guards, or algorithms. 
 or fewer). Return only the structured object.
 
 Example shape:
-{"requirement_id":"REQ-1.1","spec":"Register one traveler.","inputs":[{"semantic_id":"registration.username","name":"username","type":"string","description":"Requested username.","required":true}],"outputs":[{"semantic_id":"traveler.id","name":"traveler_id","type":"uuid","description":"Created traveler id.","required":true}],"effects":[{"id":"create_traveler","operation":"CREATE","target":"traveler","fields":["username"]}]}
+{"requirement_id":"REQ-1.1","spec":"Register one traveler.","inputs":[{"semantic_id":"registration.username","name":"username","type":"string","description":"Requested username.","required":true}],"outputs":[{"semantic_id":"traveler.id","name":"traveler_id","type":"uuid","description":"Created traveler id.","required":true}],"effects":[{"id":"create_traveler","operation":"CREATE","target":"traveler","fields":["username"]}],"obligations":[{"id":"validate_registration","kind":"VALIDATION","description":"Reject invalid registration data.","scenario_ids":["REQ-1.1:scenario:1"]}]}
 """
 
 API_DECOMPOSITION_INSTRUCTIONS = """Turn one Requirement Contract into API modules. Keep one user action in one API
 unless the requirement explicitly defines multiple operations. Every API contains exactly kind, name, spec, inputs,
-outputs, and effects. Set kind to API. Copy interface fields and effects from the supplied contract without changing
+outputs, effects, and obligation_ids. Set kind to API. Copy interface fields and effects from the supplied contract without changing
 their semantic identifiers, types, or required flags. Field names are local parameter labels and may be made clearer
 without changing the represented data. A module whose spec describes a database read or write must own the
 corresponding effect from the supplied contract; never describe hidden database access on a module with an empty
-effects list.
+effects list. Allocate every supplied obligation id to exactly one API.
 Do not design child functions or implementation steps. Return only `{\"modules\": [...]}`.
 """
 
 MODULE_DECOMPOSITION_INSTRUCTIONS = """Read the layered Markdown context and decompose the current module from the top down.
 Silently plan how the parent responsibility is completed, then return only its direct child modules in execution order.
 
-Every child contains exactly six top-level fields: kind, name, spec, inputs, outputs, and effects. Each interface field
+Every child contains exactly seven top-level fields: kind, name, spec, inputs, outputs, effects, and obligation_ids. Each interface field
 contains semantic_id, name, type, and required. Preserve required exactly when reusing a parent field; mark newly
 introduced values required only when the child cannot complete without them. An API may call FUNC only. A
 FUNC may contain its own logic and may call FUNC or DB modules. A DB module is always a leaf. The list order is the call
@@ -176,6 +200,9 @@ SESSION_WRITE, COOKIE_WRITE, and EXTERNAL_IO are application effects and must ne
 DB child must own at least one database effect. Never invent an effect: when the parent effect table is empty, all
 child effects must be [] and no DB child may be introduced. A child whose spec describes database access must own one
 of the exact effects listed in the parent table.
+Copy obligation ids exactly. An API must delegate every obligation to one direct FUNC child. A FUNC may implement
+non-persistence obligations itself, but every PERSISTENCE obligation must eventually be delegated to a DB leaf.
+DB children may own only PERSISTENCE obligations. Never invent or duplicate an obligation id.
 
 The compiler supplies every DB leaf with one shared Drizzle `database` client and its relevant schema table imports.
 The table symbols describe SQL tables; they are not data-bearing objects and must never be described as exposing
@@ -188,7 +215,7 @@ its type exactly. Within one module interface, different semantic_id values must
 call a stored account password `stored_password` when the supplied login password is already named `password`. Do not
 invent a new semantic_id merely to represent that an existing value passed validation.
 
-Do not output any fields beyond the six listed above. The compiler derives symbol IDs and graph relationships. Return
+Do not output any fields beyond the seven listed above. The compiler derives symbol IDs and graph relationships. Return
 only the structured `{\"modules\": [...]}` object.
 """
 
@@ -316,7 +343,9 @@ class DesignPass:
                     "design_context": model_design_context,
                     "fixed_template": _requirement_contract_template(requirement_id),
                 },
-                validator=lambda value: _requirement_contract_issues(value, requirement_id, design_context),
+                validator=lambda value: _requirement_contract_issues(
+                    value, requirement_id, design_context, requirement
+                ),
             )
             if contract_result.value is None:
                 states[requirement_id] = "FAILED"
@@ -363,6 +392,11 @@ class DesignPass:
 
         final_issues = all_issues
         design = state.to_ir()
+        if not final_issues:
+            final_issues = _behavioral_completeness_issues(design)
+            for issue in final_issues:
+                if issue.blame_symbol in states:
+                    states[issue.blame_symbol] = "FAILED"
         errors = [f"{issue.code}: {issue.message}" for issue in final_issues]
         return DesignPassResult(design, states, errors)
 
@@ -673,7 +707,12 @@ def _model_design_context(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _requirement_contract_issues(value: dict[str, Any], requirement_id: str, context: dict[str, Any]) -> list[DesignIssue]:
+def _requirement_contract_issues(
+    value: dict[str, Any],
+    requirement_id: str,
+    context: dict[str, Any],
+    requirement: dict[str, Any],
+) -> list[DesignIssue]:
     issues: list[DesignIssue] = []
     if value.get("requirement_id") != requirement_id:
         issues.append(_issue("CONTRACT_ID_MISMATCH", "requirement_id must match the fixed requirement", "REQUIREMENT_CONTRACT", requirement_id))
@@ -709,6 +748,42 @@ def _requirement_contract_issues(value: dict[str, Any], requirement_id: str, con
         )
         if database_backed and unknown:
             issues.append(_issue("UNKNOWN_DATABASE_FIELD", f"Effect {effect_id} references unknown fields: {sorted(unknown)}", "REQUIREMENT_CONTRACT", requirement_id))
+    obligation_ids: set[str] = set()
+    covered_scenarios: set[str] = set()
+    known_scenarios = {
+        str(item.get("scenario_id") or item.get("id"))
+        for item in requirement.get("scenarios", [])
+        if isinstance(item, dict) and str(item.get("scenario_id") or item.get("id", ""))
+    }
+    for obligation in value.get("obligations", []):
+        obligation_id = str(obligation.get("id", ""))
+        if obligation_id in obligation_ids:
+            issues.append(_issue("DUPLICATE_OBLIGATION", f"Duplicate obligation id: {obligation_id}", "REQUIREMENT_CONTRACT", requirement_id))
+        obligation_ids.add(obligation_id)
+        if not str(obligation.get("description", "")).strip():
+            issues.append(_issue("OBLIGATION_DESCRIPTION_EMPTY", f"Obligation {obligation_id} needs a description", "REQUIREMENT_CONTRACT", requirement_id))
+        scenario_ids = {str(value) for value in obligation.get("scenario_ids", [])}
+        unknown_scenarios = scenario_ids - known_scenarios
+        if unknown_scenarios:
+            issues.append(_issue("OBLIGATION_SCENARIO_UNKNOWN", f"Obligation {obligation_id} references unknown scenarios: {sorted(unknown_scenarios)}", "REQUIREMENT_CONTRACT", requirement_id))
+        covered_scenarios.update(scenario_ids & known_scenarios)
+    missing_scenarios = known_scenarios - covered_scenarios
+    if missing_scenarios:
+        issues.append(_issue("SCENARIO_OBLIGATION_COVERAGE", f"Scenarios have no behavioral obligation: {sorted(missing_scenarios)}", "REQUIREMENT_CONTRACT", requirement_id))
+    has_database_effect = any(
+        str(effect.get("operation", "")) in DATABASE_EFFECT_OPERATIONS
+        for effect in value.get("effects", [])
+    )
+    if has_database_effect and not any(
+        obligation.get("kind") == "PERSISTENCE"
+        for obligation in value.get("obligations", [])
+    ):
+        issues.append(_issue(
+            "PERSISTENCE_OBLIGATION_MISSING",
+            "Database effects require at least one PERSISTENCE obligation",
+            "REQUIREMENT_CONTRACT",
+            requirement_id,
+        ))
     return issues
 
 
@@ -721,9 +796,11 @@ def _api_plan_issues(value: dict[str, Any], requirement_id: str, contract: dict[
     contract_inputs = _simple_field_catalog(contract.get("inputs", []))
     contract_outputs = _simple_field_catalog(contract.get("outputs", []))
     expected_effects = {item["id"]: item for item in contract.get("effects", [])}
+    expected_obligations = {str(item["id"]) for item in contract.get("obligations", [])}
     exposed_inputs: set[str] = set()
     exposed_outputs: set[str] = set()
     allocated_effects: list[str] = []
+    allocated_obligations: list[str] = []
     for api in apis:
         name = str(api.get("name", ""))
         issues.extend(_simple_interface_field_issues(api.get("inputs", []), f"API.{name} inputs", requirement_id))
@@ -748,6 +825,7 @@ def _api_plan_issues(value: dict[str, Any], requirement_id: str, contract: dict[
             allocated_effects.append(effect_id)
             if expected is None or _effect_signature(expected) != _effect_signature(effect):
                 issues.append(_issue("API_EFFECT_OUT_OF_CONTRACT", f"API.{name} changes or invents effect {effect_id}", "REQUIREMENT_API", name))
+        allocated_obligations.extend(str(value) for value in api.get("obligation_ids", []))
     missing_inputs = set(contract_inputs) - exposed_inputs
     missing_outputs = set(contract_outputs) - exposed_outputs
     if missing_inputs:
@@ -755,6 +833,7 @@ def _api_plan_issues(value: dict[str, Any], requirement_id: str, contract: dict[
     if missing_outputs:
         issues.append(_issue("API_OUTPUT_COVERAGE", f"Contract outputs are not exposed: {sorted(missing_outputs)}", "REQUIREMENT_API", requirement_id))
     issues.extend(_allocation_issues(allocated_effects, set(expected_effects), "effect", "REQUIREMENT_API", requirement_id))
+    issues.extend(_allocation_issues(allocated_obligations, expected_obligations, "obligation", "REQUIREMENT_API", requirement_id))
     return issues
 
 
@@ -769,7 +848,11 @@ def _simple_decomposition_issues(
     available = _simple_field_catalog(parent.get("inputs", []))
     parent_outputs = _simple_field_catalog(parent.get("outputs", []))
     expected_effects = {item["id"]: item for item in _module_visible_effects(parent)}
+    expected_obligations = {
+        str(item["id"]): item for item in parent.get("obligations", []) if item.get("id")
+    }
     allocated_effects: list[str] = []
+    allocated_obligations: list[str] = []
     names = [str(module.get("name", "")) for module in value.get("modules", [])]
     if len(names) != len(set(names)):
         issues.append(_issue(
@@ -828,6 +911,18 @@ def _simple_decomposition_issues(
                 available[semantic_id] = copy.deepcopy(field_item)
 
         module_effects = module.get("effects", [])
+        module_obligations = [str(value) for value in module.get("obligation_ids", [])]
+        allocated_obligations.extend(module_obligations)
+        unknown_obligations = set(module_obligations) - set(expected_obligations)
+        if unknown_obligations:
+            issues.append(_issue("OBLIGATION_OUT_OF_CONTRACT", f"Module {label} declares unknown obligations: {sorted(unknown_obligations)}", "MODULE_DECOMPOSITION", parent_id))
+        if kind == "DB":
+            invalid = sorted(
+                obligation_id for obligation_id in module_obligations
+                if expected_obligations.get(obligation_id, {}).get("kind") != "PERSISTENCE"
+            )
+            if invalid:
+                issues.append(_issue("DB_OBLIGATION_INVALID", f"DB module {label} may own only PERSISTENCE obligations: {invalid}", "MODULE_DECOMPOSITION", parent_id))
         if kind == "DB" and not module_effects:
             issues.append(_issue(
                 "DB_EFFECT_REQUIRED",
@@ -899,6 +994,24 @@ def _simple_decomposition_issues(
         "MODULE_DECOMPOSITION",
         parent_id,
     ))
+    required_obligations = (
+        set(expected_obligations)
+        if parent.get("kind") == "API"
+        else {
+            obligation_id for obligation_id, obligation in expected_obligations.items()
+            if obligation.get("kind") == "PERSISTENCE"
+        }
+    )
+    issues.extend(_allocation_issues(
+        [value for value in allocated_obligations if value in required_obligations],
+        required_obligations,
+        "obligation",
+        "MODULE_DECOMPOSITION",
+        parent_id,
+    ))
+    repeated_obligations = sorted({value for value in allocated_obligations if allocated_obligations.count(value) > 1})
+    if repeated_obligations:
+        issues.append(_issue("OBLIGATION_ALLOCATED_TWICE", f"obligations are allocated more than once: {repeated_obligations}", "MODULE_DECOMPOSITION", parent_id))
     repeated_effects = sorted({effect_id for effect_id in allocated_effects if allocated_effects.count(effect_id) > 1})
     if repeated_effects and not any(issue.code == "EFFECT_ALLOCATED_TWICE" for issue in issues):
         issues.append(_issue(
@@ -948,9 +1061,54 @@ def _simple_interface_field_issues(
     return issues
 
 
+def _behavioral_completeness_issues(design_ir: dict[str, Any]) -> list[DesignIssue]:
+    """Ensure every frozen obligation reaches an implementable module seam."""
+
+    issues: list[DesignIssue] = []
+    modules_by_requirement: dict[str, list[dict[str, Any]]] = {}
+    for module in design_ir.get("modules", []):
+        if isinstance(module, dict):
+            modules_by_requirement.setdefault(
+                str(module.get("owner_requirement", "")), []
+            ).append(module)
+    for requirement in design_ir.get("requirements", []):
+        requirement_id = str(requirement.get("id", ""))
+        contract = requirement.get("contract", {})
+        modules = modules_by_requirement.get(requirement_id, [])
+        for obligation in contract.get("obligations", []):
+            obligation_id = str(obligation.get("id", ""))
+            implementers = [
+                module for module in modules
+                if module.get("kind") != "API"
+                and obligation_id in {
+                    str(row.get("id", ""))
+                    for row in module.get("obligations", [])
+                    if isinstance(row, dict)
+                }
+            ]
+            if not implementers:
+                issues.append(_issue(
+                    "OBLIGATION_IMPLEMENTATION_MISSING",
+                    f"Behavioral obligation {obligation_id} has no FUNC/DB implementation owner",
+                    "DESIGN_COMPLETENESS",
+                    requirement_id,
+                ))
+            elif obligation.get("kind") == "PERSISTENCE" and not any(
+                module.get("kind") == "DB" for module in implementers
+            ):
+                issues.append(_issue(
+                    "PERSISTENCE_OBLIGATION_DB_MISSING",
+                    f"Persistence obligation {obligation_id} has no DB implementation owner",
+                    "DESIGN_COMPLETENESS",
+                    requirement_id,
+                ))
+    return issues
+
+
 def _materialize_apis(state: DesignState, requirement_id: str, contract: dict[str, Any], decision: dict[str, Any]) -> tuple[list[str], list[DesignIssue]]:
     fields = _field_catalog([*contract.get("inputs", []), *contract.get("outputs", [])])
     effects = {item["id"]: item for item in contract.get("effects", [])}
+    obligations = {str(item["id"]): item for item in contract.get("obligations", [])}
     api_ids: list[str] = []
     for item in decision.get("modules", []):
         module_id = _qualified_module_id(requirement_id, "API", item["name"])
@@ -964,6 +1122,7 @@ def _materialize_apis(state: DesignState, requirement_id: str, contract: dict[st
             "inputs": [_expand_interface_field(field_item, fields) for field_item in item.get("inputs", [])],
             "outputs": [_expand_interface_field(field_item, fields) for field_item in item.get("outputs", [])],
             "effects": [_compact_module_effect(effects[item_effect["id"]]) for item_effect in item.get("effects", [])],
+            "obligations": [copy.deepcopy(obligations[value]) for value in item.get("obligation_ids", [])],
             "parent_id": None,
         }
         state.modules[module_id] = module
@@ -978,10 +1137,13 @@ def _materialize_simple_decomposition(
     parent_id: str,
     decision: dict[str, Any],
 ) -> tuple[list[str], list[DesignIssue]]:
-    """Create child symbols and calls from the six-field module format."""
+    """Create child symbols and calls from the seven-field module format."""
 
     parent = state.modules[parent_id]
     authoritative_effects = {item["id"]: item for item in _module_visible_effects(parent)}
+    authoritative_obligations = {
+        str(item["id"]): item for item in parent.get("obligations", []) if item.get("id")
+    }
     field_catalog = _field_catalog([*parent.get("inputs", []), *parent.get("outputs", [])])
     child_ids: list[str] = []
 
@@ -1002,6 +1164,10 @@ def _materialize_simple_decomposition(
             "inputs": child_inputs,
             "outputs": child_outputs,
             "effects": [_compact_module_effect(effect) for effect in selected_effects],
+            "obligations": [
+                copy.deepcopy(authoritative_obligations[value])
+                for value in item.get("obligation_ids", [])
+            ],
             "parent_id": parent_id,
         }
         child_id = _allocate_local_module_id(
@@ -1034,6 +1200,11 @@ def _normalize_requirement_contract(value: dict[str, Any]) -> dict[str, Any]:
         if effect.get("target"):
             effect["target"] = str(effect["target"]).lower()
         effect["fields"] = sorted(set(effect.get("fields", [])))
+    for obligation in result.get("obligations", []):
+        obligation["scenario_ids"] = sorted(set(obligation.get("scenario_ids", [])))
+    result["obligations"] = sorted(
+        result.get("obligations", []), key=lambda item: str(item.get("id", ""))
+    )
     return result
 
 
@@ -1413,6 +1584,10 @@ def _module_decomposition_markdown(
         "",
         *_effect_table(_module_visible_effects(module)),
         "",
+        "### Behavioral obligations",
+        "",
+        *_obligation_table(module.get("obligations", [])),
+        "",
         "## Relevant database slice",
         "",
     ]
@@ -1455,6 +1630,18 @@ def _effect_table(effects: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _obligation_table(obligations: list[dict[str, Any]]) -> list[str]:
+    lines = ["| ID | Kind | Description | Scenarios |", "|---|---|---|---|"]
+    if not obligations:
+        lines.append("| None | None | None | None |")
+    for item in obligations:
+        lines.append(
+            f"| {_md(item.get('id'))} | {_md(item.get('kind'))} | "
+            f"{_md(item.get('description'))} | {_inline_list(item.get('scenario_ids', []))} |"
+        )
+    return lines
+
+
 def _feedback_markdown(feedback: list[str], *, heading: str = "校验反馈（请修复后重新输出）") -> str:
     return "\n\n## " + heading + "\n\n" + "\n".join(f"- {_md(item)}" for item in feedback)
 
@@ -1483,6 +1670,7 @@ def _requirement_contract_template(requirement_id: str) -> dict[str, Any]:
         "inputs": [],
         "outputs": [],
         "effects": [],
+        "obligations": [],
     }
 
 
@@ -1497,6 +1685,7 @@ def _api_template() -> dict[str, Any]:
             "inputs": [],
             "outputs": [],
             "effects": [],
+            "obligation_ids": [],
         }],
     }
 

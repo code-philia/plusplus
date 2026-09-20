@@ -320,6 +320,7 @@ class NodeTDDOrchestrator:
                     "summary": implementation.summary,
                     "changed_files": applied.changed_files,
                     "changed_modules": applied.changed_modules,
+                    "failure_fingerprint_before": cluster[0].failure_fingerprint,
                 }
 
                 verification = self._run_and_analyze(
@@ -356,6 +357,9 @@ class NodeTDDOrchestrator:
                     )
                 reports = verification.analysis.reports
                 fingerprint = _selected_cluster(reports)[0].failure_fingerprint
+                if previous_patch_summary is not None:
+                    previous_patch_summary["failure_fingerprint_after"] = fingerprint
+                    previous_patch_summary["failure_changed"] = fingerprint != last_fingerprint
                 if fingerprint == last_fingerprint:
                     unchanged_failures += 1
                 else:
@@ -380,6 +384,114 @@ class NodeTDDOrchestrator:
                 [f"ARC4540 NODE_TDD_INTERNAL_ERROR: {type(exc).__name__}: {exc}"],
                 iterations=result.iterations,
                 visual_iterations=result.visual_iterations,
+                changed_files=result.changed_files,
+            )
+
+    def run_aggregate_node(self, requirement_id: str) -> NodeTDDResult:
+        """Implement targets owned by a non-leaf requirement without generating tests."""
+
+        requirement_id = str(requirement_id).strip()
+        result = NodeTDDResult(requirement_id=requirement_id, status="INTERNAL_ERROR")
+        try:
+            nodes = self.requirement_ir.get("nodes", {})
+            requirement = nodes.get(requirement_id) if isinstance(nodes, dict) else None
+            if not isinstance(requirement, dict) or requirement.get("type") != "FOLDER":
+                return self._finish(
+                    result,
+                    "INTERNAL_ERROR",
+                    [f"ARC4541 AGGREGATE_INPUT_INVALID: {requirement_id} is not a folder requirement."],
+                )
+
+            self._transition(requirement_id, "NODE_DISCOVERED")
+            resolved = CodeTargetResolver(
+                self.code_binding_registry
+            ).resolve_requirement_targets(requirement_id)
+            writable_targets = [
+                copy.deepcopy(row)
+                for row in resolved.get("owned_targets", [])
+                if isinstance(row, dict) and bool(row.get("editable"))
+            ]
+            if not writable_targets:
+                self._transition(requirement_id, "NO_IMPLEMENTATION_REQUIRED")
+                return self._finish(result, "NODE_ACCEPTED", [])
+
+            target_ids = sorted(str(row["module_id"]) for row in writable_targets)
+            fingerprint = hashlib.sha256(
+                f"{requirement_id}:aggregate-implementation".encode("utf-8")
+            ).hexdigest()
+            report = TestFailureReport(
+                requirement_id=requirement_id,
+                iteration=0,
+                test_id=f"aggregate:{requirement_id}",
+                test_ids=[f"aggregate:{requirement_id}"],
+                layer="AGGREGATE",
+                phase="AGGREGATE_IMPLEMENTATION",
+                failure_class="IMPLEMENTATION_BEHAVIOR",
+                message=(
+                    "Implement the connected frontend and any other editable modules owned "
+                    "by this non-leaf requirement."
+                ),
+                stack_frames=[],
+                target_modules=target_ids,
+                writable_targets=writable_targets,
+                read_only_dependencies=copy.deepcopy(
+                    resolved.get("dependency_targets", [])
+                ),
+                changed_files=[],
+                failure_fingerprint=fingerprint,
+                diagnostic_output=(
+                    "Treat the non-leaf requirement as an aggregate product scope. Keep its "
+                    "screens, navigation, shared state, and declared backend calls coherent; "
+                    "only edit targets authorized by Code Binding."
+                ),
+            )
+            self._transition(requirement_id, "AGGREGATE_IMPLEMENTING")
+            implementation = self.implementation_agent.implement(
+                ImplementationRequest(
+                    requirement_id=requirement_id,
+                    requirement=requirement,
+                    requirement_contract={},
+                    test_manifest={},
+                    code_binding_registry=self.code_binding_registry,
+                    failure_reports=(report,),
+                    iteration=1,
+                    mode="AGGREGATE",
+                    design_context=self._design_context(requirement_id),
+                )
+            )
+            if not implementation.ok or implementation.patch is None:
+                return self._finish(
+                    result,
+                    "AGENT_FAILED",
+                    implementation.errors
+                    or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."],
+                    iterations=1,
+                )
+            applied = self.write_guard.apply(
+                implementation.patch,
+                code_binding_registry=self.code_binding_registry,
+            )
+            if not applied.ok:
+                return self._finish(
+                    result,
+                    "PATCH_REJECTED",
+                    applied.rejected_changes,
+                    iterations=1,
+                )
+            self._transition(requirement_id, "AGGREGATE_IMPLEMENTED")
+            return self._finish(
+                result,
+                "NODE_ACCEPTED",
+                [],
+                iterations=1,
+                changed_files=set(applied.changed_files),
+            )
+        except Exception as exc:
+            return self._finish(
+                result,
+                "INTERNAL_ERROR",
+                [f"ARC4540 AGGREGATE_IMPLEMENTATION_INTERNAL_ERROR: {type(exc).__name__}: {exc}"],
+                iterations=result.iterations,
                 changed_files=result.changed_files,
             )
 

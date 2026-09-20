@@ -48,15 +48,17 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 IMPLEMENTATION_INSTRUCTIONS = """You are ARC's bounded Implementation Agent.
-Implement the smallest code change that addresses one structured failure cluster for one atomic requirement.
+Implement the smallest coherent code change for the supplied requirement and implementation mode.
 
 Authority and evidence:
-- Required behavior comes from requirement, scenarios, requirement_contract, and frozen_tests.
+- Required behavior comes from requirement, scenarios, requirement_contract, and frozen_tests when present.
 - Module behavior and reference-derived frontend layout/style evidence may come from design_context.
 - Failure localization comes from failure_reports.
 - Real files, symbols, call edges, and editable regions come from writable_targets.
 - Read-only dependencies are context only and must never be edited.
 - Source files are supplied in full so you can understand existing imports and public surfaces.
+- The writable surface contains every editable module owned by this requirement, not only the first stack-frame match.
+  Diagnose across callers, callees, and sibling modules before choosing the smallest coherent patch.
 
 Hard scope rules:
 - Return replacements only for module ids in allowed_writable_module_ids.
@@ -65,11 +67,12 @@ Hard scope rules:
 - Do not modify tests, assertions, imports, exports, signatures, routes, generated types, configs, or compiler glue.
 - Use only symbols already available in the supplied source file and public read-only interfaces.
 - Do not invent files, modules, APIs, fields, routes, database tables, or requirement behavior.
-- Do not weaken or work around frozen tests.
+- In TDD mode, do not weaken or work around frozen tests. In AGGREGATE mode, no frozen tests exist;
+  requirement, design_context, and Code Binding ownership are authoritative.
 - Do not mock ARC-owned modules. Mocking external systems is not part of this implementation patch.
 
 Implementation rules:
-- Address the supplied failure cluster, not future requirements.
+- Address the supplied failure cluster, or the supplied aggregate scope in AGGREGATE mode, not future requirements.
 - Prefer the smallest coherent vertical change and avoid speculative refactoring.
 - Preserve async behavior, TypeScript types, observable UI behavior, and declared call edges.
 - In a DB module, use the compiler-injected `database` Drizzle client together with the imported schema table symbols.
@@ -129,6 +132,7 @@ class ImplementationRequest:
     code_binding_registry: dict[str, Any]
     failure_reports: tuple[Any, ...]
     iteration: int
+    mode: str = "TDD"
     design_context: dict[str, Any] | None = None
     previous_patch_summary: dict[str, Any] | None = None
 
@@ -224,6 +228,7 @@ class ImplementationAgent:
         request: ImplementationRequest,
     ) -> tuple[dict[str, Any], dict[str, str], set[str], list[str]]:
         requirement_id = str(request.requirement_id).strip()
+        mode = str(request.mode).strip().upper()
         errors: list[str] = []
         if not requirement_id:
             errors.append("ARC4530 IMPLEMENTATION_CONTEXT_INVALID: requirement_id is required.")
@@ -250,7 +255,11 @@ class ImplementationAgent:
             errors.append(
                 "ARC4530 IMPLEMENTATION_CONTEXT_INVALID: requirement payload id does not match."
             )
-        if request.test_manifest.get("status") != "TESTS_FROZEN":
+        if mode not in {"TDD", "AGGREGATE"}:
+            errors.append(
+                "ARC4530 IMPLEMENTATION_CONTEXT_INVALID: mode must be TDD or AGGREGATE."
+            )
+        if mode == "TDD" and request.test_manifest.get("status") != "TESTS_FROZEN":
             errors.append(
                 "ARC4530 IMPLEMENTATION_CONTEXT_INVALID: Test Manifest is not frozen."
             )
@@ -333,12 +342,11 @@ class ImplementationAgent:
             if isinstance(target, dict) and str(target.get("module_id", ""))
         }
         focus_ids = reported_writable_ids & writable_ids
-        if reported_writable_ids and not focus_ids:
-            errors.append(
-                "ARC4530 IMPLEMENTATION_CONTEXT_INVALID: failure targets are not writable "
-                "for this requirement."
-            )
-        relevant_writable = _writable_closure(focus_ids or writable_ids, writable_ids, bindings)
+        # Stack frames and test target metadata are hints, not authority. A failure
+        # observed at an API or Page often originates in an owned caller, callee,
+        # or sibling module. Give the model the full requirement-owned writable
+        # surface while keeping WriteGuard's requirement ownership restriction.
+        relevant_writable = set(writable_ids)
         if not relevant_writable:
             errors.append(
                 f"ARC4530 IMPLEMENTATION_CONTEXT_INVALID: {requirement_id} has no writable targets."
@@ -349,6 +357,14 @@ class ImplementationAgent:
             for value in bindings.get(module_id, {}).get("callees", [])
             if str(value)
         }
+        relevant_read_only.update(
+            module_id
+            for module_id in read_only_ids
+            if any(
+                str(value) in relevant_writable
+                for value in bindings.get(module_id, {}).get("callees", [])
+            )
+        )
         relevant_read_only.update(
             str(target.get("module_id", ""))
             for report in reports
@@ -399,16 +415,19 @@ class ImplementationAgent:
             for module_id in sorted(relevant_read_only)
             if module_id in bindings
         ]
-        frozen_tests, test_errors = self._frozen_tests(
-            requirement_id,
-            request.test_manifest,
-        )
+        frozen_tests, test_errors = ([], [])
+        if mode == "TDD":
+            frozen_tests, test_errors = self._frozen_tests(
+                requirement_id,
+                request.test_manifest,
+            )
         errors.extend(test_errors)
         if errors:
             return {}, {}, focus_ids, list(dict.fromkeys(errors))
 
         context = {
             "schema_version": IMPLEMENTATION_AGENT_SCHEMA_VERSION,
+            "implementation_mode": mode,
             "requirement_id": requirement_id,
             "iteration": request.iteration,
             "requirement": request.requirement,
@@ -425,7 +444,8 @@ class ImplementationAgent:
             "previous_patch_summary": request.previous_patch_summary,
             "policy": {
                 "one_failure_cluster": True,
-                "tests_are_frozen": True,
+                "tests_are_frozen": mode == "TDD",
+                "aggregate_mode_uses_design_and_binding_authority": mode == "AGGREGATE",
                 "output_is_region_replacement_only": True,
                 "side_effects_owned_by_orchestrator": True,
             },
@@ -561,10 +581,6 @@ def _validate_decision(
             )
     if len(actual_ids) != len(set(actual_ids)):
         errors.append("ARC4535 IMPLEMENTATION_TARGET_INVALID: duplicate module edits.")
-    if focus_ids and not (set(actual_ids) & focus_ids):
-        errors.append(
-            "ARC4535 IMPLEMENTATION_TARGET_INVALID: patch does not touch the failure cluster."
-        )
     return list(dict.fromkeys(errors))
 
 
@@ -576,23 +592,6 @@ def _report_dict(value: Any) -> dict[str, Any] | None:
         serialized = serializer()
         return serialized if isinstance(serialized, dict) else None
     return None
-
-
-def _writable_closure(
-    initial: set[str],
-    writable_ids: set[str],
-    bindings: dict[str, dict[str, Any]],
-) -> set[str]:
-    result = set(initial) & writable_ids
-    pending = list(result)
-    while pending:
-        module_id = pending.pop()
-        for callee in bindings.get(module_id, {}).get("callees", []):
-            value = str(callee)
-            if value in writable_ids and value not in result:
-                result.add(value)
-                pending.append(value)
-    return result
 
 
 def _source_card(binding: dict[str, Any], *, digest: str | None) -> dict[str, Any]:

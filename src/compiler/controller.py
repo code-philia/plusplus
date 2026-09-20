@@ -1176,17 +1176,70 @@ class Compiler:
                 node_id=requirement_id,
             )
 
-        if tdd_failed_nodes:
+        folder_ids = {
+            str(value)
+            for value in requirement_ir.get("folder_nodes", [])
+            if str(value)
+        }
+        folder_order = [
+            str(requirement_id)
+            for wave in dependency_graph.get("implementation_waves", [])
+            if isinstance(wave, list)
+            for requirement_id in wave
+            if str(requirement_id) in folder_ids
+        ]
+        if len(folder_order) != len(set(folder_order)) or set(folder_order) != folder_ids:
+            message = (
+                "ARC4548 AGGREGATE_ORDER_INVALID: implementation_waves must contain "
+                "every folder requirement exactly once."
+            )
+            await self._log("Compiler", message, "error")
+            return CompilationResult(
+                ok=False,
+                root_id=root_id,
+                states=states,
+                failed_nodes=sorted(set(tdd_failed_nodes) | folder_ids),
+                artifacts=artifacts,
+            )
+
+        aggregate_failed_nodes: list[str] = []
+        for requirement_id in folder_order:
+            await self._log(
+                "NodeTDDOrchestrator",
+                f"AGGREGATE_IMPLEMENTATION_STARTED: resolving owned targets for {requirement_id}.",
+                node_id=requirement_id,
+            )
+            node_result = orchestrator.run_aggregate_node(requirement_id)
+            states[requirement_id] = node_result.status
+            for name, path in node_result.artifacts.items():
+                if name == "result":
+                    artifacts[f"aggregate_result:{requirement_id}"] = path
+            for error in node_result.errors:
+                await self._log(
+                    "NodeTDDOrchestrator", error, "warning", requirement_id
+                )
+            if not node_result.ok:
+                aggregate_failed_nodes.append(requirement_id)
+                continue
+            await self._log(
+                "NodeTDDOrchestrator",
+                f"AGGREGATE_ACCEPTED: {requirement_id} implemented its owned targets.",
+                node_id=requirement_id,
+            )
+
+        failed_nodes = sorted(set(tdd_failed_nodes) | set(aggregate_failed_nodes))
+        if failed_nodes:
             await self._log(
                 "Compiler",
-                "NODE_TDD_COMPLETE_WITH_SKIPS: all atomic requirements were processed; "
-                f"skipped={sorted(tdd_failed_nodes)}.",
+                "IMPLEMENTATION_COMPLETE_WITH_SKIPS: all atomic and aggregate requirements "
+                f"were processed; skipped={failed_nodes}.",
                 "warning",
             )
         else:
             await self._log(
                 "Compiler",
-                "NODE_TDD_COMPLETE: every atomic requirement reached NODE_ACCEPTED.",
+                "IMPLEMENTATION_COMPLETE: every atomic and aggregate requirement reached "
+                "NODE_ACCEPTED.",
             )
         return CompilationResult(
             # TDD node exhaustion is a non-fatal partial outcome: every node
@@ -1194,7 +1247,7 @@ class Compiler:
             ok=True,
             root_id=root_id,
             states=states,
-            failed_nodes=sorted(tdd_failed_nodes),
+            failed_nodes=failed_nodes,
             artifacts=artifacts,
         )
 
