@@ -313,7 +313,6 @@ class DesignPass:
         self._local_retries = _env_int("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", 2, 0, 10)
         self._reopen_budget = _env_int("ARC_DESIGN_REOPEN_COUNT", 2, 0, 6)
         self._trace_enabled = _env_flag("ARC_DESIGN_TRACE", True)
-        self._max_modules = _env_int("ARC_DESIGN_MAX_MODULES_PER_REQUIREMENT", 64, 4, 256)
 
     def compile(
         self,
@@ -547,8 +546,6 @@ class DesignPass:
         *,
         depth: int,
     ) -> tuple[DesignState | None, list[DesignIssue]]:
-        if len(state.requirement_modules.get(requirement_id, set())) > self._max_modules:
-            return None, [DesignIssue("DESIGN_LIMIT_EXCEEDED", f"Requirement exceeds {self._max_modules} modules", "MODULE_DECOMPOSITION", module_id, UNRESOLVED)]
         module = state.modules[module_id]
         if module["kind"] == "DB":
             return state, []

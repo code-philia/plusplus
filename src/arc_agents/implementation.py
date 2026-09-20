@@ -164,7 +164,7 @@ class ImplementationAgent:
         output_root: Path,
         *,
         retries: int = 2,
-        max_context_characters: int = 300_000,
+        max_context_characters: int = 600_000,
         trace: Callable[[str], None] | None = None,
     ) -> None:
         self.output_root = output_root.expanduser().resolve()
@@ -460,13 +460,24 @@ class ImplementationAgent:
             json.dumps(context, ensure_ascii=False, separators=(",", ":"))
         )
         if context_size > self._max_context_characters:
+            section_sizes = {
+                key: len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+                for key, value in context.items()
+            }
+            largest_sections = ", ".join(
+                f"{key}={size}"
+                for key, size in sorted(
+                    section_sizes.items(), key=lambda item: item[1], reverse=True
+                )[:6]
+            )
             return (
                 {},
                 {},
                 focus_ids,
                 [
                     "ARC4532 IMPLEMENTATION_CONTEXT_TOO_LARGE: "
-                    f"{context_size} characters exceeds {self._max_context_characters}."
+                    f"{context_size} characters exceeds {self._max_context_characters}; "
+                    f"largest_sections: {largest_sections}."
                 ],
             )
         return context, source_hashes, focus_ids, []
