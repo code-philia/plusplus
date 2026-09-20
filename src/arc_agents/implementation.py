@@ -383,6 +383,13 @@ class ImplementationAgent:
             for target in report.get("read_only_dependencies", [])
             if isinstance(target, dict) and str(target.get("module_id", "")) in read_only_ids
         )
+        relevant_read_only.update(
+            _frontend_api_dependency_ids(
+                request.design_context,
+                screen_ids=relevant_writable,
+                allowed_ids=read_only_ids,
+            )
+        )
 
         source_hashes: dict[str, str] = {}
         source_documents: dict[str, dict[str, Any]] = {}
@@ -444,6 +451,15 @@ class ImplementationAgent:
         if errors:
             return {}, {}, focus_ids, list(dict.fromkeys(errors))
 
+        projected_design_context = _project_design_context(
+            request.design_context,
+            requirement_id=requirement_id,
+            target_ids=relevant_writable | relevant_read_only,
+        )
+        projected_reports = _project_failure_reports(
+            reports,
+            target_ids=relevant_writable | relevant_read_only,
+        )
         context = {
             "schema_version": IMPLEMENTATION_AGENT_SCHEMA_VERSION,
             "implementation_mode": mode,
@@ -451,8 +467,8 @@ class ImplementationAgent:
             "iteration": request.iteration,
             "requirement": request.requirement,
             "requirement_contract": request.requirement_contract,
-            "design_context": request.design_context,
-            "failure_reports": reports,
+            "design_context": projected_design_context,
+            "failure_reports": projected_reports,
             "frozen_tests": frozen_tests,
             "allowed_writable_module_ids": sorted(source_hashes),
             "writable_targets": writable_cards,
@@ -470,6 +486,7 @@ class ImplementationAgent:
                     if relevant_writable != writable_ids
                     else "ALL_REQUIREMENT_OWNED"
                 ),
+                "design_context_scope": "WRITABLE_TARGET_PLUS_ONE_HOP",
                 "aggregate_mode_uses_design_and_binding_authority": mode == "AGGREGATE",
                 "output_is_region_replacement_only": True,
                 "side_effects_owned_by_orchestrator": True,
@@ -662,6 +679,197 @@ def _one_hop_writable(
         )
     )
     return result
+
+
+def _project_design_context(
+    design_context: dict[str, Any] | None,
+    *,
+    requirement_id: str,
+    target_ids: set[str],
+) -> dict[str, Any]:
+    """Keep only Design evidence reachable from this implementation request."""
+
+    if not isinstance(design_context, dict):
+        return {}
+    frontend = design_context.get("frontend", {})
+    if not isinstance(frontend, dict):
+        frontend = {}
+
+    available_screens = [
+        row for row in frontend.get("screens", []) if isinstance(row, dict)
+    ]
+    screens = [
+        copy.deepcopy(row)
+        for row in available_screens
+        if str(row.get("id", "")) in target_ids
+    ]
+    primary_screen_ids = {str(row.get("id", "")) for row in screens}
+    route_index = {
+        str(row.get("route", "")): row
+        for row in available_screens
+        if str(row.get("route", ""))
+    }
+    navigation_routes = {
+        str(target.get("target_route", ""))
+        for screen in screens
+        for target in screen.get("navigation_targets", [])
+        if isinstance(target, dict) and str(target.get("target_route", ""))
+    }
+    screen_ids = set(primary_screen_ids)
+    for route in sorted(navigation_routes):
+        destination = route_index.get(route)
+        destination_id = str((destination or {}).get("id", ""))
+        if destination is not None and destination_id not in screen_ids:
+            screens.append(copy.deepcopy(destination))
+            screen_ids.add(destination_id)
+
+    journeys = [
+        copy.deepcopy(row)
+        for row in frontend.get("journeys", [])
+        if isinstance(row, dict)
+        and str(row.get("source_screen_id", "")) in primary_screen_ids
+    ]
+    api_usages = [
+        copy.deepcopy(row)
+        for row in frontend.get("api_usages", [])
+        if isinstance(row, dict)
+        and str(row.get("screen_id", "")) in primary_screen_ids
+    ]
+    shared_state_policies = [
+        copy.deepcopy(row)
+        for row in frontend.get("shared_state_policies", [])
+        if isinstance(row, dict) and str(row.get("id", "")) in target_ids
+    ]
+    visual_ids = {
+        str(value)
+        for screen in screens
+        for value in screen.get("visual_reference_ids", [])
+        if str(value)
+    }
+    visual_references = [
+        copy.deepcopy(row)
+        for row in frontend.get("visual_references", [])
+        if isinstance(row, dict) and str(row.get("id", "")) in visual_ids
+    ]
+
+    active_link = design_context.get("active_requirement_link", {})
+    projected_link: dict[str, Any] = {}
+    if isinstance(active_link, dict) and (screens or shared_state_policies):
+        projected_link = copy.deepcopy(active_link)
+        if isinstance(projected_link.get("screen_ids"), list):
+            projected_link["screen_ids"] = [
+                str(item)
+                for item in projected_link["screen_ids"]
+                if str(item) in screen_ids
+            ]
+        if isinstance(projected_link.get("shared_state_ids"), list):
+            retained_state_ids = {
+                str(row.get("id", "")) for row in shared_state_policies
+            }
+            projected_link["shared_state_ids"] = [
+                str(item)
+                for item in projected_link["shared_state_ids"]
+                if str(item) in retained_state_ids
+            ]
+        if isinstance(projected_link.get("visual_reference_ids"), list):
+            projected_link["visual_reference_ids"] = [
+                str(item)
+                for item in projected_link["visual_reference_ids"]
+                if str(item) in visual_ids
+            ]
+
+    return {
+        "requirement_id": requirement_id,
+        "module_ids": sorted(
+            str(value)
+            for value in design_context.get("module_ids", [])
+            if str(value) in target_ids
+        ),
+        "backend_modules": [
+            copy.deepcopy(row)
+            for row in design_context.get("backend_modules", [])
+            if isinstance(row, dict)
+            and str(row.get("id", row.get("module_id", ""))) in target_ids
+        ],
+        "frontend_scope": "IMPLEMENTATION_TARGET_ONE_HOP",
+        "active_requirement_link": projected_link,
+        "frontend": {
+            "screens": screens,
+            "journeys": journeys,
+            "api_usages": api_usages,
+            "shared_state_policies": shared_state_policies,
+            "visual_references": visual_references,
+        },
+    }
+
+
+def _frontend_api_dependency_ids(
+    design_context: dict[str, Any] | None,
+    *,
+    screen_ids: set[str],
+    allowed_ids: set[str],
+) -> set[str]:
+    if not isinstance(design_context, dict):
+        return set()
+    frontend = design_context.get("frontend", {})
+    if not isinstance(frontend, dict):
+        return set()
+    api_ids = {
+        str(row.get("api_id", ""))
+        for row in frontend.get("api_usages", [])
+        if isinstance(row, dict)
+        and str(row.get("screen_id", "")) in screen_ids
+        and str(row.get("api_id", ""))
+    }
+    api_ids.update(
+        str(value)
+        for row in frontend.get("screens", [])
+        if isinstance(row, dict) and str(row.get("id", "")) in screen_ids
+        for value in row.get("required_api_ids", [])
+        if str(value)
+    )
+    candidates = api_ids | {f"API_CLIENT::{api_id}" for api_id in api_ids}
+    return candidates & allowed_ids
+
+
+def _project_failure_reports(
+    reports: list[dict[str, Any]],
+    *,
+    target_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Remove duplicated target cards after they have been used for localization."""
+
+    projected: list[dict[str, Any]] = []
+    for report in reports:
+        row = {
+            key: copy.deepcopy(value)
+            for key, value in report.items()
+            if key not in {"writable_targets", "read_only_dependencies"}
+        }
+        if isinstance(row.get("target_modules"), list):
+            row["target_modules"] = [
+                str(value)
+                for value in row["target_modules"]
+                if str(value) in target_ids
+            ]
+        row["writable_target_ids"] = sorted(
+            {
+                str(target.get("module_id", ""))
+                for target in report.get("writable_targets", [])
+                if isinstance(target, dict)
+                and str(target.get("module_id", "")) in target_ids
+            }
+        )
+        row["read_only_dependency_ids"] = sorted(
+            {
+                str(target.get("module_id", ""))
+                for target in report.get("read_only_dependencies", [])
+                if isinstance(target, dict)
+                and str(target.get("module_id", "")) in target_ids
+            }
+        )
+        projected.append(row)
+    return projected
 
 
 def _source_card(binding: dict[str, Any], *, digest: str | None) -> dict[str, Any]:

@@ -442,9 +442,7 @@ class NodeTDDOrchestrator:
                 stack_frames=[],
                 target_modules=target_ids,
                 writable_targets=writable_targets,
-                read_only_dependencies=copy.deepcopy(
-                    resolved.get("dependency_targets", [])
-                ),
+                read_only_dependencies=[],
                 changed_files=[],
                 failure_fingerprint=fingerprint,
                 diagnostic_output=(
@@ -729,10 +727,15 @@ class NodeTDDOrchestrator:
         resolved = CodeTargetResolver(
             self.code_binding_registry
         ).resolve_requirement_targets(requirement_id)
-        module_ids = {
-            str(row.get("module_id", ""))
+        all_targets = {
+            str(row.get("module_id", "")): row
             for key in ("owned_targets", "dependency_targets")
             for row in resolved.get(key, [])
+            if isinstance(row, dict) and str(row.get("module_id", ""))
+        }
+        owned_ids = {
+            str(row.get("module_id", ""))
+            for row in resolved.get("owned_targets", [])
             if isinstance(row, dict) and str(row.get("module_id", ""))
         }
         frontend_link = next(
@@ -744,39 +747,96 @@ class NodeTDDOrchestrator:
             ),
             {},
         )
-        frontend_ids = {
-            str(row.get("id", ""))
-            for table in ("screens", "shared_state_policies")
-            for row in self.frontend_ir.get(table, [])
-            if isinstance(row, dict) and str(row.get("id", ""))
-        } | module_ids
-        frontend_rows: dict[str, list[dict[str, Any]]] = {}
-        visual_ids = {
-            str(value)
+        screens = [
+            copy.deepcopy(row)
             for row in self.frontend_ir.get("screens", [])
             if isinstance(row, dict)
-            for value in row.get("visual_reference_ids", [])
-            if str(value)
-        }
-        for table in ("screens", "journeys", "api_usages", "shared_state_policies"):
-            rows = [copy.deepcopy(row) for row in self.frontend_ir.get(table, []) if isinstance(row, dict)]
-            frontend_rows[table] = rows
-            visual_ids.update(
-                str(value)
-                for row in rows
-                for value in row.get("visual_reference_ids", [])
-                if str(value)
+            and (
+                str(row.get("id", "")) in owned_ids
+                or requirement_id
+                in {str(value) for value in row.get("requirement_ids", [])}
             )
-        frontend_rows["api_usages"] = [
+        ]
+        primary_screen_ids = {str(row.get("id", "")) for row in screens}
+        route_index = {
+            str(row.get("route", "")): row
+            for row in self.frontend_ir.get("screens", [])
+            if isinstance(row, dict) and str(row.get("route", ""))
+        }
+        navigation_routes = {
+            str(target.get("target_route", ""))
+            for screen in screens
+            for target in screen.get("navigation_targets", [])
+            if isinstance(target, dict) and str(target.get("target_route", ""))
+        }
+        screen_ids = set(primary_screen_ids)
+        for route in sorted(navigation_routes):
+            destination = route_index.get(route)
+            destination_id = str((destination or {}).get("id", ""))
+            if destination is not None and destination_id not in screen_ids:
+                screens.append(copy.deepcopy(destination))
+                screen_ids.add(destination_id)
+
+        journeys = [
+            copy.deepcopy(row)
+            for row in self.frontend_ir.get("journeys", [])
+            if isinstance(row, dict)
+            and (
+                str(row.get("requirement_id", "")) == requirement_id
+                or str(row.get("source_screen_id", "")) in primary_screen_ids
+            )
+        ]
+        api_usages = [
             copy.deepcopy(row)
             for row in self.frontend_ir.get("api_usages", [])
             if isinstance(row, dict)
+            and str(row.get("screen_id", "")) in primary_screen_ids
+        ]
+        shared_state_policies = [
+            copy.deepcopy(row)
+            for row in self.frontend_ir.get("shared_state_policies", [])
+            if isinstance(row, dict)
             and (
-                str(row.get("screen_id", "")) in frontend_ids
-                or str(row.get("api_id", "")) in module_ids
+                str(row.get("id", "")) in owned_ids
+                or requirement_id
+                in {str(value) for value in row.get("requirement_ids", [])}
             )
         ]
-        frontend_rows["visual_references"] = [
+        referenced_api_ids = {
+            str(value)
+            for screen in screens
+            for value in screen.get("required_api_ids", [])
+            if str(value)
+        }
+        referenced_api_ids.update(
+            str(row.get("api_id", ""))
+            for row in [*journeys, *api_usages]
+            if str(row.get("api_id", ""))
+        )
+        direct_dependency_ids = {
+            str(value)
+            for module_id in owned_ids
+            for value in all_targets.get(module_id, {}).get("callees", [])
+            if str(value)
+        }
+        direct_dependency_ids.update(referenced_api_ids)
+        direct_dependency_ids.update(
+            f"API_CLIENT::{api_id}" for api_id in referenced_api_ids
+        )
+        module_ids = owned_ids | (direct_dependency_ids & set(all_targets))
+
+        visual_ids = {
+            str(value)
+            for row in screens
+            for value in row.get("visual_reference_ids", [])
+            if str(value)
+        }
+        visual_ids.update(
+            str(value)
+            for value in frontend_link.get("visual_reference_ids", [])
+            if str(value)
+        )
+        visual_references = [
             copy.deepcopy(row)
             for row in self.frontend_ir.get("visual_references", [])
             if isinstance(row, dict) and str(row.get("id", "")) in visual_ids
@@ -795,9 +855,15 @@ class NodeTDDOrchestrator:
             "requirement_id": requirement_id,
             "module_ids": sorted(module_ids),
             "backend_modules": backend_modules,
-            "frontend_scope": "CONNECTED_PRODUCT_GRAPH",
+            "frontend_scope": "REQUIREMENT_SCOPED_ONE_HOP",
             "active_requirement_link": frontend_link,
-            "frontend": frontend_rows,
+            "frontend": {
+                "screens": screens,
+                "journeys": journeys,
+                "api_usages": api_usages,
+                "shared_state_policies": shared_state_policies,
+                "visual_references": visual_references,
+            },
         }
 
     def _impacted_accepted_requirements(
