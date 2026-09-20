@@ -91,8 +91,9 @@ Generate a small set of executable RED tests from the supplied Requirement Conte
 
 Ownership boundary:
 - Expected behavior and assertions come only from requirement, scenarios, and requirement_contract.
-- Invocation mechanisms, imports, symbols, routes, and Props come only from code_targets and public_seams.
-- Construct typed values from type_targets and requirement-owned examples; do not guess TypeScript fields.
+- Invocation mechanisms, imports, symbols, routes, and Props come only from owned_targets,
+  one_hop_dependencies, and public_seams.
+- Construct typed values from relevant_types and requirement-owned examples; do not guess TypeScript fields.
 - Never infer behavior from an implementation body. No implementation body is supplied.
 - Do not invent source paths, routes, symbols, module ids, scenario ids, or test layers.
 - Generate exactly one file for every layer in required_layers.
@@ -712,6 +713,7 @@ class RequirementTestGenerationPass:
                 f"MODEL_REQUEST requirement={requirement_id} "
                 f"attempt={attempt + 1}/{self._retries + 1}"
             )
+            self._trace(_context_audit(requirement_id, attempt + 1, payload))
             self._trace_json("MODEL_INPUT", requirement_id, payload)
             started = time.perf_counter()
             try:
@@ -808,7 +810,7 @@ def _build_context_pack(
         for item in design_ir.get("requirements", [])
         if isinstance(item, dict)
     }
-    target_rows = [
+    all_target_rows = [
         copy.deepcopy(row)
         for row in [
             *resolved_targets.get("owned_targets", []),
@@ -816,24 +818,41 @@ def _build_context_pack(
         ]
         if isinstance(row, dict)
     ]
-    target_ids = {str(row.get("source_ir_id", row.get("module_id", ""))) for row in target_rows}
-    backend_modules = [
+    owned_targets = [
+        copy.deepcopy(row)
+        for row in resolved_targets.get("owned_targets", [])
+        if isinstance(row, dict) and _target_relevant_to_layers(row, required_layers)
+    ]
+    relevant_frontend_subgraph = _project_frontend_subgraph(
+        requirement_id=requirement_id,
+        frontend_ir=frontend_ir,
+        owned_targets=owned_targets,
+    )
+    one_hop_dependencies = _project_one_hop_dependencies(
+        owned_targets=owned_targets,
+        all_target_rows=all_target_rows,
+        frontend_subgraph=relevant_frontend_subgraph,
+        required_layers=required_layers,
+    )
+    target_rows = [*owned_targets, *one_hop_dependencies]
+    target_source_ids = {
+        str(row.get("source_ir_id", row.get("module_id", "")))
+        for row in target_rows
+        if str(row.get("source_ir_id", row.get("module_id", "")))
+    }
+    relevant_api_contracts = [
         copy.deepcopy(module)
         for module in design_ir.get("modules", [])
-        if isinstance(module, dict) and str(module.get("id", "")) in target_ids
+        if isinstance(module, dict)
+        and str(module.get("kind", "")).upper() == "API"
+        and str(module.get("id", "")) in target_source_ids
     ]
-    frontend_modules = {
-        table: [
-            copy.deepcopy(item)
-            for item in frontend_ir.get(table, [])
-            if isinstance(item, dict) and (
-                str(item.get("id", "")) in target_ids
-                or requirement_id in {str(value) for value in item.get("requirement_ids", [])}
-                or str(item.get("requirement_id", "")) == requirement_id
-            )
-        ]
-        for table in ("screens", "journeys", "api_usages", "shared_state_policies")
-    }
+    referenced_type_ids = _referenced_type_ids(target_rows)
+    relevant_types = [
+        copy.deepcopy(row)
+        for row in resolved_targets.get("type_targets", [])
+        if isinstance(row, dict) and str(row.get("type_id", "")) in referenced_type_ids
+    ]
     output_files = {
         layer: _test_file(requirement_id, layer)
         for layer in required_layers
@@ -897,14 +916,12 @@ def _build_context_pack(
             for key in ("id", "name", "description", "scenarios", "dependencies")
         },
         "requirement_contract": contracts.get(requirement_id, {}),
-        "database_schema": schema_for_requirement(database_schema, requirement_id),
-        "backend_modules": backend_modules,
-        "frontend_modules": frontend_modules,
-        "code_targets": {
-            "owned": copy.deepcopy(resolved_targets.get("owned_targets", [])),
-            "dependencies": copy.deepcopy(resolved_targets.get("dependency_targets", [])),
-        },
-        "type_targets": copy.deepcopy(resolved_targets.get("type_targets", [])),
+        "relevant_database_schema": schema_for_requirement(database_schema, requirement_id),
+        "owned_targets": owned_targets,
+        "one_hop_dependencies": one_hop_dependencies,
+        "relevant_types": relevant_types,
+        "relevant_api_contracts": relevant_api_contracts,
+        "relevant_frontend_subgraph": relevant_frontend_subgraph,
         "public_seams": public_seams,
         "required_layers": required_layers,
         "allowed_layers": required_layers,
@@ -928,6 +945,188 @@ def _build_context_pack(
             "tests_expected_green": False,
         },
     }
+
+
+def _target_relevant_to_layers(
+    target: dict[str, Any], required_layers: list[str]
+) -> bool:
+    kind = str(target.get("kind", "")).upper()
+    allowed = {
+        "UNIT": {"FUNC", "DB"},
+        "INTEGRATION": {"API", "FUNC", "DB"},
+        "E2E": {"PAGE", "COMPONENT", "LAYOUT", "STORE", "API", "API_CLIENT"},
+    }
+    return any(kind in allowed[layer] for layer in required_layers)
+
+
+def _project_one_hop_dependencies(
+    *,
+    owned_targets: list[dict[str, Any]],
+    all_target_rows: list[dict[str, Any]],
+    frontend_subgraph: dict[str, list[dict[str, Any]]],
+    required_layers: list[str],
+) -> list[dict[str, Any]]:
+    owned_ids = {
+        str(row.get("module_id", "")) for row in owned_targets if row.get("module_id")
+    }
+    dependency_ids = {
+        str(value)
+        for row in owned_targets
+        for value in row.get("callees", [])
+        if str(value)
+    }
+    if "E2E" in required_layers:
+        api_ids = {
+            str(row.get("api_id", ""))
+            for table in ("journeys", "api_usages")
+            for row in frontend_subgraph.get(table, [])
+            if isinstance(row, dict) and str(row.get("api_id", ""))
+        }
+        api_ids.update(
+            str(value)
+            for row in frontend_subgraph.get("screens", [])
+            if isinstance(row, dict)
+            for value in row.get("required_api_ids", [])
+            if str(value)
+        )
+        dependency_ids.update(api_ids)
+        dependency_ids.update(f"API_CLIENT::{api_id}" for api_id in api_ids)
+
+    return sorted(
+        [
+            copy.deepcopy(row)
+            for row in all_target_rows
+            if str(row.get("module_id", "")) in dependency_ids - owned_ids
+            and _target_relevant_to_layers(row, required_layers)
+        ],
+        key=lambda row: str(row.get("module_id", "")),
+    )
+
+
+def _project_frontend_subgraph(
+    *,
+    requirement_id: str,
+    frontend_ir: dict[str, Any],
+    owned_targets: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    owned_ids = {
+        str(row.get("source_ir_id", row.get("module_id", "")))
+        for row in owned_targets
+    }
+    screens = [
+        copy.deepcopy(row)
+        for row in frontend_ir.get("screens", [])
+        if isinstance(row, dict)
+        and (
+            str(row.get("id", "")) in owned_ids
+            or requirement_id in {str(value) for value in row.get("requirement_ids", [])}
+        )
+    ]
+    primary_screen_ids = {str(row.get("id", "")) for row in screens}
+    route_index = {
+        str(row.get("route", "")): row
+        for row in frontend_ir.get("screens", [])
+        if isinstance(row, dict) and str(row.get("route", ""))
+    }
+    navigation_routes = {
+        str(target.get("target_route", ""))
+        for screen in screens
+        for target in screen.get("navigation_targets", [])
+        if isinstance(target, dict) and str(target.get("target_route", ""))
+    }
+    screen_ids = {str(row.get("id", "")) for row in screens}
+    for route in sorted(navigation_routes):
+        destination = route_index.get(route)
+        destination_id = str((destination or {}).get("id", ""))
+        if destination is not None and destination_id not in screen_ids:
+            screens.append(copy.deepcopy(destination))
+            screen_ids.add(destination_id)
+
+    journeys = [
+        copy.deepcopy(row)
+        for row in frontend_ir.get("journeys", [])
+        if isinstance(row, dict)
+        and (
+            str(row.get("requirement_id", "")) == requirement_id
+            or str(row.get("source_screen_id", "")) in primary_screen_ids
+        )
+    ]
+    api_ids = {
+        str(row.get("api_id", ""))
+        for row in journeys
+        if str(row.get("api_id", ""))
+    }
+    api_ids.update(
+        str(value)
+        for row in screens
+        for value in row.get("required_api_ids", [])
+        if str(value)
+    )
+    api_usages = [
+        copy.deepcopy(row)
+        for row in frontend_ir.get("api_usages", [])
+        if isinstance(row, dict)
+        and str(row.get("screen_id", row.get("consumer_id", ""))) in screen_ids
+    ]
+    shared_state_policies = [
+        copy.deepcopy(row)
+        for row in frontend_ir.get("shared_state_policies", [])
+        if isinstance(row, dict)
+        and (
+            str(row.get("id", "")) in owned_ids
+            or requirement_id in {str(value) for value in row.get("requirement_ids", [])}
+            or str(row.get("requirement_id", "")) == requirement_id
+        )
+    ]
+    return {
+        "screens": screens,
+        "journeys": journeys,
+        "api_usages": api_usages,
+        "shared_state_policies": shared_state_policies,
+    }
+
+
+def _referenced_type_ids(targets: list[dict[str, Any]]) -> set[str]:
+    result: set[str] = set()
+    for target in targets:
+        for key in ("input_type", "output_type", "props_type"):
+            reference = target.get(key)
+            if isinstance(reference, dict) and str(reference.get("type_id", "")):
+                result.add(str(reference["type_id"]))
+        for reference in target.get("store_types", []):
+            if isinstance(reference, dict) and str(reference.get("type_id", "")):
+                result.add(str(reference["type_id"]))
+    return result
+
+
+def _context_audit(
+    requirement_id: str, attempt: int, payload: dict[str, Any]
+) -> str:
+    def size(value: Any) -> int:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+    envelope = {
+        "instructions": TEST_GENERATION_INSTRUCTIONS,
+        "input_payload": payload,
+        "output_schema": TEST_GENERATION_SCHEMA,
+    }
+    fields = {
+        "context_total_chars": size(envelope),
+        "instructions_chars": size(TEST_GENERATION_INSTRUCTIONS),
+        "input_payload_chars": size(payload),
+        "output_schema_chars": size(TEST_GENERATION_SCHEMA),
+        "requirement_chars": size(payload.get("requirement", {})),
+        "contract_chars": size(payload.get("requirement_contract", {})),
+        "owned_targets_chars": size(payload.get("owned_targets", [])),
+        "dependency_chars": size(payload.get("one_hop_dependencies", [])),
+        "frontend_context_chars": size(payload.get("relevant_frontend_subgraph", {})),
+        "type_context_chars": size(payload.get("relevant_types", [])),
+    }
+    return (
+        f"CONTEXT_AUDIT phase=test_generation requirement={requirement_id} "
+        f"attempt={attempt} "
+        + " ".join(f"{key}={value}" for key, value in fields.items())
+    )
 
 
 def _plan_test_obligations(
@@ -1075,12 +1274,15 @@ def _validate_test_decision(
     target_modules = set(context_pack["target_modules"])
     owned_modules = {
         str(row.get("module_id", ""))
-        for row in context_pack["code_targets"].get("owned", [])
+        for row in context_pack.get("owned_targets", [])
         if isinstance(row, dict)
     }
     target_kinds = {
         str(row.get("module_id", "")): str(row.get("kind", ""))
-        for rows in context_pack["code_targets"].values()
+        for rows in (
+            context_pack.get("owned_targets", []),
+            context_pack.get("one_hop_dependencies", []),
+        )
         for row in rows
         if isinstance(row, dict)
     }
@@ -1255,7 +1457,10 @@ def _manifest_rows(
     }
     binding_by_id = {
         str(row.get("module_id", "")): row
-        for rows in context_pack["code_targets"].values()
+        for rows in (
+            context_pack.get("owned_targets", []),
+            context_pack.get("one_hop_dependencies", []),
+        )
         for row in rows
         if isinstance(row, dict)
     }
