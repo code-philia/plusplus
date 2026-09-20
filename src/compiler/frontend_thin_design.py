@@ -68,15 +68,30 @@ class ThinFrontendDesignPass:
         api_ids = {str(row.get("id")) for row in backend_design_ir.get("modules", []) if isinstance(row, dict) and row.get("kind") == "API"}
         issues: list[FrontendDesignIssue] = []
         feedback: list[str] = []
-        for _ in range(3):
+        for attempt in range(1, 4):
             request = {**payload, **({"validation_feedback": feedback} if feedback else {})}
+            request_envelope = {
+                "instructions": THIN_FRONTEND_INSTRUCTIONS,
+                "input_payload": request,
+                "output_schema": _provider_schema(THIN_FRONTEND_DECISION_SCHEMA),
+            }
+            self._log.info(
+                f"MODEL_REQUEST phase=thin_frontend_design attempt={attempt}/3"
+            )
+            self._log.info(
+                _context_audit(
+                    phase="thin_frontend_design",
+                    attempt=attempt,
+                    request_payload=request_envelope,
+                )
+            )
             started = time.perf_counter()
             try:
                 raw = self._model.generate_json(
                     schema_name="arc_thin_frontend_design",
                     instructions=THIN_FRONTEND_INSTRUCTIONS,
                     input_payload=request,
-                    output_schema=_provider_schema(THIN_FRONTEND_DECISION_SCHEMA),
+                    output_schema=request_envelope["output_schema"],
                 )
             except Exception as exc:
                 feedback = [f"Frontend model call failed: {describe_model_error(exc)}"]
@@ -100,6 +115,32 @@ class ThinFrontendDesignPass:
         if not issues:
             issues = [_issue(FrontendDesignErrorCode.UI_SCOPE_MODEL_FAILED, feedback[-1] if feedback else "Frontend model failed.")]
         return ThinFrontendDesignResult({}, {rid: "FAILED" for rid in requirement_ids}, [row.format() for row in issues])
+
+
+def _context_audit(
+    *,
+    phase: str,
+    attempt: int,
+    request_payload: dict[str, Any],
+) -> str:
+    def size(value: Any) -> int:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+    input_payload = request_payload.get("input_payload", {})
+    section_sizes = sorted(
+        ((str(key), size(value)) for key, value in input_payload.items()),
+        key=lambda item: item[1],
+        reverse=True,
+    ) if isinstance(input_payload, dict) else []
+    return (
+        f"CONTEXT_AUDIT phase={phase} attempt={attempt} "
+        f"context_total_chars={size(request_payload)} "
+        f"instructions_chars={size(request_payload.get('instructions', ''))} "
+        f"input_payload_chars={size(input_payload)} "
+        f"output_schema_chars={size(request_payload.get('output_schema', {}))} "
+        f"section_chars="
+        + ",".join(f"{key}:{value}" for key, value in section_sizes)
+    )
 
 
 def validate_thin_frontend_design(frontend_ir: dict[str, Any], *, expected_requirement_ids: set[str] | None = None, backend_api_ids: set[str] | None = None) -> list[FrontendDesignIssue]:

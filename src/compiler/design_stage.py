@@ -493,13 +493,22 @@ class DesignPass:
                     payload["validation_feedback"] = feedback
             self._trace(f"MODEL_REQUEST phase={phase} unit={unit_id} attempt={attempt + 1}/{self._local_retries + 1}")
             provider_schema = _provider_output_schema(output_schema)
-            self._trace_json("MODEL_INPUT", phase, unit_id, {
+            request_payload = {
                 "instructions": instructions,
                 "input_payload": payload,
                 "output_schema": provider_schema,
                 "local_validation_schema": output_schema,
                 "schema_name": schema_name,
-            })
+            }
+            self._trace(
+                _context_audit(
+                    phase=phase,
+                    unit_id=unit_id,
+                    attempt=attempt + 1,
+                    request_payload=request_payload,
+                )
+            )
+            self._trace_json("MODEL_INPUT", phase, unit_id, request_payload)
             started = time.perf_counter()
             try:
                 decision = self._model.generate_json(
@@ -1729,6 +1738,43 @@ def _safe(value: str) -> str:
 
 def _hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _context_audit(
+    *,
+    phase: str,
+    unit_id: str,
+    attempt: int,
+    request_payload: dict[str, Any],
+) -> str:
+    def size(value: Any) -> int:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+    input_payload = request_payload.get("input_payload", {})
+    section_sizes = sorted(
+        (
+            (str(key), size(value))
+            for key, value in input_payload.items()
+        )
+        if isinstance(input_payload, dict)
+        else [],
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    model_context = {
+        "instructions": request_payload.get("instructions", ""),
+        "input_payload": input_payload,
+        "output_schema": request_payload.get("output_schema", {}),
+    }
+    return (
+        f"CONTEXT_AUDIT phase={phase} unit={unit_id} attempt={attempt} "
+        f"context_total_chars={size(model_context)} "
+        f"instructions_chars={size(request_payload.get('instructions', ''))} "
+        f"input_payload_chars={size(input_payload)} "
+        f"output_schema_chars={size(request_payload.get('output_schema', {}))} "
+        f"section_chars="
+        + ",".join(f"{key}:{value}" for key, value in section_sizes)
+    )
 
 
 def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:

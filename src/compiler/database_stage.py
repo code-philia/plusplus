@@ -727,15 +727,24 @@ class DatabaseSchemaPass:
                 f"MODEL_REQUEST phase={phase} requirement={node_id} "
                 f"attempt={attempt + 1}/{self._retry_count + 1} schema={schema_name}"
             )
+            request_payload = {
+                "schema_name": schema_name,
+                "instructions": instructions,
+                "input_payload": payload,
+                "output_schema": output_schema,
+            }
+            self._trace(
+                _context_audit(
+                    phase=phase,
+                    requirement_id=node_id,
+                    attempt=attempt + 1,
+                    request_payload=request_payload,
+                )
+            )
             self._trace(
                 f"MODEL_INPUT phase={phase} requirement={node_id} attempt={attempt + 1}\n"
                 + json.dumps(
-                    {
-                        "schema_name": schema_name,
-                        "instructions": instructions,
-                        "input_payload": payload,
-                        "output_schema": output_schema,
-                    },
+                    request_payload,
                     ensure_ascii=False,
                     indent=2,
                     sort_keys=True,
@@ -1623,6 +1632,43 @@ def _ordered_waves(atomic_ids: Any, dependency_graph: dict[str, Any]) -> list[li
     if declared - seen:
         result.append(sorted(declared - seen))
     return result
+
+
+def _context_audit(
+    *,
+    phase: str,
+    requirement_id: str,
+    attempt: int,
+    request_payload: dict[str, Any],
+) -> str:
+    def size(value: Any) -> int:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+    input_payload = request_payload.get("input_payload", {})
+    section_sizes = sorted(
+        (
+            (str(key), size(value))
+            for key, value in input_payload.items()
+        )
+        if isinstance(input_payload, dict)
+        else [],
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    model_context = {
+        "instructions": request_payload.get("instructions", ""),
+        "input_payload": input_payload,
+        "output_schema": request_payload.get("output_schema", {}),
+    }
+    return (
+        f"CONTEXT_AUDIT phase={phase} requirement={requirement_id} attempt={attempt} "
+        f"context_total_chars={size(model_context)} "
+        f"instructions_chars={size(request_payload.get('instructions', ''))} "
+        f"input_payload_chars={size(input_payload)} "
+        f"output_schema_chars={size(request_payload.get('output_schema', {}))} "
+        f"section_chars="
+        + ",".join(f"{key}:{value}" for key, value in section_sizes)
+    )
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:

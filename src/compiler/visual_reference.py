@@ -567,23 +567,32 @@ class VisualReferenceAnalyzer:
                 f"MODEL_REQUEST phase=visual_reference_analysis unit={reference.id} "
                 f"attempt={attempt + 1}/{self._retry_count + 1}"
             )
+            request_payload = {
+                "schema_name": "arc_visual_reference_analysis",
+                "instructions": VISUAL_ANALYSIS_INSTRUCTIONS,
+                "input_payload": input_payload,
+                "image": {
+                    "source_path": reference.source_path,
+                    "sha256": reference.sha256,
+                    "media_type": reference.media_type,
+                    "byte_size": reference.byte_size,
+                    "detail": "high",
+                },
+                "output_schema": VISUAL_ANALYSIS_SCHEMA,
+                "local_validation_schema": VISUAL_ANALYSIS_SCHEMA,
+            }
+            self._trace(
+                _context_audit(
+                    unit_id=reference.id,
+                    attempt=attempt + 1,
+                    request_payload=request_payload,
+                    image_data_url=image_data_url,
+                )
+            )
             self._trace_json(
                 "MODEL_INPUT",
                 reference.id,
-                {
-                    "schema_name": "arc_visual_reference_analysis",
-                    "instructions": VISUAL_ANALYSIS_INSTRUCTIONS,
-                    "input_payload": input_payload,
-                    "image": {
-                        "source_path": reference.source_path,
-                        "sha256": reference.sha256,
-                        "media_type": reference.media_type,
-                        "byte_size": reference.byte_size,
-                        "detail": "high",
-                    },
-                    "output_schema": VISUAL_ANALYSIS_SCHEMA,
-                    "local_validation_schema": VISUAL_ANALYSIS_SCHEMA,
-                },
+                request_payload,
             )
             started = time.perf_counter()
             try:
@@ -676,6 +685,40 @@ class VisualReferenceAnalyzer:
             severity="WARNING",
             context={"source_path": reference.source_path, **context},
         )
+
+
+def _context_audit(
+    *,
+    unit_id: str,
+    attempt: int,
+    request_payload: dict[str, Any],
+    image_data_url: str,
+) -> str:
+    def size(value: Any) -> int:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+    input_payload = request_payload.get("input_payload", {})
+    section_sizes = sorted(
+        ((str(key), size(value)) for key, value in input_payload.items()),
+        key=lambda item: item[1],
+        reverse=True,
+    ) if isinstance(input_payload, dict) else []
+    total_chars = size(
+        {
+            **request_payload,
+            "image_data_url": image_data_url,
+        }
+    )
+    return (
+        f"CONTEXT_AUDIT phase=visual_reference_analysis unit={unit_id} "
+        f"attempt={attempt} context_total_chars={total_chars} "
+        f"instructions_chars={size(request_payload.get('instructions', ''))} "
+        f"input_payload_chars={size(input_payload)} "
+        f"image_data_chars={size(image_data_url)} "
+        f"output_schema_chars={size(request_payload.get('output_schema', {}))} "
+        f"section_chars="
+        + ",".join(f"{key}:{value}" for key, value in section_sizes)
+    )
 
 
 def _normalize_markdown_destination(value: str) -> str:

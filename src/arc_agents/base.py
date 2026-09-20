@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -66,7 +67,24 @@ class BaseStructuredAgent:
             payload = copy.deepcopy(input_payload)
             if feedback:
                 payload["agent_validation_feedback"] = feedback
-            self._emit(f"MODEL_REQUEST attempt={attempt}/{self._retries + 1}")
+            requirement_id = str(payload.get("requirement_id", ""))
+            mode = str(payload.get("implementation_mode", ""))
+            iteration = str(payload.get("iteration", ""))
+            self._emit(
+                f"MODEL_REQUEST requirement={requirement_id} mode={mode} "
+                f"iteration={iteration} attempt={attempt}/{self._retries + 1}"
+            )
+            self._emit(
+                _context_audit(
+                    requirement_id=requirement_id,
+                    mode=mode,
+                    iteration=iteration,
+                    attempt=attempt,
+                    instructions=self._instructions,
+                    input_payload=payload,
+                    output_schema=self._output_schema,
+                )
+            )
             try:
                 output = self._model.generate_json(
                     schema_name=self._schema_name,
@@ -112,3 +130,35 @@ def _describe_error(error: BaseException) -> str:
             next_error = current.__context__
         current = next_error
     return " <- ".join(parts)
+
+
+def _context_audit(
+    *,
+    requirement_id: str,
+    mode: str,
+    iteration: str,
+    attempt: int,
+    instructions: str,
+    input_payload: dict[str, Any],
+    output_schema: dict[str, Any],
+) -> str:
+    def size(value: Any) -> int:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+    section_sizes = sorted(
+        ((str(key), size(value)) for key, value in input_payload.items()),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    envelope = {
+        "instructions": instructions,
+        "input_payload": input_payload,
+        "output_schema": output_schema,
+    }
+    return (
+        f"CONTEXT_AUDIT requirement={requirement_id} phase=implementation mode={mode} "
+        f"iteration={iteration} attempt={attempt} context_total_chars={size(envelope)} "
+        f"instructions_chars={size(instructions)} input_payload_chars={size(input_payload)} "
+        f"output_schema_chars={size(output_schema)} section_chars="
+        + ",".join(f"{key}:{value}" for key, value in section_sizes)
+    )

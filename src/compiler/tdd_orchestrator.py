@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from arc_agents import ImplementationAgent, ImplementationRequest, JsonModel
 from arcbench_agent_runtime.jsonio import write_json_atomic
+from core.logging import SynchronousLog
 
 from .artifacts import CompilerArtifactStore
 from .code_binding import CodeTargetResolver
@@ -148,6 +149,9 @@ class NodeTDDOrchestrator:
         self.test_manifest = copy.deepcopy(test_manifest) if test_manifest else None
         self.policy = policy or NodeTDDPolicy.from_environment()
         self.artifact_store = artifact_store or CompilerArtifactStore(self.output_root)
+        self._log = SynchronousLog(
+            "NodeTDDOrchestrator", workspace_root=self.output_root
+        )
 
         self.test_generation = test_generation or RequirementTestGenerationPass(
             model,
@@ -159,6 +163,7 @@ class NodeTDDOrchestrator:
         self.implementation_agent = implementation_agent or ImplementationAgent(
             model,
             self.output_root,
+            trace=self._trace_implementation,
         )
         self.write_guard = write_guard or WriteGuard(self.output_root)
 
@@ -166,6 +171,9 @@ class NodeTDDOrchestrator:
         self._state_history: dict[str, list[str]] = {}
         self._accepted_results: dict[str, NodeTDDResult] = {}
         self._tdd_root = self.output_root / ".arc" / "tdd"
+
+    def _trace_implementation(self, message: str) -> None:
+        self._log.info(message)
 
     def run_node(self, requirement_id: str) -> NodeTDDResult:
         """Generate this node's tests and drive only this node to acceptance."""
