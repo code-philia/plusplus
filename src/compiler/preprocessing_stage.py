@@ -10,6 +10,10 @@ import yaml
 
 SUPPORTED_NODE_TYPES = {"FOLDER", "ATOMIC"}
 IMAGE_REFERENCE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+SEED_DATA_PATTERN = re.compile(
+    r"\bSeed\s+data\s*:\s*(.+?)(?=(?:\r?\n)|$)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -84,6 +88,11 @@ class RequirementPreprocessor:
             "atomic_units": atomic_ids,
             "folder_nodes": folder_ids,
             "nodes": dict(sorted(nodes.items())),
+            "seed_fixtures": [
+                fixture
+                for node_id in node_order
+                for fixture in nodes.get(node_id, {}).get("seed_fixtures", [])
+            ],
         }
         dependency_graph = {
             "schema_version": 1,
@@ -141,6 +150,13 @@ class RequirementPreprocessor:
         description = str(raw.get("description") or "").strip()
         visual_references = self._visual_references(raw.get("visual_reference"), description)
         scenarios = self._normalize_scenarios(raw.get("scenarios"), node_id, source, errors)
+        seed_fixtures = self._normalize_seed_fixtures(
+            raw.get("seed_data"),
+            description=description,
+            requirement_id=node_id,
+            source=source,
+            errors=errors,
+        )
 
         node = {
             "id": node_id,
@@ -152,6 +168,7 @@ class RequirementPreprocessor:
             "dependencies": dependencies,
             "visual_references": visual_references,
             "scenarios": scenarios,
+            "seed_fixtures": seed_fixtures,
             "source": {"document": source_name, "pointer": pointer},
         }
         if node_id not in nodes:
@@ -182,6 +199,7 @@ class RequirementPreprocessor:
             "dependencies": dependencies,
             "visual_reference": visual_references,
             "scenarios": scenarios,
+            "seed_fixtures": seed_fixtures,
             "source": node["source"],
             "children": normalized_children,
         }
@@ -226,6 +244,75 @@ class RequirementPreprocessor:
         values = [str(item).strip() for item in values if str(item).strip()]
         values.extend(match.strip() for match in IMAGE_REFERENCE_PATTERN.findall(description) if match.strip())
         return sorted(set(values))
+
+    @staticmethod
+    def _normalize_seed_fixtures(
+        explicit: Any,
+        *,
+        description: str,
+        requirement_id: str,
+        source: str,
+        errors: list[str],
+    ) -> list[dict[str, Any]]:
+        """Extract stable, compiler-owned fixtures from explicit or legacy input.
+
+        ``seed_data`` mappings are preserved as structured records. Existing
+        requirement suites commonly encode the same declaration as trailing
+        ``Seed data: ...`` prose; those declarations become typed fixture rows
+        without asking a model to invent paths, ids, or hidden repository data.
+        """
+
+        declarations: list[tuple[str, Any]] = []
+        if explicit is not None:
+            values = explicit if isinstance(explicit, list) else [explicit]
+            for value in values:
+                if isinstance(value, str) and value.strip():
+                    declarations.append(("seed_data", value.strip()))
+                elif isinstance(value, dict):
+                    declarations.append(("seed_data", value))
+                else:
+                    errors.append(
+                        _format_error(
+                            "ARC1204",
+                            "seed_data entries must be text or mappings.",
+                            node_id=requirement_id,
+                            source=source,
+                        )
+                    )
+        if explicit is None:
+            declarations.extend(
+                ("description", match.group(1).strip())
+                for match in SEED_DATA_PATTERN.finditer(description)
+                if match.group(1).strip()
+            )
+
+        fixtures: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for index, (origin, declaration) in enumerate(declarations, start=1):
+            if isinstance(declaration, dict):
+                normalized = _normalize_seed_mapping(declaration)
+                text = str(normalized.get("description") or "").strip()
+            else:
+                text = str(declaration).strip().rstrip()
+                normalized = {"description": text}
+            canonical = repr(normalized)
+            digest = hashlib.sha256(
+                f"{requirement_id}\0{index}\0{canonical}".encode("utf-8")
+            ).hexdigest()[:12]
+            fixture_id = f"FIXTURE.{_fixture_token(requirement_id)}.{digest}"
+            if fixture_id in seen:
+                continue
+            seen.add(fixture_id)
+            fixtures.append(
+                {
+                    "id": fixture_id,
+                    "requirement_id": requirement_id,
+                    "description": text,
+                    "records": normalized.get("records", []),
+                    "source": {"kind": origin, "location": source},
+                }
+            )
+        return fixtures
 
     @staticmethod
     def _validate_dependencies(nodes: dict[str, dict[str, Any]], errors: list[str]) -> None:
@@ -327,6 +414,47 @@ class RequirementPreprocessor:
             completed.update(wave)
             remaining.difference_update(wave)
         return waves
+
+
+def _normalize_seed_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    description = str(value.get("description") or value.get("name") or "").strip()
+    raw_records = value.get("records")
+    if raw_records is None and (value.get("entity") or value.get("values")):
+        raw_records = [
+            {
+                "entity": value.get("entity"),
+                "values": value.get("values", {}),
+            }
+        ]
+    records: list[dict[str, Any]] = []
+    for raw in raw_records if isinstance(raw_records, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        entity = str(raw.get("entity") or "").strip()
+        values = raw.get("values")
+        if not entity or not isinstance(values, dict):
+            continue
+        records.append(
+            {
+                "entity": entity,
+                "values": {
+                    str(key): item
+                    for key, item in sorted(values.items(), key=lambda pair: str(pair[0]))
+                    if str(key).strip()
+                    and isinstance(item, (str, int, float, bool, type(None)))
+                },
+            }
+        )
+    if not description and records:
+        description = "; ".join(
+            f"{record['entity']} {record['values']}" for record in records
+        )
+    return {"description": description, "records": records}
+
+
+def _fixture_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").upper()
+    return token or "REQUIREMENT"
 
 
 def _format_error(code: str, message: str, *, node_id: str | None = None, source: str | None = None) -> str:

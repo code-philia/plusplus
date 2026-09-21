@@ -120,6 +120,10 @@ Testing rules:
 - Code must be complete TypeScript with imports and test declarations, without markdown fences.
 - Do not use `.only`, skipped tests, snapshots, dynamic source discovery, filesystem searches, or line numbers.
 - Import only specifiers listed for that output layer. Use the exact import specifiers and exported symbols.
+- seed_fixtures is compiler-owned setup data, not application behavior. When it is non-empty, every generated
+  INTEGRATION or E2E file must import seedRequirement from the supplied support module and call it from beforeEach
+  (or test.beforeEach). E2E may call seedRequirement(requirement_id) directly. INTEGRATION must pass an applier that
+  POSTs {requirement_id} to /__arc/seed through Supertest(app). Never expect a read repository to manufacture fixtures.
 - Return exactly one JSON object and no prose.
 
 Output shape:
@@ -224,7 +228,7 @@ class TestEnvironmentInitializer:
                 "ARC4401 TEST_ENVIRONMENT_INVALID: root package workspaces must contain tests."
             )
         expected_scripts = {
-            "test:typecheck": "npm run typecheck -w @arc/tests",
+            "test:typecheck": "npm run typecheck",
             "test:list": (
                 "npm run list:vitest -w @arc/tests && npm run list:e2e -w @arc/tests"
             ),
@@ -313,7 +317,7 @@ class TestEnvironmentInitializer:
                 "support": "tests/support",
             },
             "validation_commands": [
-                "npm run typecheck -w @arc/tests",
+                "npm run typecheck",
                 "npm run list:vitest -w @arc/tests",
                 "npm run list:e2e -w @arc/tests",
             ],
@@ -373,7 +377,7 @@ class TestStaticValidator:
         test_files: list[str] | None = None,
     ) -> TestStaticValidationResult:
         commands: list[list[str]] = [
-            ["npm", "run", "typecheck", "-w", "@arc/tests"],
+            ["npm", "run", "typecheck"],
         ]
         selected_files = [
             _test_workspace_path(value)
@@ -874,6 +878,15 @@ def _build_context_pack(
                 "symbols": ["uniqueValue"],
             }
         )
+        if requirement.get("seed_fixtures") and layer in {"INTEGRATION", "E2E"}:
+            imports.append(
+                {
+                    "specifier": _relative_import(test_file, "tests/support/seed.ts"),
+                    "symbols": ["seedRequirement"],
+                }
+            )
+            if layer == "INTEGRATION":
+                imports[0]["symbols"] = ["beforeEach", "describe", "expect", "test"]
         if layer == "INTEGRATION":
             imports.extend(
                 [
@@ -910,7 +923,14 @@ def _build_context_pack(
         "requirement_id": requirement_id,
         "requirement": {
             key: copy.deepcopy(requirement.get(key))
-            for key in ("id", "name", "description", "scenarios", "dependencies")
+            for key in (
+                "id",
+                "name",
+                "description",
+                "scenarios",
+                "dependencies",
+                "seed_fixtures",
+            )
         },
         "requirement_contract": contracts.get(requirement_id, {}),
         "relevant_database_schema": schema_for_requirement(database_schema, requirement_id),
@@ -1472,6 +1492,19 @@ def _validate_test_code(
         errors.append(
             "ARC4427 TEST_IMPORT_INVALID: INTEGRATION must use Supertest and the exported app."
         )
+    seed_fixtures = context_pack.get("requirement", {}).get("seed_fixtures", [])
+    if seed_fixtures and layer in {"INTEGRATION", "E2E"}:
+        seed_import = _relative_import(
+            context_pack["output_files"][layer], "tests/support/seed.ts"
+        )
+        if seed_import not in imports or not re.search(r"\bseedRequirement\s*\(", code):
+            errors.append(
+                f"ARC4428 TEST_SEED_INVALID: {layer} must use the compiler-owned seedRequirement helper."
+            )
+        if not re.search(r"\b(?:beforeEach|test\.beforeEach)\s*\(", code):
+            errors.append(
+                f"ARC4428 TEST_SEED_INVALID: {layer} must apply fixtures in beforeEach."
+            )
     return errors
 
 

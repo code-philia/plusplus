@@ -84,6 +84,9 @@ Implementation rules:
 - Never create another SQLite/Drizzle connection, replace persistence with a module-level array or object, or report a
   successful database write after merely constructing an id or return value. The injected client is the sole owner of
   the connection, including when DATABASE_URL is `:memory:` during tests.
+- Seed fixtures are compiler-owned test setup. Never hard-code fixture records or `Seed data:` literals in a DB/FUNC/API
+  implementation, and never make a read repository insert, synthesize, or return missing fixture rows. Tests must apply
+  requirement.seed_fixtures through the compiler-owned seeding support before exercising application behavior.
 - In an HTTP handler, map only expected requirement-level validation and conflict failures to 4xx responses. Rethrow
   unexpected database, runtime, and compiler-glue errors so the global error handler and test diagnostics preserve the
   real root cause; never disguise every exception as invalid user input.

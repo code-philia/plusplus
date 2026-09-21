@@ -31,6 +31,12 @@ from .frontend_lowering import (
     FrontendGlobalSymbolPlanner,
     FrontendSkeletonLowerer,
 )
+from .fixture_stage import (
+    FixturePass,
+    attach_fixture_sets,
+    validate_fixture_ir,
+)
+from .fixture_lowering import FixtureLowerer, fixture_source_paths
 from .preprocessing_stage import RequirementPreprocessor
 from .model_client import Model, ModelConfigurationError, StructuredModel
 from .models import CompilationRequest, CompilationResult
@@ -83,6 +89,7 @@ class Compiler:
         design_reused = start_rank > stage_order["DESIGN"]
         frontend_design_reused = start_rank > stage_order["FRONTEND"]
         project_reused = start_rank > stage_order["PROJECT"]
+        fixtures_reused = start_rank >= stage_order["DESIGN"]
 
         # ===================================================================
         #                    Requirement Preprocessing Stage
@@ -233,6 +240,66 @@ class Compiler:
             self._runtime.traceability.merge_database_schema_links(links)
 
         # ===================================================================
+        #                    Compiler Fixture IR Stage
+        # ===================================================================
+
+        fixture_ir: dict[str, Any]
+        if fixtures_reused:
+            fixture_ir, fixture_read_error = artifact_store.read_fixture_ir()
+            fixture_errors = (
+                [fixture_read_error]
+                if fixture_read_error
+                else validate_fixture_ir(
+                    fixture_ir or {},
+                    database.schema,
+                    expected_requirement_ids=set(atomic_ids),
+                )
+            )
+            if fixture_errors:
+                for error in fixture_errors:
+                    await self._log("Compiler", f"ARC2402: Cannot reuse Fixture IR: {error}", "error")
+                return CompilationResult(
+                    ok=False,
+                    root_id=root_id,
+                    states=states,
+                    failed_nodes=atomic_ids,
+                    artifacts=artifacts,
+                )
+            fixture_ir = fixture_ir or {}
+            artifacts["fixture_ir"] = str(artifact_store.fixtures_root / "fixture_ir.json")
+        else:
+            try:
+                model = model or Model.from_env()
+            except ModelConfigurationError as exc:
+                await self._log("Compiler", str(exc), "error")
+                return CompilationResult(
+                    ok=False,
+                    root_id=root_id,
+                    states=states,
+                    failed_nodes=atomic_ids,
+                    artifacts=artifacts,
+                )
+            fixture_result = FixturePass(model, artifact_store.root).compile(
+                preprocessing.requirement_ir,
+                database.schema,
+            )
+            for warning in fixture_result.warnings:
+                await self._log("Compiler", warning, "warning")
+            for error in fixture_result.errors:
+                await self._log("Compiler", error, "error")
+            if not fixture_result.ok:
+                return CompilationResult(
+                    ok=False,
+                    root_id=root_id,
+                    states=states,
+                    failed_nodes=atomic_ids,
+                    artifacts=artifacts,
+                )
+            fixture_ir = fixture_result.fixture_ir
+            artifacts["fixture_ir"] = artifact_store.write_fixture_ir(fixture_ir)
+        attach_fixture_sets(preprocessing.requirement_ir, fixture_ir)
+
+        # ===================================================================
         #                    Compiler Design Stage
         # ===================================================================
 
@@ -302,6 +369,11 @@ class Compiler:
         states.update(design.node_states)
         for error in design.errors:
             await self._log("Compiler", error, "error")
+        if not design_reused:
+            # Partial design is a first-class diagnostic/checkpoint artifact.
+            # Persist it before the success gate so a failed requirement does
+            # not discard every earlier validated requirement in the run.
+            artifacts.update(artifact_store.write_design(design_ir=design.design_ir))
         if not design.ok:
             failed_nodes = sorted(node_id for node_id, state in states.items() if state == "FAILED")
             await self._log("Compiler", "DESIGN pass failed.", "error")
@@ -314,7 +386,6 @@ class Compiler:
             )
 
         if not design_reused:
-            artifacts.update(artifact_store.write_design(design_ir=design.design_ir))
             self._runtime.traceability.merge_design_links(design_traceability(design.design_ir))
 
         # ===================================================================
@@ -631,6 +702,7 @@ class Compiler:
             design.design_ir,
             symbol_planning.registry,
             project_manifest,
+            fixture_paths=fixture_source_paths(fixture_ir),
         )
         artifacts["backend_file_registry"] = artifact_store.write_file_registry(
             file_planning.registry
@@ -691,6 +763,15 @@ class Compiler:
             symbol_planning.registry,
             file_planning.registry,
         )
+        fixture_lowering = FixtureLowerer().lower(
+            fixture_ir,
+            database_lowering.manifest,
+        )
+        database_lowering.errors.extend(fixture_lowering.errors)
+        database_lowering.sources.update(fixture_lowering.sources)
+        if not database_lowering.errors:
+            database_lowering.manifest["planned_files"] = sorted(database_lowering.sources)
+            database_lowering.manifest["generated_files"] = sorted(database_lowering.sources)
         artifacts["backend_database_schema_manifest"] = (
             artifact_store.write_database_schema_manifest(database_lowering.manifest)
         )
@@ -1120,6 +1201,19 @@ class Compiler:
                 artifacts=artifacts,
             )
 
+        existing_test_manifest = None
+        if str(request.start_from).upper() == "TDD":
+            existing_test_manifest, manifest_error = artifact_store.read_test_manifest()
+            if manifest_error:
+                await self._log("Compiler", f"ARC4501: {manifest_error}", "error")
+                return CompilationResult(
+                    ok=False,
+                    root_id=root_id,
+                    states=states,
+                    failed_nodes=sorted(atomic_ids),
+                    artifacts=artifacts,
+                )
+
         orchestrator = NodeTDDOrchestrator(
             model,
             request.output_dir,
@@ -1131,6 +1225,8 @@ class Compiler:
             frontend_ir=frontend_ir,
             code_binding_registry=code_binding_registry,
             environment_manifest=test_environment.manifest,
+            test_manifest=existing_test_manifest,
+            resume=str(request.start_from).upper() == "TDD",
         )
         tdd_failed_nodes: list[str] = []
         for requirement_id in order:

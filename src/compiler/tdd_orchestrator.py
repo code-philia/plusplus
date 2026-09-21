@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import re
 from dataclasses import asdict, dataclass, field
@@ -44,7 +45,7 @@ TERMINAL_NODE_STATES = {
 
 @dataclass(frozen=True, slots=True)
 class NodeTDDPolicy:
-    """Budgets for one non-resumable requirement-local TDD run."""
+    """Budgets for one requirement-local TDD run."""
 
     max_iterations_per_node: int = 3
     no_progress_limit: int = 3
@@ -113,8 +114,8 @@ class NodeTDDOrchestrator:
 
     The implementation model can only propose marker-scoped edits. This class
     owns test execution, failure routing, write authorization, budgets, state,
-    regression checks, and artifacts. It intentionally does not restore prior
-    TDD state from disk; dependency acceptance is scoped to this instance.
+    regression checks, and artifacts. In explicit resume mode it restores only
+    validated NODE_ACCEPTED checkpoints; ordinary runs always start clean.
     """
 
     def __init__(
@@ -137,6 +138,7 @@ class NodeTDDOrchestrator:
         failure_analyzer: FailureAnalyzer | None = None,
         implementation_agent: ImplementationAgent | None = None,
         write_guard: WriteGuard | None = None,
+        resume: bool = False,
     ) -> None:
         self.output_root = output_root.expanduser().resolve()
         self.requirement_ir = copy.deepcopy(requirement_ir)
@@ -165,12 +167,17 @@ class NodeTDDOrchestrator:
             self.output_root,
             trace=self._trace_implementation,
         )
-        self.write_guard = write_guard or WriteGuard(self.output_root)
+        self.write_guard = write_guard or WriteGuard(
+            self.output_root,
+            requirement_ir=self.requirement_ir,
+        )
 
         self.node_states: dict[str, str] = {}
         self._state_history: dict[str, list[str]] = {}
         self._accepted_results: dict[str, NodeTDDResult] = {}
         self._tdd_root = self.output_root / ".arc" / "tdd"
+        if resume and self.test_manifest is not None:
+            self._restore_accepted_checkpoints()
 
     def _trace_implementation(self, message: str) -> None:
         self._log.info(message)
@@ -235,7 +242,7 @@ class NodeTDDOrchestrator:
             baseline = self._run_and_analyze(
                 requirement_id,
                 iteration=0,
-                include_typecheck=False,
+                include_typecheck=bool(frontend_implemented),
                 changed_files=sorted(changed_files),
             )
             result.infrastructure_retries += baseline.infrastructure_retries
@@ -401,6 +408,8 @@ class NodeTDDOrchestrator:
         requirement_id = str(requirement_id).strip()
         result = NodeTDDResult(requirement_id=requirement_id, status="INTERNAL_ERROR")
         try:
+            if self.node_states.get(requirement_id) == "NODE_ACCEPTED":
+                return copy.deepcopy(self._accepted_results[requirement_id])
             nodes = self.requirement_ir.get("nodes", {})
             requirement = nodes.get(requirement_id) if isinstance(nodes, dict) else None
             if not isinstance(requirement, dict) or requirement.get("type") != "FOLDER":
@@ -484,6 +493,15 @@ class NodeTDDOrchestrator:
                     applied.rejected_changes,
                     iterations=1,
                 )
+            verification_errors = self._verify_aggregate_patch()
+            if verification_errors:
+                return self._finish(
+                    result,
+                    "REGRESSION_FAILED",
+                    verification_errors,
+                    iterations=1,
+                    changed_files=set(applied.changed_files),
+                )
             self._transition(requirement_id, "AGGREGATE_IMPLEMENTED")
             return self._finish(
                 result,
@@ -500,6 +518,92 @@ class NodeTDDOrchestrator:
                 iterations=result.iterations,
                 changed_files=result.changed_files,
             )
+
+    def _verify_aggregate_patch(self) -> list[str]:
+        """Apply the same post-patch gates to aggregate and atomic edits."""
+
+        typecheck = self.test_runner.run_workspace_typecheck()
+        if typecheck.status != "PASSED":
+            detail = typecheck.stderr or typecheck.stdout or typecheck.error or "unknown failure"
+            return [
+                "ARC4549 AGGREGATE_TYPECHECK_FAILED: full workspace typecheck failed: "
+                + detail[-4000:]
+            ]
+        test_requirement_ids = {
+            str(row.get("requirement_id", ""))
+            for row in (self.test_manifest or {}).get("requirements", [])
+            if isinstance(row, dict)
+        }
+        for accepted_id in sorted(set(self._accepted_results) & test_requirement_ids):
+            test_run = self.test_runner.run(
+                TestSelection(
+                    requirement_id=accepted_id,
+                    include_typecheck=False,
+                    stop_on_failure=True,
+                ),
+                test_manifest=self.test_manifest,
+                environment_manifest=self.environment_manifest,
+            )
+            if not test_run.ok:
+                command_detail = next(
+                    (
+                        command.stderr or command.stdout or command.error
+                        for command in reversed(test_run.commands)
+                        if command.status != "PASSED"
+                    ),
+                    None,
+                )
+                return [
+                    f"ARC4549 AGGREGATE_REGRESSION_FAILED: accepted node {accepted_id} failed"
+                    + (f": {str(command_detail)[-4000:]}" if command_detail else ".")
+                ]
+        return []
+
+    def _restore_accepted_checkpoints(self) -> None:
+        nodes = self.requirement_ir.get("nodes", {})
+        if not isinstance(nodes, dict):
+            return
+        frozen_requirements = {
+            str(row.get("requirement_id", ""))
+            for row in (self.test_manifest or {}).get("requirements", [])
+            if isinstance(row, dict) and row.get("state") == "TESTS_FROZEN"
+        }
+        for requirement_id in nodes:
+            node = nodes.get(requirement_id, {})
+            if (
+                isinstance(node, dict)
+                and node.get("type") == "ATOMIC"
+                and str(requirement_id) not in frozen_requirements
+            ):
+                continue
+            path = self._node_root(str(requirement_id)) / "result.json"
+            if not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                not isinstance(payload, dict)
+                or payload.get("status") != "NODE_ACCEPTED"
+                or payload.get("errors")
+                or str(payload.get("requirement_id", "")) != str(requirement_id)
+            ):
+                continue
+            result = NodeTDDResult(
+                requirement_id=str(requirement_id),
+                status="NODE_ACCEPTED",
+                iterations=int(payload.get("iterations", 0)),
+                visual_iterations=int(payload.get("visual_iterations", 0)),
+                infrastructure_retries=int(payload.get("infrastructure_retries", 0)),
+                state_history=[str(value) for value in payload.get("state_history", [])],
+                changed_files=[str(value) for value in payload.get("changed_files", [])],
+                impacted_requirements=[str(value) for value in payload.get("impacted_requirements", [])],
+                artifacts={"result": str(path)},
+            )
+            self.node_states[str(requirement_id)] = "NODE_ACCEPTED"
+            self._state_history[str(requirement_id)] = list(result.state_history) or ["NODE_ACCEPTED"]
+            self._accepted_results[str(requirement_id)] = result
 
     def _preimplement_frontend(
         self,

@@ -268,6 +268,56 @@ def test_workspace_spec(
                 "  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;\n"
                 "}\n"
             ),
+            "support/seed.ts": (
+                'import { readFile } from "node:fs/promises";\n\n'
+                "export interface SeedReference {\n"
+                "  fixture_key: string;\n"
+                "  field: string;\n"
+                "}\n\n"
+                "export interface SeedRow {\n"
+                "  id: string;\n"
+                "  entity_key: string;\n"
+                "  fixture_key: string;\n"
+                "  insert_order: number;\n"
+                "  values: Record<string, string | number | boolean | null | SeedReference>;\n"
+                "}\n\n"
+                "export interface SeedFixtureSet {\n"
+                "  id: string;\n"
+                "  requirement_id: string;\n"
+                "  name: string;\n"
+                "  rows: SeedRow[];\n"
+                "}\n\n"
+                "let fixtureCache: SeedFixtureSet[] | undefined;\n\n"
+                "export async function seedFixturesForRequirement(\n"
+                "  requirementId: string,\n"
+                "): Promise<SeedFixtureSet[]> {\n"
+                "  const payload = JSON.parse(\n"
+                "    await readFile(\n"
+                '      new URL("../../.arc/fixtures/fixture_ir.json", import.meta.url),\n'
+                '      "utf8",\n'
+                "    ),\n"
+                "  ) as { fixture_sets?: SeedFixtureSet[] };\n"
+                "  fixtureCache ??= payload.fixture_sets ?? [];\n"
+                "  return fixtureCache.filter((fixture) => fixture.requirement_id === requirementId);\n"
+                "}\n\n"
+                "export async function seedRequirement(\n"
+                "  requirementId: string,\n"
+                "  apply?: (fixture: SeedFixtureSet) => Promise<void>,\n"
+                "): Promise<void> {\n"
+                "  const fixtures = await seedFixturesForRequirement(requirementId);\n"
+                "  if (apply) {\n"
+                "    for (const fixture of fixtures) await apply(fixture);\n"
+                "    return;\n"
+                "  }\n"
+                f'  const baseUrl = process.env.ARC_TEST_BASE_URL ?? "http://127.0.0.1:{port}";\n'
+                '  const response = await fetch(`${baseUrl}/__arc/seed`, {\n'
+                '    method: "POST",\n'
+                '    headers: { "content-type": "application/json" },\n'
+                "    body: JSON.stringify({ requirement_id: requirementId }),\n"
+                "  });\n"
+                '  if (!response.ok) throw new Error(`Seed request failed: ${response.status} ${await response.text()}`);\n'
+                "}\n"
+            ),
             "support/setup.ts": (
                 'process.env.DATABASE_URL ??= ":memory:";\n'
                 'process.env.NODE_ENV ??= "test";\n'
@@ -584,6 +634,7 @@ class ProjectInitializer:
             "tests/vitest.config.ts",
             "tests/playwright.config.ts",
             "tests/support/runtime.ts",
+            "tests/support/seed.ts",
             "tests/support/setup.ts",
         )
         missing = [relative for relative in expected if not (self.staged_project / relative).exists()]
@@ -903,9 +954,10 @@ class ProjectInitializer:
                 ),
                 "typecheck": (
                     "npm run build -w @arc/shared && npm run typecheck -w @arc/frontend "
-                    "&& npm run typecheck -w @arc/backend"
+                    "&& npm run typecheck -w @arc/backend "
+                    "&& npm run typecheck -w @arc/tests"
                 ),
-                "test:typecheck": "npm run typecheck -w @arc/tests",
+                "test:typecheck": "npm run typecheck",
                 "test:list": (
                     "npm run list:vitest -w @arc/tests && "
                     "npm run list:e2e -w @arc/tests"

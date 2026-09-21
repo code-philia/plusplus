@@ -30,6 +30,7 @@ class CompilerArtifactStore:
         # artifacts may use .arc/frontend independently.
         self.preprocessing_root = self.root / "preprocessing"
         self.database_root = self.root / "database"
+        self.fixtures_root = self.root / "fixtures"
         self.design_root = self.root / "design"
         self.backend_design_root = self.design_root / "backend"
         self.frontend_design_root = self.design_root / "frontend"
@@ -79,6 +80,23 @@ class CompilerArtifactStore:
         write_json_atomic(paths["requirement_ir"], requirements)
         write_json_atomic(paths["dependency_graph"], dependencies)
         return {name: str(path) for name, path in paths.items()}
+
+    def write_fixture_ir(self, fixture_ir: dict[str, Any]) -> str:
+        path = self.fixtures_root / "fixture_ir.json"
+        write_json_atomic(path, fixture_ir)
+        return str(path)
+
+    def read_fixture_ir(self) -> tuple[dict[str, Any] | None, str | None]:
+        path = self.fixtures_root / "fixture_ir.json"
+        if not path.is_file():
+            return None, f"Fixture IR does not exist: {path}"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return None, f"Cannot read Fixture IR: {exc}"
+        if not isinstance(payload, dict):
+            return None, f"Fixture IR must contain an object: {path}"
+        return payload, None
 
     def write_database(
         self,
@@ -588,6 +606,18 @@ class CompilerArtifactStore:
         path = self.tests_root / "test_manifest.json"
         write_json_atomic(path, manifest)
         return str(path)
+
+    def read_test_manifest(self) -> tuple[dict[str, Any] | None, str | None]:
+        path = self.tests_root / "test_manifest.json"
+        if not path.is_file():
+            return None, None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return None, f"Cannot read Test Manifest: {exc}"
+        if not isinstance(payload, dict):
+            return None, f"Test Manifest must contain an object: {path}"
+        return payload, None
 
     def write_generated_tests(self, sources: dict[str, str]) -> dict[str, str]:
         output_root = self.root.parent

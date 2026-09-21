@@ -7,12 +7,14 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from core.logging import SynchronousLog
+from arcbench_agent_runtime.jsonio import write_json_atomic
 
 from .model_client import StructuredModel, describe_model_error
 from .trace_payload import format_payload_trace
@@ -26,6 +28,7 @@ OBLIGATION_KINDS = {
     "PERSISTENCE", "TRANSACTION", "IDEMPOTENCY", "EXTERNAL_INTERACTION",
     "ERROR_MAPPING",
 }
+SELF_OBLIGATION_OWNER_KINDS = frozenset({"API", "FUNC", "DB"})
 REPAIR_CURRENT = "REPAIR_CURRENT"
 REOPEN_PARENT = "REOPEN_PARENT"
 UNRESOLVED = "UNRESOLVED"
@@ -270,6 +273,18 @@ MODULE_DECOMPOSITION_INSTRUCTIONS = MODULE_DECOMPOSITION_INSTRUCTIONS.replace(
     "and graph relationships. Return only `{\"self_obligation_ids\": [...], \"modules\": [...]}`.",
 )
 
+_SELF_OWNERSHIP_RULE = (
+    "Authoritative ownership rule: only module kinds "
+    + ", ".join(sorted(SELF_OBLIGATION_OWNER_KINDS))
+    + " may use self_obligation_ids. The validator reads this same compiler constant."
+)
+API_DECOMPOSITION_INSTRUCTIONS = (
+    API_DECOMPOSITION_INSTRUCTIONS.rstrip() + "\n\n" + _SELF_OWNERSHIP_RULE + "\n"
+)
+MODULE_DECOMPOSITION_INSTRUCTIONS = (
+    MODULE_DECOMPOSITION_INSTRUCTIONS.rstrip() + "\n\n" + _SELF_OWNERSHIP_RULE + "\n"
+)
+
 
 @dataclass(slots=True)
 class DesignIssue:
@@ -306,7 +321,10 @@ class DesignIssue:
             "DB_EFFECT_REQUIRED": "Repair: a DB child must own at least one exact READ/CREATE/UPDATE/DELETE effect from the parent.",
             "DB_OBLIGATION_INVALID": "Repair: DB children may own only PERSISTENCE obligations; move validation/error/control obligations to FUNC children.",
             "PERSISTENCE_OBLIGATION_DB_MISSING": "Repair: add a DB implementation owner on the obligation's child path; negative persistence rules still require a DB-backed responsibility.",
-            "OBLIGATION_IMPLEMENTATION_MISSING": "Repair: assign this exact obligation id to an implementable FUNC/DB module; do not leave it only on the API.",
+            "OBLIGATION_IMPLEMENTATION_MISSING": (
+                "Repair: assign this exact obligation id through self_obligation_ids on one of the "
+                f"allowed owner kinds ({', '.join(sorted(SELF_OBLIGATION_OWNER_KINDS))}), or to a terminal FUNC/DB owner."
+            ),
         }.get(self.code)
         return f"{self.code}: {self.message}" + (f" {guidance}" if guidance else "")
 
@@ -376,6 +394,7 @@ class DesignPass:
         self._model = model
         arc_root = artifact_root.expanduser().resolve()
         self._log = SynchronousLog("DesignPass", workspace_root=arc_root.parent)
+        self._partial_root = arc_root / "design" / ".partial"
         self._local_retries = _env_int("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", 2, 0, 10)
         self._reopen_budget = _env_int("ARC_DESIGN_REOPEN_COUNT", 2, 0, 6)
         self._trace_enabled = _env_flag("ARC_DESIGN_TRACE", True)
@@ -390,6 +409,7 @@ class DesignPass:
         dependencies = dependency_graph.get("atomic_dependencies", {})
         order = [node for wave in _waves(requirement_ir, dependency_graph) for node in wave]
         state = DesignState()
+        shutil.rmtree(self._partial_root, ignore_errors=True)
         all_issues: list[DesignIssue] = []
         states: dict[str, str] = {}
 
@@ -454,6 +474,7 @@ class DesignPass:
                 break
             state = compiled
             states[requirement_id] = "DESIGN_VALIDATED"
+            self._persist_requirement_checkpoint(state, requirement_id)
 
         final_issues = all_issues
         design = state.to_ir()
@@ -464,6 +485,32 @@ class DesignPass:
                     states[issue.blame_symbol] = "FAILED"
         errors = [f"{issue.code}: {issue.message}" for issue in final_issues]
         return DesignPassResult(design, states, errors)
+
+    def _persist_requirement_checkpoint(
+        self,
+        state: DesignState,
+        requirement_id: str,
+    ) -> None:
+        design = state.to_ir()
+        payload = {
+            "schema_version": 1,
+            "status": "DESIGN_VALIDATED",
+            "requirement": next(
+                (
+                    copy.deepcopy(row)
+                    for row in design.get("requirements", [])
+                    if str(row.get("id", "")) == requirement_id
+                ),
+                {},
+            ),
+            "modules": [
+                copy.deepcopy(row)
+                for row in design.get("modules", [])
+                if str(row.get("owner_requirement", "")) == requirement_id
+            ],
+        }
+        token = re.sub(r"[^a-z0-9]+", "-", requirement_id.lower()).strip("-") or "requirement"
+        write_json_atomic(self._partial_root / f"{token}.json", payload)
 
     def _compile_requirement(
         self,
@@ -518,7 +565,15 @@ class DesignPass:
                     break
                 trial = expanded
             if not failure:
-                return trial, []
+                completeness = _behavioral_completeness_issues(
+                    trial.to_ir(),
+                    requirement_ids={requirement_id},
+                )
+                if not completeness:
+                    return trial, []
+                for issue in completeness:
+                    issue.repair_action = REOPEN_PARENT
+                failure = completeness
             last_issues = failure
             if not any(issue.repair_action == REOPEN_PARENT for issue in failure):
                 return None, failure
@@ -882,6 +937,8 @@ def _api_plan_issues(value: dict[str, Any], requirement_id: str, contract: dict[
     allocated_effects: list[str] = []
     allocated_obligations: list[str] = []
     self_obligations = [str(value) for value in value.get("self_obligation_ids", [])]
+    if self_obligations and "API" not in SELF_OBLIGATION_OWNER_KINDS:
+        issues.append(_issue("SELF_OBLIGATION_OWNER_INVALID", "API may not own obligations directly", "REQUIREMENT_API", requirement_id))
     allocated_obligations.extend(self_obligations)
     unknown_self = set(self_obligations) - expected_obligations
     if unknown_self:
@@ -939,6 +996,8 @@ def _simple_decomposition_issues(
     allocated_effects: list[str] = []
     allocated_obligations: list[str] = []
     self_obligations = [str(item) for item in value.get("self_obligation_ids", [])]
+    if self_obligations and str(parent.get("kind", "")) not in SELF_OBLIGATION_OWNER_KINDS:
+        issues.append(_issue("SELF_OBLIGATION_OWNER_INVALID", f"{parent.get('kind')} may not own obligations directly", "MODULE_DECOMPOSITION", parent_id))
     allocated_obligations.extend(self_obligations)
     unknown_self = set(self_obligations) - set(expected_obligations)
     if unknown_self:
@@ -1144,7 +1203,11 @@ def _simple_interface_field_issues(
     return issues
 
 
-def _behavioral_completeness_issues(design_ir: dict[str, Any]) -> list[DesignIssue]:
+def _behavioral_completeness_issues(
+    design_ir: dict[str, Any],
+    *,
+    requirement_ids: set[str] | None = None,
+) -> list[DesignIssue]:
     """Ensure every frozen obligation reaches an implementable module seam."""
 
     issues: list[DesignIssue] = []
@@ -1156,28 +1219,37 @@ def _behavioral_completeness_issues(design_ir: dict[str, Any]) -> list[DesignIss
             ).append(module)
     for requirement in design_ir.get("requirements", []):
         requirement_id = str(requirement.get("id", ""))
+        if requirement_ids is not None and requirement_id not in requirement_ids:
+            continue
         contract = requirement.get("contract", {})
         modules = modules_by_requirement.get(requirement_id, [])
         for obligation in contract.get("obligations", []):
             obligation_id = str(obligation.get("id", ""))
             implementers = [
                 module for module in modules
-                if obligation_id in {
-                    *{
-                        str(value)
-                        for value in module.get("self_obligation_ids", [])
-                    },
-                    *{
-                    str(row.get("id", ""))
-                    for row in module.get("obligations", [])
-                    if isinstance(row, dict)
-                    },
-                }
+                if (
+                    (
+                        str(module.get("kind", "")) in SELF_OBLIGATION_OWNER_KINDS
+                        and obligation_id in {
+                            str(value) for value in module.get("self_obligation_ids", [])
+                        }
+                    )
+                    or (
+                        str(module.get("kind", "")) in {"FUNC", "DB"}
+                        and not module.get("callees")
+                        and obligation_id in {
+                            str(row.get("id", ""))
+                            for row in module.get("obligations", [])
+                            if isinstance(row, dict)
+                        }
+                    )
+                )
             ]
             if not implementers:
                 issues.append(_issue(
                     "OBLIGATION_IMPLEMENTATION_MISSING",
-                    f"Behavioral obligation {obligation_id} has no implementation owner (self-owned parent, FUNC, or DB)",
+                    f"Behavioral obligation {obligation_id} has no implementation owner; "
+                    f"self owners are {sorted(SELF_OBLIGATION_OWNER_KINDS)}",
                     "DESIGN_COMPLETENESS",
                     requirement_id,
                 ))

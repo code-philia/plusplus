@@ -15,6 +15,7 @@ BACKEND_MANIFEST_GENERATED = "BACKEND_MANIFEST_GENERATED"
 
 SYSTEM_GLUE_FILES = {
     "backend/src/db/client.ts",
+    "backend/src/fixtures/index.ts",
     "backend/src/generated/router.ts",
     "backend/src/generated/module-registry.ts",
     "backend/src/generated/dependency-registry.ts",
@@ -499,6 +500,7 @@ def _render_glue(
         _import("ErrorRequestHandler", "express", type_only=True),
         _import("fileURLToPath", "node:url"),
         _import("sqliteDatabase", "./db/client.js", source=database_path),
+        _import("seedFor", "./fixtures/index.js", source="backend/src/fixtures/index.ts"),
         _import("router", "./generated/router.js", source=router_path),
     ]
     sources[app_path] = _render_app(app_imports)
@@ -617,6 +619,16 @@ def _render_app(imports: list[dict[str, Any]]) -> str:
             "app.use(express.json());",
             'app.get("/__arc/health", (_request, response) => {',
             '  response.status(200).json({ status: "ok", service: "arc-backend" });',
+            "});",
+            'app.post("/__arc/seed", (request, response) => {',
+            '  if (process.env.NODE_ENV !== "test") {',
+            '    response.status(404).json({ error: "Not found" });',
+            "    return;",
+            "  }",
+            '  const requirementId = typeof request.body?.requirement_id === "string" ? request.body.requirement_id : "";',
+            '  if (!requirementId) { response.status(400).json({ error: "requirement_id is required" }); return; }',
+            "  seedFor(requirementId);",
+            "  response.status(204).end();",
             "});",
             "app.use(router);",
             "app.use(express.static(frontendDist));",

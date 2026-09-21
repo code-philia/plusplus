@@ -56,8 +56,14 @@ class _PlannedFile:
 class WriteGuard:
     """Validate and apply marker-scoped source replacements for one requirement."""
 
-    def __init__(self, output_root: Path) -> None:
+    def __init__(
+        self,
+        output_root: Path,
+        *,
+        requirement_ir: dict[str, Any] | None = None,
+    ) -> None:
         self.output_root = output_root.expanduser().resolve()
+        self.requirement_ir = requirement_ir or {}
 
     def apply(
         self,
@@ -129,6 +135,14 @@ class WriteGuard:
             replacement_error = _replacement_error(edit.replacement)
             if replacement_error:
                 rejected.append(f"ARC4525 PATCH_CONTENT_INVALID: {module_id}: {replacement_error}")
+                continue
+            seed_error = self._seed_data_error(
+                requirement_id=requirement_id,
+                binding=binding,
+                replacement=edit.replacement,
+            )
+            if seed_error:
+                rejected.append(f"ARC4553 SEED_DATA_IN_REPOSITORY: {module_id}: {seed_error}")
                 continue
             edits_by_file.setdefault(relative, []).append((edit, binding))
         if rejected:
@@ -258,6 +272,44 @@ class WriteGuard:
             ),
             applied_edits=applied_edits,
         )
+
+    def _seed_data_error(
+        self,
+        *,
+        requirement_id: str,
+        binding: dict[str, Any],
+        replacement: str,
+    ) -> str | None:
+        if str(binding.get("kind", "")).upper() != "DB":
+            return None
+        nodes = self.requirement_ir.get("nodes", {})
+        node = nodes.get(requirement_id, {}) if isinstance(nodes, dict) else {}
+        fixtures = node.get("seed_fixtures", []) if isinstance(node, dict) else []
+        if not fixtures:
+            return None
+        lowered = replacement.casefold()
+        if re.search(r"\bseed\s+data\b|\bfixture(?:s)?\b", lowered):
+            return "DB implementation regions must not contain fixture setup."
+        description_literals = {
+            match.group(1).strip().casefold()
+            for fixture in fixtures
+            if isinstance(fixture, dict)
+            for match in re.finditer(r'["“]([^"”]{4,})["”]', str(fixture.get("description", "")))
+        }
+        row_literals = {
+            str(value).casefold()
+            for fixture in fixtures
+            if isinstance(fixture, dict)
+            for row in fixture.get("rows", [])
+            if isinstance(row, dict)
+            for value in row.get("values", {}).values()
+            if isinstance(value, str) and len(value.strip()) >= 4
+        }
+        literals = description_literals | row_literals
+        leaked = sorted(value for value in literals if value and value in lowered)
+        if leaked:
+            return f"fixture literals belong in seed setup, not DB reads/writes: {leaked}."
+        return None
 
     @staticmethod
     def _rejected(requirement_id: str, messages: list[str]) -> ApplyResult:

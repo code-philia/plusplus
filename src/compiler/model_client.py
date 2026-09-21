@@ -53,7 +53,7 @@ class Model:
         api_key: str,
         base_url: str = "https://api.openai.com/v1",
         timeout_seconds: float = 120.0,
-        transport_retries: int = 0,
+        transport_retries: int = 3,
     ) -> None:
         if not model.strip():
             raise ModelConfigurationError("MODEL is required for semantic compiler passes.")
@@ -81,7 +81,7 @@ class Model:
             base_url=os.environ.get("OPENAI_BASE_URL", "").strip()
             or "https://api.openai.com/v1",
             timeout_seconds=_positive_env_float("ARC_MODEL_TIMEOUT_SECONDS", 120.0),
-            transport_retries=_nonnegative_env_int("ARC_MODEL_TRANSPORT_RETRIES", 0),
+            transport_retries=_nonnegative_env_int("ARC_MODEL_TRANSPORT_RETRIES", 3),
         )
 
     def generate_json(

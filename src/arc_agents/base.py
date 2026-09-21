@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -96,6 +97,12 @@ class BaseStructuredAgent:
                 last_errors = [f"AGENT_MODEL_FAILED: {_describe_error(exc)}"]
                 feedback = last_errors
                 self._emit(last_errors[0])
+                if attempt <= self._retries:
+                    delay = _transport_retry_delay(attempt)
+                    self._emit(
+                        f"MODEL_RETRY_BACKOFF attempt={attempt} delay_seconds={delay:g}"
+                    )
+                    time.sleep(delay)
                 continue
             validation_errors = validate(output)
             if not validation_errors:
@@ -130,6 +137,13 @@ def _describe_error(error: BaseException) -> str:
             next_error = current.__context__
         current = next_error
     return " <- ".join(parts)
+
+
+def _transport_retry_delay(attempt: int) -> float:
+    """Return the bounded 2s/8s/30s retry schedule for model transport faults."""
+
+    schedule = (2.0, 8.0, 30.0)
+    return schedule[min(max(1, int(attempt)), len(schedule)) - 1]
 
 
 def _context_audit(

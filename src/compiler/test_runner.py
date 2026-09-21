@@ -271,7 +271,7 @@ class TestRunner:
             typecheck = self._execute(
                 phase="TYPECHECK",
                 layer=None,
-                command=["npm", "run", "typecheck", "-w", "@arc/tests"],
+                command=["npm", "run", "typecheck"],
                 test_files=selected_files,
                 timeout=self._timeouts["TYPECHECK"],
             )
@@ -299,6 +299,17 @@ class TestRunner:
             if command_result.status != "PASSED" and selection.stop_on_failure:
                 break
         return self._finish(result, started)
+
+    def run_workspace_typecheck(self) -> TestCommandResult:
+        """Type-check every generated workspace after any implementation patch."""
+
+        return self._execute(
+            phase="TYPECHECK",
+            layer=None,
+            command=["npm", "run", "typecheck"],
+            test_files=[],
+            timeout=self._timeouts["TYPECHECK"],
+        )
 
     def _validate_frozen_file(self, row: dict[str, Any]) -> str | None:
         relative = str(row.get("test_file", "")).replace("\\", "/").strip().strip("/")
