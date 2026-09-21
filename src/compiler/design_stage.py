@@ -78,10 +78,11 @@ OBLIGATION_SCHEMA: dict[str, Any] = {
 REQUIREMENT_CONTRACT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["requirement_id", "spec", "inputs", "outputs", "effects", "obligations"],
+    "required": ["requirement_id", "spec", "server_state", "inputs", "outputs", "effects", "obligations"],
     "properties": {
         "requirement_id": {"type": "string"},
         "spec": {"type": "string", "maxLength": 800},
+        "server_state": {"type": "boolean"},
         "inputs": {"type": "array", "items": FIELD_SCHEMA},
         "outputs": {"type": "array", "items": FIELD_SCHEMA},
         "effects": {"type": "array", "items": EFFECT_SCHEMA},
@@ -157,7 +158,11 @@ API_DECOMPOSITION_SCHEMA: dict[str, Any] = {
 
 REQUIREMENT_CONTRACT_INSTRUCTIONS = """Analyze one atomic requirement as a black box and fill the supplied fixed
 template. Keep every required key and use [] when a section is empty. Describe only the requirement spec, external
-inputs, observable outputs, required effects, and behavioral obligations. Every supplied scenario id must be covered
+inputs, observable outputs, required effects, and behavioral obligations. Set server_state to true only when satisfying
+the requirement requires server-side state or server responsibilities (database access, runtime session/cookie state,
+external interaction, authorization, persistence, transaction, idempotency, or another server-owned state transition).
+Presentation, navigation, and client-local state are server_state=false and must have no server effects or server-owned
+obligations. Every supplied scenario id must be covered
 by at least one obligation. Obligations capture validation, authorization, computation, state transition, persistence,
 transaction, idempotency, external interaction, or error mapping responsibilities; keep them implementation-neutral.
 Whenever the contract contains a READ, CREATE, UPDATE, or DELETE effect, include at least one PERSISTENCE obligation
@@ -178,7 +183,7 @@ Do not design modules, calls, steps, bindings, outcomes, guards, or algorithms. 
 or fewer). Return only the structured object.
 
 Example shape:
-{"requirement_id":"REQ-1.1","spec":"Register one traveler.","inputs":[{"semantic_id":"registration.username","name":"username","type":"string","description":"Requested username.","required":true}],"outputs":[{"semantic_id":"traveler.id","name":"traveler_id","type":"uuid","description":"Created traveler id.","required":true}],"effects":[{"id":"create_traveler","operation":"CREATE","target":"traveler","fields":["username"]}],"obligations":[{"id":"validate_registration","kind":"VALIDATION","description":"Reject invalid registration data.","scenario_ids":["REQ-1.1:scenario:1"]}]}
+{"requirement_id":"REQ-1.1","spec":"Register one traveler.","server_state":true,"inputs":[{"semantic_id":"registration.username","name":"username","type":"string","description":"Requested username.","required":true}],"outputs":[{"semantic_id":"traveler.id","name":"traveler_id","type":"uuid","description":"Created traveler id.","required":true}],"effects":[{"id":"create_traveler","operation":"CREATE","target":"traveler","fields":["username"]}],"obligations":[{"id":"validate_registration","kind":"VALIDATION","description":"Reject invalid registration data.","scenario_ids":["REQ-1.1:scenario:1"]}]}
 """
 
 API_DECOMPOSITION_INSTRUCTIONS = """Turn one Requirement Contract into API modules. Keep one user action in one API
@@ -200,7 +205,9 @@ Silently plan how the parent responsibility is completed, then return only its d
 Every child contains exactly seven top-level fields: kind, name, spec, inputs, outputs, effects, and obligation_ids. Each interface field
 contains semantic_id, name, type, and required. Preserve required exactly when reusing a parent field; mark newly
 introduced values required only when the child cannot complete without them. An API may call FUNC only. A
-FUNC may contain its own logic and may call FUNC or DB modules. A DB module is always a leaf. The list order is the call
+FUNC may contain its own logic and may call FUNC or DB modules. The compiler-provided schema is authoritative: below an
+API, at most two FUNC levels may be materialized; when the current FUNC is already at level two, only DB children (or no
+children) are legal. A DB module is always a leaf. The list order is the call
 order. A module input must come from the parent inputs or an earlier child output. Copy the exact interface field and
 effect identifiers supplied in the Markdown. Keep child responsibilities cohesive and smaller than the parent. Return
 an empty modules list when a FUNC can complete its remaining pure logic itself. Database effects are exactly READ,
@@ -334,6 +341,7 @@ class DesignPassResult:
     design_ir: dict[str, Any]
     node_states: dict[str, str]
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -411,6 +419,7 @@ class DesignPass:
         state = DesignState()
         shutil.rmtree(self._partial_root, ignore_errors=True)
         all_issues: list[DesignIssue] = []
+        warnings: list[str] = []
         states: dict[str, str] = {}
 
         for requirement_id in order:
@@ -461,18 +470,24 @@ class DesignPass:
                     "source=database_unique_constraints"
                 )
             base.requirement_contracts[requirement_id] = contract
-            compiled, issues = self._compile_requirement(
-                base,
-                requirement_id,
-                requirement,
-                contract,
-                design_context,
-            )
+            if not contract.get("server_state", True):
+                compiled, issues = base, []
+            else:
+                compiled, issues = self._compile_requirement(
+                    base,
+                    requirement_id,
+                    requirement,
+                    contract,
+                    design_context,
+                )
             if compiled is None:
                 states[requirement_id] = "FAILED"
                 all_issues.extend(issues)
                 break
             state = compiled
+            collapsed, collapse_warnings = _collapse_passthrough_modules(state, requirement_id)
+            state = collapsed
+            warnings.extend(collapse_warnings)
             states[requirement_id] = "DESIGN_VALIDATED"
             self._persist_requirement_checkpoint(state, requirement_id)
 
@@ -484,7 +499,7 @@ class DesignPass:
                 if issue.blame_symbol in states:
                     states[issue.blame_symbol] = "FAILED"
         errors = [f"{issue.code}: {issue.message}" for issue in final_issues]
-        return DesignPassResult(design, states, errors)
+        return DesignPassResult(design, states, errors, warnings)
 
     def _persist_requirement_checkpoint(
         self,
@@ -692,7 +707,7 @@ class DesignPass:
         seen_failures: set[str] = set()
         last_issues: list[DesignIssue] = []
         for reopen_attempt in range(self._reopen_budget + 1):
-            decomposition_schema = _module_decomposition_output_schema(module)
+            decomposition_schema = _module_decomposition_output_schema(module, depth=depth)
             context_markdown = _module_decomposition_markdown(
                 requirement,
                 design_context,
@@ -853,6 +868,9 @@ def _requirement_contract_issues(
         issues.append(_issue("CONTRACT_ID_MISMATCH", "requirement_id must match the fixed requirement", "REQUIREMENT_CONTRACT", requirement_id))
     if not str(value.get("spec", "")).strip():
         issues.append(_issue("CONTRACT_SPEC_EMPTY", "spec must not be empty", "REQUIREMENT_CONTRACT", requirement_id))
+    server_state = value.get("server_state")
+    if not isinstance(server_state, bool):
+        issues.append(_issue("CONTRACT_SERVER_STATE_INVALID", "server_state must be a boolean", "REQUIREMENT_CONTRACT", requirement_id))
     issues.extend(_field_issues(value.get("inputs", []), "requirement inputs", requirement_id))
     issues.extend(_field_issues(value.get("outputs", []), "requirement outputs", requirement_id))
     input_fields = _simple_field_catalog(value.get("inputs", []))
@@ -909,6 +927,23 @@ def _requirement_contract_issues(
         str(effect.get("operation", "")) in DATABASE_EFFECT_OPERATIONS
         for effect in value.get("effects", [])
     )
+    if server_state is False:
+        server_effects = [
+            str(effect.get("operation", ""))
+            for effect in value.get("effects", [])
+            if str(effect.get("operation", "")) in EFFECT_OPERATIONS
+        ]
+        server_obligations = [
+            str(obligation.get("kind", ""))
+            for obligation in value.get("obligations", [])
+            if str(obligation.get("kind", "")) in {
+                "AUTHORIZATION", "PERSISTENCE", "TRANSACTION", "IDEMPOTENCY", "EXTERNAL_INTERACTION",
+            }
+        ]
+        if server_effects:
+            issues.append(_issue("FRONTEND_ONLY_SERVER_EFFECT", f"server_state=false cannot declare server effects: {sorted(set(server_effects))}", "REQUIREMENT_CONTRACT", requirement_id))
+        if server_obligations:
+            issues.append(_issue("FRONTEND_ONLY_SERVER_OBLIGATION", f"server_state=false cannot declare server obligations: {sorted(set(server_obligations))}", "REQUIREMENT_CONTRACT", requirement_id))
     if has_database_effect and not any(
         obligation.get("kind") == "PERSISTENCE"
         for obligation in value.get("obligations", [])
@@ -1222,6 +1257,8 @@ def _behavioral_completeness_issues(
         if requirement_ids is not None and requirement_id not in requirement_ids:
             continue
         contract = requirement.get("contract", {})
+        if contract.get("server_state") is False:
+            continue
         modules = modules_by_requirement.get(requirement_id, [])
         for obligation in contract.get("obligations", []):
             obligation_id = str(obligation.get("id", ""))
@@ -1374,8 +1411,76 @@ def _materialize_simple_decomposition(
     return child_ids, []
 
 
+def _collapse_passthrough_modules(
+    state: DesignState,
+    requirement_id: str,
+) -> tuple[DesignState, list[str]]:
+    """Remove FUNC nodes that only forward to one equivalent FUNC child."""
+
+    warnings: list[str] = []
+    changed = True
+    while changed:
+        changed = False
+        for parent_id in sorted(
+            list(state.requirement_modules.get(requirement_id, set()))
+        ):
+            parent = state.modules.get(parent_id)
+            if not parent or parent.get("kind") != "FUNC":
+                continue
+            children = [
+                str(invocation.get("callee", ""))
+                for invocation in state.invocations
+                if str(invocation.get("caller", "")) == parent_id
+            ]
+            if len(children) != 1:
+                continue
+            child_id = children[0]
+            child = state.modules.get(child_id)
+            if not child or child.get("kind") != "FUNC":
+                continue
+            if parent.get("self_obligation_ids"):
+                continue
+            comparable = ("inputs", "outputs", "effects", "obligations")
+            if any(parent.get(key, []) != child.get(key, []) for key in comparable):
+                continue
+            callers = [
+                dict(invocation)
+                for invocation in state.invocations
+                if str(invocation.get("callee", "")) == parent_id
+            ]
+            state.invocations = [
+                invocation
+                for invocation in state.invocations
+                if not (
+                    str(invocation.get("caller", "")) == parent_id
+                    or str(invocation.get("callee", "")) == parent_id
+                )
+            ]
+            for invocation in callers:
+                replacement = {"caller": invocation["caller"], "callee": child_id}
+                if replacement not in state.invocations:
+                    state.invocations.append(replacement)
+            child_callers = sorted({
+                str(invocation.get("caller", ""))
+                for invocation in state.invocations
+                if str(invocation.get("callee", "")) == child_id
+            })
+            child["parent_id"] = child_callers[0] if len(child_callers) == 1 else None
+            state.modules.pop(parent_id, None)
+            state.requirement_modules.setdefault(requirement_id, set()).discard(parent_id)
+            warnings.append(
+                f"ARC3118: merged pass-through module {parent_id} into {child_id}"
+            )
+            changed = True
+            break
+    return state, warnings
+
+
 def _normalize_requirement_contract(value: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(value)
+    # Reused pre-M8 artifacts did not carry this discriminator; treat them as
+    # server-backed so they remain conservative when hydrated.
+    result["server_state"] = bool(result.get("server_state", True))
     result["inputs"] = _normalize_fields(result.get("inputs", []))
     result["outputs"] = _normalize_fields(result.get("outputs", []))
     for effect in result.get("effects", []):
@@ -1585,12 +1690,17 @@ def _provider_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _module_decomposition_output_schema(parent: dict[str, Any]) -> dict[str, Any]:
+def _module_decomposition_output_schema(parent: dict[str, Any], *, depth: int) -> dict[str, Any]:
     """Specialize the decomposition form so illegal layer choices are unavailable."""
 
     schema = copy.deepcopy(MODULE_DECOMPOSITION_SCHEMA)
     step_properties = schema["properties"]["modules"]["items"]["properties"]
-    allowed = {"FUNC"} if parent.get("kind") == "API" else {"FUNC", "DB"}
+    if parent.get("kind") == "API":
+        allowed = {"FUNC"}
+    elif depth >= 2:
+        allowed = {"DB"}
+    else:
+        allowed = {"FUNC", "DB"}
     step_properties["kind"]["enum"] = sorted(allowed)
     obligation_ids = [
         str(item.get("id", ""))
@@ -1913,6 +2023,7 @@ def _requirement_contract_template(requirement_id: str) -> dict[str, Any]:
     return {
         "requirement_id": requirement_id,
         "spec": "",
+        "server_state": True,
         "inputs": [],
         "outputs": [],
         "effects": [],

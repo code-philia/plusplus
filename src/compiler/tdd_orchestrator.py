@@ -935,11 +935,6 @@ class NodeTDDOrchestrator:
             for value in row.get("visual_reference_ids", [])
             if str(value)
         }
-        visual_ids.update(
-            str(value)
-            for value in frontend_link.get("visual_reference_ids", [])
-            if str(value)
-        )
         visual_references = [
             copy.deepcopy(row)
             for row in self.frontend_ir.get("visual_references", [])
@@ -959,8 +954,19 @@ class NodeTDDOrchestrator:
             "requirement_id": requirement_id,
             "module_ids": sorted(module_ids),
             "backend_modules": backend_modules,
-            "frontend_scope": "REQUIREMENT_SCOPED_ONE_HOP",
-            "active_requirement_link": frontend_link,
+            "frontend_scope": "REQUIREMENT_SCREEN_ONE_HOP",
+            "primary_screen_ids": sorted(primary_screen_ids),
+            "active_requirement_link": {
+                **frontend_link,
+                "screen_ids": [
+                    str(value) for value in frontend_link.get("screen_ids", [])
+                    if str(value) in screen_ids
+                ],
+                "visual_reference_ids": [
+                    str(value) for value in frontend_link.get("visual_reference_ids", [])
+                    if str(value) in visual_ids
+                ],
+            },
             "frontend": {
                 "screens": screens,
                 "journeys": journeys,

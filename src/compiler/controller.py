@@ -369,6 +369,8 @@ class Compiler:
         states.update(design.node_states)
         for error in design.errors:
             await self._log("Compiler", error, "error")
+        for warning in design.warnings:
+            await self._log("Compiler", warning, "warning")
         if not design_reused:
             # Partial design is a first-class diagnostic/checkpoint artifact.
             # Persist it before the success gate so a failed requirement does
