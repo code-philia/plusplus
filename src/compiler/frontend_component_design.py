@@ -26,6 +26,7 @@ from .frontend_ir import (
     repair_schema_shape,
     schema_shape_errors,
 )
+from .trace_payload import format_payload_trace
 from .model_client import StructuredModel, describe_model_error
 
 
@@ -304,7 +305,7 @@ class PageLayoutComponentPass:
         suffix = f" duration_ms={duration}" if duration is not None else ""
         self._trace(
             f"{marker} phase={phase} unit={unit_id}{suffix}\n"
-            f"{json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str)}"
+            f"{format_payload_trace(payload)}"
         )
 
 

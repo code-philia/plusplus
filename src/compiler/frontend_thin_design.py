@@ -14,6 +14,7 @@ from core.logging import SynchronousLog
 from .frontend_ir import FrontendDesignErrorCode, FrontendDesignIssue
 from .frontend_thin_ir import FRONTEND_DESIGN_IR_SCHEMA, FRONTEND_IR_SCHEMA_VERSION, repair_shape, shape_errors
 from .model_client import StructuredModel, describe_model_error
+from .trace_payload import format_payload_trace
 
 
 THIN_FRONTEND_INSTRUCTIONS = """Design the thin frontend contract for the entire product in one pass.
@@ -96,7 +97,7 @@ class ThinFrontendDesignPass:
             except Exception as exc:
                 feedback = [f"Frontend model call failed: {describe_model_error(exc)}"]
                 continue
-            self._log.info("MODEL_OUTPUT phase=thin_frontend_design " f"duration_ms={int((time.perf_counter() - started) * 1000)}\n" + json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True))
+            self._log.info("MODEL_OUTPUT phase=thin_frontend_design " f"duration_ms={int((time.perf_counter() - started) * 1000)}\n" + format_payload_trace(raw))
             decision = repair_shape(raw, THIN_FRONTEND_DECISION_SCHEMA)
             if not isinstance(decision, dict):
                 feedback = ["Thin Frontend Design output must be one JSON object."]

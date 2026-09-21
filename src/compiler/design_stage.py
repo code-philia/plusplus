@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterable
 from core.logging import SynchronousLog
 
 from .model_client import StructuredModel, describe_model_error
+from .trace_payload import format_payload_trace
 
 
 PRIMITIVE_TYPES = {"string", "integer", "number", "boolean", "date", "datetime", "uuid", "json"}
@@ -181,7 +182,10 @@ outputs, effects, and obligation_ids. Set kind to API. Copy interface fields and
 their semantic identifiers, types, or required flags. Field names are local parameter labels and may be made clearer
 without changing the represented data. A module whose spec describes a database read or write must own the
 corresponding effect from the supplied contract; never describe hidden database access on a module with an empty
-effects list. Allocate every supplied obligation id to exactly one API.
+effects list. Allocate every supplied obligation id to exactly one API. Treat negative or preventive obligations
+(for example prevent_duplicate_write, prevent_book_persistence, or no_session_on_failure) as real obligations;
+they must not be omitted because they describe something that must not happen. Before returning, compare the
+complete parent obligation id set with the union of API obligation_ids exactly.
 Do not design child functions or implementation steps. Return only `{\"modules\": [...]}`.
 """
 
@@ -202,7 +206,11 @@ child effects must be [] and no DB child may be introduced. A child whose spec d
 of the exact effects listed in the parent table.
 Copy obligation ids exactly. An API must delegate every obligation to one direct FUNC child. A FUNC may implement
 non-persistence obligations itself, but every PERSISTENCE obligation must eventually be delegated to a DB leaf.
-DB children may own only PERSISTENCE obligations. Never invent or duplicate an obligation id.
+DB children may own only PERSISTENCE obligations. Never invent, rename, omit, or duplicate an obligation id.
+Before returning, perform an obligation ledger check: the union of direct-child obligation_ids must equal the
+parent's required obligation ids exactly. Negative obligations such as prevent/no-write/no-create are still real
+behavioral obligations and must be allocated. For every PERSISTENCE obligation, ensure at least one child path can
+continue to a DB leaf that owns the corresponding persistence responsibility.
 
 The compiler supplies every DB leaf with one shared Drizzle `database` client and its relevant schema table imports.
 The table symbols describe SQL tables; they are not data-bearing objects and must never be described as exposing
@@ -242,7 +250,16 @@ class DesignIssue:
         }
 
     def feedback(self) -> str:
-        return f"{self.code}: {self.message}"
+        guidance = {
+            "FLOW_SOURCE_MISSING": "Repair: every child input must reuse a parent input or an output of an earlier child; do not invent a new source value.",
+            "PARENT_OUTPUT_UNREALIZED": "Repair: ensure the child sequence produces every required parent output, preserving the exact semantic_id and type.",
+            "EFFECT_CONTRACT_MISMATCH": "Repair: copy the parent effect id, operation, target, and fields exactly; do not paraphrase or alter it.",
+            "DB_EFFECT_REQUIRED": "Repair: a DB child must own at least one exact READ/CREATE/UPDATE/DELETE effect from the parent.",
+            "DB_OBLIGATION_INVALID": "Repair: DB children may own only PERSISTENCE obligations; move validation/error/control obligations to FUNC children.",
+            "PERSISTENCE_OBLIGATION_DB_MISSING": "Repair: add a DB implementation owner on the obligation's child path; negative persistence rules still require a DB-backed responsibility.",
+            "OBLIGATION_IMPLEMENTATION_MISSING": "Repair: assign this exact obligation id to an implementable FUNC/DB module; do not leave it only on the API.",
+        }.get(self.code)
+        return f"{self.code}: {self.message}" + (f" {guidance}" if guidance else "")
 
 
 @dataclass(slots=True)
@@ -423,7 +440,10 @@ class DesignPass:
                 unit_id=requirement_id,
                 schema_name="arc_requirement_api",
                 instructions=API_DECOMPOSITION_INSTRUCTIONS,
-                output_schema=API_DECOMPOSITION_SCHEMA,
+                output_schema=_allocation_output_schema(
+                    API_DECOMPOSITION_SCHEMA,
+                    contract.get("obligations", []),
+                ),
                 context=context,
                 validator=lambda value: _api_plan_issues(value, requirement_id, contract),
             )
@@ -542,7 +562,7 @@ class DesignPass:
 
     def _trace_json(self, marker: str, phase: str, unit_id: str, payload: Any, duration: int | None = None) -> None:
         suffix = f" duration_ms={duration}" if duration is not None else ""
-        self._trace(f"{marker} phase={phase} unit={unit_id}{suffix}\n{json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)}")
+        self._trace(f"{marker} phase={phase} unit={unit_id}{suffix}\n{format_payload_trace(payload)}")
 
     def _expand_module(
         self,
@@ -1357,7 +1377,26 @@ def _allocation_issues(values: list[str], expected: set[str], label: str, phase:
     actual = set(values)
     issues: list[DesignIssue] = []
     if actual != expected:
-        issues.append(_issue(f"{label.upper()}_ALLOCATION_MISMATCH", f"{label} allocation must cover the parent exactly: missing={sorted(expected - actual)} extra={sorted(actual - expected)}", phase, blame))
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        if label == "obligation":
+            guidance = (
+                "Repair by assigning every missing parent obligation id to exactly one direct child; "
+                "copy ids verbatim, do not rename or invent ids, and do not drop negative obligations "
+                "such as prevent/no-write/no-create. A PERSISTENCE obligation must remain on a child "
+                "path that eventually reaches a DB leaf."
+            )
+        else:
+            guidance = (
+                "Repair by assigning every missing parent effect id to exactly one eligible direct child; "
+                "copy the complete effect unchanged and do not invent or duplicate effects."
+            )
+        issues.append(_issue(
+            f"{label.upper()}_ALLOCATION_MISMATCH",
+            f"{label} allocation must cover the parent exactly: missing={missing} extra={extra}. {guidance}",
+            phase,
+            blame,
+        ))
     repeated = sorted({value for value in values if values.count(value) > 1})
     if repeated:
         issues.append(_issue(f"{label.upper()}_ALLOCATED_TWICE", f"{label} obligations are allocated more than once: {repeated}", phase, blame))
@@ -1395,8 +1434,35 @@ def _module_decomposition_output_schema(parent: dict[str, Any]) -> dict[str, Any
     step_properties = schema["properties"]["modules"]["items"]["properties"]
     allowed = {"FUNC"} if parent.get("kind") == "API" else {"FUNC", "DB"}
     step_properties["kind"]["enum"] = sorted(allowed)
+    obligation_ids = [
+        str(item.get("id", ""))
+        for item in parent.get("obligations", [])
+        if isinstance(item, dict) and str(item.get("id", ""))
+    ]
+    step_properties["obligation_ids"]["items"] = {
+        "type": "string",
+        "enum": sorted(set(obligation_ids)),
+    }
     schema["properties"]["modules"]["minItems"] = 0
     return schema
+
+
+def _allocation_output_schema(
+    schema: dict[str, Any], obligations: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Constrain allocation ids to the frozen parent ledger."""
+
+    result = copy.deepcopy(schema)
+    items = result["properties"]["modules"]["items"]["properties"]
+    ids = sorted(
+        {
+            str(item.get("id", ""))
+            for item in obligations
+            if isinstance(item, dict) and str(item.get("id", ""))
+        }
+    )
+    items["obligation_ids"]["items"] = {"type": "string", "enum": ids}
+    return result
 
 
 def _shape_errors(value: Any, schema: dict[str, Any], path: str) -> list[str]:
@@ -1593,6 +1659,13 @@ def _module_decomposition_markdown(
         "### Behavioral obligations",
         "",
         *_obligation_table(module.get("obligations", [])),
+        "",
+        "### Obligation allocation ledger (mandatory)",
+        "",
+        "- Direct-child obligation_ids must cover every parent obligation id exactly once.",
+        "- Copy ids verbatim; do not rename, omit, invent, or duplicate them.",
+        "- Negative obligations (prevent/no-write/no-create) are real obligations, not empty behavior.",
+        "- PERSISTENCE obligations must continue through a child path to a DB leaf.",
         "",
         "## Relevant database slice",
         "",

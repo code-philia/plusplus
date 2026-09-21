@@ -23,6 +23,7 @@ from .frontend_ir import (
     FrontendDesignErrorCode,
     FrontendDesignIssue,
 )
+from .trace_payload import format_payload_trace
 from .model_client import describe_model_error, response_format_unavailable
 
 
@@ -667,7 +668,7 @@ class VisualReferenceAnalyzer:
         suffix = f" duration_ms={duration}" if duration is not None else ""
         self._trace(
             f"{marker} phase=visual_reference_analysis unit={unit_id}{suffix}\n"
-            f"{json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str)}"
+            f"{format_payload_trace(payload)}"
         )
 
     @staticmethod

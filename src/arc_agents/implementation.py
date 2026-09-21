@@ -700,7 +700,7 @@ def _project_design_context(
         row for row in frontend.get("screens", []) if isinstance(row, dict)
     ]
     screens = [
-        copy.deepcopy(row)
+        _compact_frontend_design_row(row, "screen")
         for row in available_screens
         if str(row.get("id", "")) in target_ids
     ]
@@ -721,23 +721,23 @@ def _project_design_context(
         destination = route_index.get(route)
         destination_id = str((destination or {}).get("id", ""))
         if destination is not None and destination_id not in screen_ids:
-            screens.append(copy.deepcopy(destination))
+            screens.append(_compact_frontend_design_row(destination, "screen"))
             screen_ids.add(destination_id)
 
     journeys = [
-        copy.deepcopy(row)
+        _compact_frontend_design_row(row, "journey")
         for row in frontend.get("journeys", [])
         if isinstance(row, dict)
         and str(row.get("source_screen_id", "")) in primary_screen_ids
     ]
     api_usages = [
-        copy.deepcopy(row)
+        _compact_frontend_design_row(row, "api_usage")
         for row in frontend.get("api_usages", [])
         if isinstance(row, dict)
         and str(row.get("screen_id", "")) in primary_screen_ids
     ]
     shared_state_policies = [
-        copy.deepcopy(row)
+        _compact_frontend_design_row(row, "state")
         for row in frontend.get("shared_state_policies", [])
         if isinstance(row, dict) and str(row.get("id", "")) in target_ids
     ]
@@ -748,7 +748,7 @@ def _project_design_context(
         if str(value)
     }
     visual_references = [
-        copy.deepcopy(row)
+        _compact_frontend_design_row(row, "visual")
         for row in frontend.get("visual_references", [])
         if isinstance(row, dict) and str(row.get("id", "")) in visual_ids
     ]
@@ -787,7 +787,7 @@ def _project_design_context(
             if str(value) in target_ids
         ),
         "backend_modules": [
-            copy.deepcopy(row)
+            _compact_design_module(row)
             for row in design_context.get("backend_modules", [])
             if isinstance(row, dict)
             and str(row.get("id", row.get("module_id", ""))) in target_ids
@@ -802,6 +802,27 @@ def _project_design_context(
             "visual_references": visual_references,
         },
     }
+
+
+def _compact_design_module(row: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "id", "module_id", "kind", "name", "description", "requirement_id",
+        "file", "symbol", "public_signature", "inputs", "outputs", "effects",
+        "callees", "callers", "route", "method", "request", "response",
+        "obligations", "behavioral_obligations", "constraints",
+    )
+    return {key: copy.deepcopy(row.get(key)) for key in fields if key in row}
+
+
+def _compact_frontend_design_row(row: dict[str, Any], kind: str) -> dict[str, Any]:
+    fields = {
+        "screen": ("id", "route", "title", "description", "requirement_ids", "required_api_ids", "navigation_targets", "visual_reference_ids"),
+        "journey": ("id", "requirement_id", "source_screen_id", "target_screen_id", "steps", "api_id"),
+        "api_usage": ("screen_id", "consumer_id", "api_id", "purpose", "trigger"),
+        "state": ("id", "name", "requirement_ids", "persistence", "storage_key", "state", "actions"),
+        "visual": ("id", "uri", "path", "description", "analysis", "style_summary"),
+    }[kind]
+    return {key: copy.deepcopy(row.get(key)) for key in fields if key in row}
 
 
 def _frontend_api_dependency_ids(

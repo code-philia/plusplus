@@ -15,6 +15,7 @@ from arcbench_agent_runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 
 from .model_client import StructuredModel, describe_model_error
+from .trace_payload import format_payload_trace
 
 
 SCHEMA_VERSION = 2
@@ -743,12 +744,7 @@ class DatabaseSchemaPass:
             )
             self._trace(
                 f"MODEL_INPUT phase={phase} requirement={node_id} attempt={attempt + 1}\n"
-                + json.dumps(
-                    request_payload,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                )
+                + format_payload_trace(request_payload)
             )
             try:
                 decision = self._model.generate_json(
@@ -769,7 +765,7 @@ class DatabaseSchemaPass:
                 self._trace(
                     f"MODEL_OUTPUT phase={phase} requirement={node_id} "
                     f"attempt={attempt + 1} duration_ms={duration_ms}\n"
-                    + json.dumps(decision, ensure_ascii=False, indent=2, sort_keys=True)
+                    + format_payload_trace(decision)
                 )
                 decision, normalization_notes = _normalize_decision_context(
                     phase, decision, context

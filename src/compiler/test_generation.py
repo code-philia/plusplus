@@ -20,6 +20,7 @@ from .code_binding import CODE_BINDING_READY, CodeTargetResolver
 from .database_stage import schema_for_requirement
 from .model_client import StructuredModel, describe_model_error
 from .project_initialization import DependencyCatalog, test_workspace_spec
+from .trace_payload import format_payload_trace
 
 
 TEST_ENVIRONMENT_READY = "TEST_ENVIRONMENT_READY"
@@ -790,7 +791,7 @@ class RequirementTestGenerationPass:
         suffix = f" duration_ms={duration_ms}" if duration_ms is not None else ""
         self._trace(
             f"{marker} requirement={requirement_id}{suffix}\n"
-            + json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + format_payload_trace(payload)
         )
 
 
@@ -811,7 +812,7 @@ def _build_context_pack(
         if isinstance(item, dict)
     }
     all_target_rows = [
-        copy.deepcopy(row)
+        _project_test_target(row)
         for row in [
             *resolved_targets.get("owned_targets", []),
             *resolved_targets.get("dependency_targets", []),
@@ -819,7 +820,7 @@ def _build_context_pack(
         if isinstance(row, dict)
     ]
     owned_targets = [
-        copy.deepcopy(row)
+        _project_test_target(row)
         for row in resolved_targets.get("owned_targets", [])
         if isinstance(row, dict) and _target_relevant_to_layers(row, required_layers)
     ]
@@ -827,6 +828,7 @@ def _build_context_pack(
         requirement_id=requirement_id,
         frontend_ir=frontend_ir,
         owned_targets=owned_targets,
+        required_layers=required_layers,
     )
     one_hop_dependencies = _project_one_hop_dependencies(
         owned_targets=owned_targets,
@@ -841,7 +843,7 @@ def _build_context_pack(
         if str(row.get("source_ir_id", row.get("module_id", "")))
     }
     relevant_api_contracts = [
-        copy.deepcopy(module)
+        _project_api_contract(module)
         for module in design_ir.get("modules", [])
         if isinstance(module, dict)
         and str(module.get("kind", "")).upper() == "API"
@@ -959,6 +961,38 @@ def _target_relevant_to_layers(
     return any(kind in allowed[layer] for layer in required_layers)
 
 
+def _project_test_target(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the binding facts test generation can actually use."""
+
+    return {
+        key: copy.deepcopy(row.get(key))
+        for key in (
+            "module_id",
+            "source_ir_id",
+            "kind",
+            "file",
+            "symbol",
+            "public_signature",
+            "input_type",
+            "output_type",
+            "props_type",
+            "route",
+            "callees",
+            "store_types",
+            "editable",
+        )
+        if key in row
+    }
+
+
+def _project_api_contract(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: copy.deepcopy(row.get(key))
+        for key in ("id", "kind", "name", "route", "method", "request", "response", "contract", "effects")
+        if key in row
+    }
+
+
 def _project_one_hop_dependencies(
     *,
     owned_targets: list[dict[str, Any]],
@@ -1008,13 +1042,14 @@ def _project_frontend_subgraph(
     requirement_id: str,
     frontend_ir: dict[str, Any],
     owned_targets: list[dict[str, Any]],
+    required_layers: list[str],
 ) -> dict[str, list[dict[str, Any]]]:
     owned_ids = {
         str(row.get("source_ir_id", row.get("module_id", "")))
         for row in owned_targets
     }
     screens = [
-        copy.deepcopy(row)
+        _project_frontend_row(row, "screen")
         for row in frontend_ir.get("screens", [])
         if isinstance(row, dict)
         and (
@@ -1039,11 +1074,11 @@ def _project_frontend_subgraph(
         destination = route_index.get(route)
         destination_id = str((destination or {}).get("id", ""))
         if destination is not None and destination_id not in screen_ids:
-            screens.append(copy.deepcopy(destination))
+            screens.append(_project_frontend_row(destination, "screen"))
             screen_ids.add(destination_id)
 
     journeys = [
-        copy.deepcopy(row)
+        _project_frontend_row(row, "journey")
         for row in frontend_ir.get("journeys", [])
         if isinstance(row, dict)
         and (
@@ -1063,13 +1098,13 @@ def _project_frontend_subgraph(
         if str(value)
     )
     api_usages = [
-        copy.deepcopy(row)
+        _project_frontend_row(row, "api_usage")
         for row in frontend_ir.get("api_usages", [])
         if isinstance(row, dict)
         and str(row.get("screen_id", row.get("consumer_id", ""))) in screen_ids
     ]
     shared_state_policies = [
-        copy.deepcopy(row)
+        _project_frontend_row(row, "state")
         for row in frontend_ir.get("shared_state_policies", [])
         if isinstance(row, dict)
         and (
@@ -1078,12 +1113,24 @@ def _project_frontend_subgraph(
             or str(row.get("requirement_id", "")) == requirement_id
         )
     ]
+    if "E2E" not in required_layers:
+        return {"screens": [], "journeys": [], "api_usages": [], "shared_state_policies": []}
     return {
         "screens": screens,
         "journeys": journeys,
         "api_usages": api_usages,
         "shared_state_policies": shared_state_policies,
     }
+
+
+def _project_frontend_row(row: dict[str, Any], kind: str) -> dict[str, Any]:
+    fields = {
+        "screen": ("id", "route", "title", "description", "requirement_ids", "required_api_ids", "navigation_targets", "visual_reference_ids"),
+        "journey": ("id", "requirement_id", "source_screen_id", "target_screen_id", "steps", "api_id"),
+        "api_usage": ("screen_id", "consumer_id", "api_id", "purpose", "trigger"),
+        "state": ("id", "name", "requirement_ids", "persistence", "storage_key", "state", "actions"),
+    }[kind]
+    return {key: copy.deepcopy(row.get(key)) for key in fields if key in row}
 
 
 def _referenced_type_ids(targets: list[dict[str, Any]]) -> set[str]:
