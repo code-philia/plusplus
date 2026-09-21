@@ -59,11 +59,10 @@ Every compilation writes stage-owned artifacts beneath `.arc`:
 │   │   └── db_modules.json
 │   └── frontend/
 │       ├── visual_references.json
-│       ├── layouts.json
-│       ├── pages.json
-│       ├── components.json
-│       ├── stores.json
-│       └── api_dependencies.json
+│       ├── screens.json
+│       ├── journeys.json
+│       ├── api_usages.json
+│       └── shared_state_policies.json
 ├── project/
 │   └── project-manifest.json
 ├── backend/
@@ -155,10 +154,19 @@ Backend Design proceeds top-down for each atomic requirement:
 Requirement Contract -> API modules -> FUNC modules -> DB modules
 ```
 
+The Requirement Contract also records compact behavioral obligations for the
+requirement scenarios: validation, authorization, computation, state transition,
+persistence, transaction, idempotency, external interaction, and error mapping.
+Every scenario must be covered. API decomposition assigns each obligation once;
+every obligation must reach a FUNC or DB implementation owner, and persistence
+obligations must reach a DB leaf. This completeness gate catches missing
+responsibilities before source lowering without prescribing implementation code.
+
 The model returns only local semantic descriptions. The compiler allocates
 module IDs, preserves child order as call order, and derives reverse callers.
 All module interfaces use the same semantic field vocabulary as the requirement
-contract.
+contract. Backend Design does not impose a fixed per-requirement module-count
+limit; completeness and graph validation decide whether decomposition is valid.
 Each interface field carries `semantic_id`, `name`, `type`, and `required`; the
 compiler preserves the `required` flag while materializing child modules.
 
@@ -182,27 +190,24 @@ It does not receive the full design graph or a large output example.
 
 ## 6. Frontend Design IR
 
-Frontend Design is a second IR, not a projection of backend source. It consumes
-requirement contracts, shared API contracts, optional visual references, and a
-small global UI registry.
+Frontend Design is a thin product-level IR, not a component plan or a projection
+of backend source. One bounded model call sees the requirement set, shared API
+contracts, dependency graph, and optional visual evidence, then returns only:
 
-The six frontend tables are:
+- `visual_references`: content-addressed metadata and optional visual analysis;
+- `screens`: routes, purpose, entry conditions, observable states, API needs,
+  navigation targets, and visual evidence;
+- `journeys`: user actions connecting screens and APIs, including success and
+  failure behavior;
+- `api_usages`: screen-to-shared-API request and response semantic bindings;
+- `shared_state_policies`: only genuinely cross-page/session state, its public
+  actions, and persistence policy.
 
-- `visual_references`: stable content-addressed metadata and optional visual
-  analysis.
-- `layouts`: layout-level observable specification and direct components.
-- `pages`: route, route inputs, layout, direct components, API dependencies,
-  store dependencies, navigation, and render obligations.
-- `components`: page/layout/shared component contracts, inputs, events, and
-  observable render obligations.
-- `stores`: cross-page state and public actions only.
-- `api_dependencies`: consumer-to-shared-API references and best-effort field
-  bindings.
-
-Requirement links remain only in traceability. There are no local data
-contract or composition-edge tables. Component decomposition is one bounded
-model call per Page/Layout; if it is unavailable, an empty component plan is a
-valid deterministic fallback and the rest of the design remains usable.
+Requirement links remain only in traceability. Layouts, component trees, JSX,
+CSS, Props/Event contracts, file decomposition, and page-local state are not
+Design IR. They are implementation decisions made together by the frontend
+Implementation Agent using the complete connected screen graph and original
+visual evidence.
 
 Visual analysis is optional evidence. Path, media, size, and model failures
 are warnings; valid metadata is retained and the affected reference is simply
@@ -212,11 +217,19 @@ checks.
 
 Frontend validation is intentionally minimal and lowering-oriented:
 
-- frozen JSON shape and stable IDs;
-- unique routes and symbols;
-- closed layout/page/component/store/visual references;
-- API dependencies point to existing shared API contracts;
+- frozen JSON shape and stable Screen/Journey/Shared-State IDs;
+- unique routes and Screen symbols;
+- closed Screen/Shared-State/visual/navigation references;
+- API usages point to existing shared API contracts;
 - every atomic requirement has one traceability link.
+
+Frontend semantic field names, semantic IDs, render-obligation IDs, event
+names, and Store action names are not rejected for snake_case/camelCase style.
+They need only be non-empty bounded strings; lowering quotes property names and
+sanitizes values that must become TypeScript identifiers. Stable IR reference
+prefixes (`PAGE.`, `STORE.`, `JOURNEY.`), absolute application routes, and
+content-addressed visual IDs remain validated because downstream linking relies
+on them.
 
 Semantic completeness that can be derived during lowering is not a Design-stage
 blocker. Deterministic repair removes unknown properties, clamps bounded text
@@ -257,22 +270,22 @@ Registry, File Registry, and Project Manifest:
 No backend lowering pass calls the model. If an upstream registry is invalid,
 the pass fails before writing sources for that pass.
 
-## 9. Deterministic Frontend lowering
+## 9. Frontend runtime seam lowering and generation
 
-Frontend lowering consumes Frontend Design IR, shared API contracts, Backend
-Route Registry, Frontend Symbol Registry, Frontend File Registry, and Project
-Manifest:
+The compiler projects the thin Frontend Design IR into an ephemeral runtime IR.
+This projection exists only to allocate stable Screen and Shared-State source
+targets, typed API clients, routes, imports, and editable implementation regions;
+it is not persisted as design and does not introduce Layout or Component IR.
 
-1. Frontend Global Symbol Planning allocates Page/Layout/Component symbols,
-   Props/Event types, Store contracts, and only referenced API clients.
-2. Frontend File Planning assigns source paths under the manifest's
-   `frontendSkeleton` roots.
-3. Props, events, stores, and API clients are lowered to TypeScript.
-4. Page/Layout/Component skeletons are emitted with render-obligation
-   placeholders.
-5. Router, barrels, and imports are derived from the frozen registries.
-6. Frontend Manifest records files, symbols, imports, exports, routes, API
-   clients, stores, and design coverage.
+1. Screen, Shared-State, and referenced API-client symbols are allocated.
+2. Source targets and routes are assigned under compiler-owned roots.
+3. Typed API clients, shared-state runtimes, router, barrels, and minimal Screen
+   modules are emitted deterministically.
+4. The frontend Implementation Agent receives the connected Screen graph,
+   journeys, API usages, visual-reference metadata/analysis, and real runtime seams. It decides
+   layout, component decomposition, responsive composition, JSX, CSS utilities,
+   and page-local state together while producing the finished interface.
+5. Type checking, build, and E2E behavior validate the generated frontend.
 
 The frontend API client uses the Backend Route Registry and shared contract
 types; it never imports backend implementation files. `frontend/vite.config.ts`
@@ -331,6 +344,56 @@ Implementation Agent, applies the proposed marker-scoped edit through Write
 Guard, and reruns `typecheck -> Unit -> Integration -> E2E`. A node advances to
 `NODE_ACCEPTED` only after its required layers and impacted accepted-node
 regressions pass. Dependency nodes must be accepted before the next node starts.
+
+Failure localization is a diagnostic hint rather than a write-authorization
+decision. For one node, the Implementation Agent can inspect and edit every
+marker-scoped module owned by that requirement, including callers, callees, and
+sibling modules; dependency-owned modules remain read-only. Each retry receives
+the previous changed modules plus the before/after failure fingerprint so it can
+distinguish a useful change from a repeated non-fix.
+
+Implementation context has a 600,000-character safety ceiling. If it is
+exceeded, `ARC4532` reports the largest serialized context sections so source
+files, frozen tests, Design Context, and failure reports can be projected
+independently instead of raising the ceiling blindly.
+
+For ordinary backend TDD repair, the first failure-driven implementation call
+contains only the reported writable targets and their direct writable
+callers/callees. A later repair may expand to the complete requirement-owned
+writable surface. Frozen test source is always projected to the layer present
+in the selected failure cluster (Unit, Integration, or E2E); failures without a
+layer retain all tests. Frontend bootstrap and frontend-target context scope are
+unchanged.
+
+After atomic nodes have been processed, implementation also walks the FOLDER
+nodes from the bottom-up `implementation_waves`. A folder does not enter
+RED-first Test Generation and does not invent duplicate backend APIs. If Code
+Binding assigns it editable Page/Layout/Component/Store or other module targets,
+the Implementation Agent receives those owned targets once in `AGGREGATE` mode
+to complete the connected frontend and any explicitly owned aggregate module.
+Folders with no owned editable targets are accepted as
+`NO_IMPLEMENTATION_REQUIRED`. Write Guard continues to enforce exact ownership
+and marker-scoped edits in both modes.
+
+When all atomic and aggregate implementation work finishes, the compiler runs
+one final workspace build. This refreshes `frontend/dist` after agent edits;
+the generated Express backend serves that directory and uses its `index.html`
+as the SPA fallback. E2E uses the same deployment shape: build `@arc/frontend`,
+then run `@arc/backend` on the single configured port (normally `3000`), and
+the browser base URL is that backend URL rather than a separate Vite server.
+
+The generated deployment and E2E target share one compiler port. Set
+`ARC_WEB_PORT` before invoking `arc compile` (or use `--port` when the
+environment variable is absent); the environment variable takes precedence:
+
+```text
+ARC_WEB_PORT=3301 arc compile <requirements> --output-dir <workspace>
+```
+
+This value is written into the generated backend default, Playwright
+`baseURL`/health probe, frontend development proxy metadata, and project
+manifests. At runtime, `PORT` may still override the generated backend default,
+but it should be set to the same value when starting the deployed application.
 
 ## 11. Validation and failure policy
 
@@ -401,6 +464,19 @@ succeeded. This boundary validates the persisted Project Manifest and Code
 Binding Registry against the current requirements and real source files, skips
 all lowering/build passes, validates the already provisioned test environment,
 and starts node-by-node TDD without another dependency or browser installation.
+
+Use `--start-from frontend` to regenerate Frontend Design while reusing the
+validated Database and Backend Design artifacts in the existing output
+workspace:
+
+```text
+arc compile <requirements-dir> -o <workspace> --start-from frontend
+```
+
+Preprocessing still runs to validate the current requirement tree. Database and
+Backend Design are loaded and checked from `.arc`, then Frontend Design and all
+later stages run again. Do not combine this mode with `--clean`, because the
+upstream artifacts must already exist.
 
 The only environment values required for a full compile are
 `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `MODEL`. Visual settings are optional;
