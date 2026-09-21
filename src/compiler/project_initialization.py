@@ -12,6 +12,8 @@ from typing import Any, Mapping, Sequence
 from arcbench_agent_runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 
+from .process_utils import process_group_kwargs, resolve_executable, terminate_process_tree
+
 
 PROJECT_STATUS = "PROJECT_INITIALIZED"
 PROJECT_PROFILE_ID = "web-react18-tailwind4-express-drizzle-sqlite"
@@ -795,7 +797,7 @@ class ProjectInitializer:
                     )
 
     def _run(self, args: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-        executable = shutil.which(args[0], path=self.environment.get("PATH"))
+        executable = resolve_executable(args[0], self.environment)
         if executable is None:
             raise ProjectInitializationError(
                 "PROJECT_SCAFFOLD_FAILED",
@@ -822,6 +824,7 @@ class ProjectInitializer:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            **process_group_kwargs(),
         )
         try:
             output = ""
@@ -858,7 +861,7 @@ class ProjectInitializer:
             ) from exc
         except subprocess.TimeoutExpired as exc:
             elapsed_ms = round((time.monotonic() - started) * 1000)
-            process.kill()
+            terminate_process_tree(process)
             output, _ = process.communicate()
             self._log.info(
                 "COMMAND_TIMEOUT "

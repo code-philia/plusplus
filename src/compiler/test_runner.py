@@ -3,8 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import signal
-import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
@@ -13,6 +11,11 @@ from typing import Any, Mapping
 
 from core.logging import SynchronousLog
 
+from .process_utils import (
+    process_group_kwargs,
+    resolve_executable,
+    terminate_process_tree,
+)
 from .test_generation import TEST_ENVIRONMENT_READY, TEST_LAYERS, TESTS_FROZEN
 
 
@@ -337,7 +340,7 @@ class TestRunner:
             f"STARTED phase={phase} layer={layer or '-'} timeout_s={timeout:g} "
             f"command={command_text}"
         )
-        executable = shutil.which(command[0], path=self.environment.get("PATH"))
+        executable = resolve_executable(command[0], self.environment)
         if executable is None:
             self._log.info(
                 f"FINISHED phase={phase} layer={layer or '-'} status=ERROR "
@@ -364,10 +367,7 @@ class TestRunner:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                creationflags=(
-                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-                ),
-                start_new_session=os.name != "nt",
+                **process_group_kwargs(),
             )
         except OSError as exc:
             duration_ms = round((time.perf_counter() - started) * 1000)
@@ -388,7 +388,7 @@ class TestRunner:
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            _terminate_process_tree(process)
+            terminate_process_tree(process)
             try:
                 stdout, stderr = process.communicate(timeout=5.0)
             except subprocess.TimeoutExpired:
@@ -433,7 +433,7 @@ class TestRunner:
                 timed_out=True,
             )
         except OSError as exc:
-            _terminate_process_tree(process)
+            terminate_process_tree(process)
             duration_ms = round((time.perf_counter() - started) * 1000)
             self._log.info(
                 f"FINISHED phase={phase} layer={layer or '-'} status=ERROR "
@@ -497,35 +497,6 @@ class TestRunner:
         if not isinstance(value, dict):
             return {}, [f"{error_code}: {path} must contain an object."]
         return value, []
-
-
-def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
-    """Terminate a timed-out test command and every server it spawned."""
-
-    if process.poll() is not None:
-        return
-    if os.name == "nt":
-        taskkill = shutil.which("taskkill")
-        if taskkill is not None:
-            try:
-                subprocess.run(
-                    [taskkill, "/PID", str(process.pid), "/T", "/F"],
-                    capture_output=True,
-                    timeout=5.0,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except OSError:
-            pass
-    if process.poll() is None:
-        try:
-            process.kill()
-        except OSError:
-            pass
 
 
 def _normalize_layers(values: tuple[str, ...]) -> tuple[list[str], list[str]]:

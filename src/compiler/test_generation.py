@@ -6,7 +6,6 @@ import json
 import os
 import posixpath
 import re
-import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -20,6 +19,7 @@ from .code_binding import CODE_BINDING_READY, CodeTargetResolver
 from .database_stage import schema_for_requirement
 from .model_client import StructuredModel, describe_model_error
 from .project_initialization import DependencyCatalog, test_workspace_spec
+from .process_utils import resolve_executable, run_command
 from .trace_payload import format_payload_trace
 
 
@@ -397,23 +397,18 @@ class TestStaticValidator:
             commands.append(command)
         errors: list[str] = []
         for command in commands:
-            executable = shutil.which(command[0], path=self.environment.get("PATH"))
+            executable = resolve_executable(command[0], self.environment)
             if executable is None:
                 errors.append(
                     f"ARC4431 TEST_STATIC_VALIDATION_FAILED: command unavailable: {command[0]}"
                 )
                 break
             try:
-                completed = subprocess.run(
+                completed = run_command(
                     [executable, *command[1:]],
                     cwd=str(self.output_root),
-                    env=self.environment,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+                    environment=self.environment,
                     timeout=self._timeout,
-                    check=False,
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 errors.append(f"ARC4431 TEST_STATIC_VALIDATION_FAILED: {exc}")

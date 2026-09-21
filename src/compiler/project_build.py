@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
+
+from .process_utils import resolve_executable, run_command
 
 
 @dataclass(slots=True)
@@ -37,7 +38,7 @@ class ProjectBuilder:
                 ],
             )
 
-        executable = shutil.which("npm", path=self.environment.get("PATH"))
+        executable = resolve_executable("npm", self.environment)
         if executable is None:
             return ProjectBuildResult(
                 ok=False,
@@ -48,15 +49,10 @@ class ProjectBuilder:
 
         command = [executable, "run", "build"]
         try:
-            completed = subprocess.run(
+            completed = run_command(
                 command,
                 cwd=self.output_root,
-                env=self.environment,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                environment=self.environment,
                 timeout=900,
             )
         except FileNotFoundError:

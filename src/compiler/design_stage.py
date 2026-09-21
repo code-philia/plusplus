@@ -131,8 +131,9 @@ DECOMPOSED_MODULE_SCHEMA: dict[str, Any] = {
 MODULE_DECOMPOSITION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["modules"],
+    "required": ["self_obligation_ids", "modules"],
     "properties": {
+        "self_obligation_ids": {"type": "array", "items": {"type": "string", "maxLength": 64}},
         "modules": {"type": "array", "minItems": 0, "maxItems": 8, "items": DECOMPOSED_MODULE_SCHEMA},
     },
 }
@@ -143,8 +144,9 @@ API_MODULE_SCHEMA["properties"]["kind"]["enum"] = ["API"]
 API_DECOMPOSITION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["modules"],
+    "required": ["self_obligation_ids", "modules"],
     "properties": {
+        "self_obligation_ids": {"type": "array", "items": {"type": "string", "maxLength": 64}},
         "modules": {"type": "array", "minItems": 0, "maxItems": 4, "items": API_MODULE_SCHEMA},
     },
 }
@@ -227,6 +229,47 @@ Do not output any fields beyond the seven listed above. The compiler derives sym
 only the structured `{\"modules\": [...]}` object.
 """
 
+# Keep the ownership rule explicit and symmetric for API/FUNC decisions.  These
+# assignments intentionally follow the long prompt constants above so the
+# provider receives the corrected Plan-B contract without changing call sites.
+API_DECOMPOSITION_INSTRUCTIONS = API_DECOMPOSITION_INSTRUCTIONS.replace(
+    "Allocate every supplied obligation id to exactly one API.",
+    "The top-level self_obligation_ids array declares obligations implemented by the current API itself. "
+    "Every parent obligation must appear exactly once in either self_obligation_ids or the union of API obligation_ids.",
+).replace(
+    "they must not be omitted because they describe something that must not happen. Before returning, compare the\ncomplete parent obligation id set with the union of API obligation_ids exactly.",
+    "they must not be omitted because they describe something that must not happen. Use self_obligation_ids for "
+    "API-level validation, routing, error mapping, or prevention that needs no child. Do not put a PERSISTENCE "
+    "obligation there unless this API is the actual persistence owner. Before returning, compare the complete parent "
+    "obligation id set with the union of self_obligation_ids and API obligation_ids exactly.\n\n"
+    "Example: for parent obligations [\"validate_input\", \"prevent_book_persistence\"], a valid result is "
+    "{\"self_obligation_ids\":[\"validate_input\"],\"modules\":[{\"kind\":\"API\",\"name\":\"cancel\",\"spec\":\"Handle cancellation without persisting the book.\",\"inputs\":[],\"outputs\":[],\"effects\":[],\"obligation_ids\":[\"prevent_book_persistence\"]}]}.",
+).replace(
+    "Return only `{\"modules\": [...]}`.",
+    "Return only `{\"self_obligation_ids\": [...], \"modules\": [...]}`.",
+)
+MODULE_DECOMPOSITION_INSTRUCTIONS = MODULE_DECOMPOSITION_INSTRUCTIONS.replace(
+    "Every child contains exactly seven top-level fields: kind, name, spec, inputs, outputs, effects, and obligation_ids.",
+    "Every child contains exactly seven top-level fields: kind, name, spec, inputs, outputs, effects, and obligation_ids. "
+    "The top-level self_obligation_ids array declares obligations implemented by the current parent itself; it is not a child allocation.",
+).replace(
+    "Copy obligation ids exactly. An API must delegate every obligation to one direct FUNC child. A FUNC may implement\nnon-persistence obligations itself, but every PERSISTENCE obligation must eventually be delegated to a DB leaf.",
+    "Copy obligation ids exactly. Every parent obligation must appear exactly once in either self_obligation_ids or the "
+    "union of direct-child obligation_ids. Use self_obligation_ids when the current parent implements the obligation "
+    "without a child. An API or FUNC must not silently drop a negative or preventive obligation. Every PERSISTENCE "
+    "obligation not listed in self_obligation_ids must continue to a DB leaf; self-own it only when the current module "
+    "is the actual persistence owner.",
+).replace(
+    "Before returning, perform an obligation ledger check: the union of direct-child obligation_ids must equal the\nparent's required obligation ids exactly.",
+    "Before returning, perform an obligation ledger check: the union of self_obligation_ids and direct-child obligation_ids "
+    "must equal the parent's required obligation ids exactly. Example: {\"self_obligation_ids\":[\"prevent_book_persistence\"],\"modules\":[]} "
+    "is valid when this FUNC itself is the guard owner; leaving both arrays empty is invalid.",
+).replace(
+    "Do not output any fields beyond the seven listed above. The compiler derives symbol IDs and graph relationships. Return\nonly the structured `{\"modules\": [...]}` object.",
+    "Do not output fields beyond the seven child fields and top-level self_obligation_ids. The compiler derives symbol IDs "
+    "and graph relationships. Return only `{\"self_obligation_ids\": [...], \"modules\": [...]}`.",
+)
+
 
 @dataclass(slots=True)
 class DesignIssue:
@@ -250,6 +293,12 @@ class DesignIssue:
         }
 
     def feedback(self) -> str:
+        if self.code == "OBLIGATION_ALLOCATION_MISMATCH":
+            return (
+                f"{self.code}: {self.message} Repair each missing obligation id explicitly: "
+                "put the exact id in either top-level self_obligation_ids (the current parent owns it) "
+                "or exactly one direct child's obligation_ids. Do not rename, duplicate, or leave it unowned."
+            )
         guidance = {
             "FLOW_SOURCE_MISSING": "Repair: every child input must reuse a parent input or an output of an earlier child; do not invent a new source value.",
             "PARENT_OUTPUT_UNREALIZED": "Repair: ensure the child sequence produces every required parent output, preserving the exact semantic_id and type.",
@@ -540,7 +589,12 @@ class DesignPass:
             except Exception as exc:
                 issue = DesignIssue("MODEL_CALL_FAILED", describe_model_error(exc), phase.upper(), unit_id)
                 last_issues = [issue]
-                feedback = [issue.feedback()]
+                error_text = str(exc).lower()
+                feedback = [
+                    "The previous response was empty or not valid JSON. Return exactly one non-empty JSON object, with no Markdown, prose, or code fence."
+                    if "empty" in error_text or "jsondecodeerror" in error_text
+                    else issue.feedback()
+                ]
                 self._trace(f"MODEL_ERROR phase={phase} unit={unit_id} errors={issue.feedback()}")
                 continue
             duration = int((time.perf_counter() - started) * 1000)
@@ -827,6 +881,11 @@ def _api_plan_issues(value: dict[str, Any], requirement_id: str, contract: dict[
     exposed_outputs: set[str] = set()
     allocated_effects: list[str] = []
     allocated_obligations: list[str] = []
+    self_obligations = [str(value) for value in value.get("self_obligation_ids", [])]
+    allocated_obligations.extend(self_obligations)
+    unknown_self = set(self_obligations) - expected_obligations
+    if unknown_self:
+        issues.append(_issue("OBLIGATION_OUT_OF_CONTRACT", f"API self ownership declares unknown obligations: {sorted(unknown_self)}", "REQUIREMENT_API", requirement_id))
     for api in apis:
         name = str(api.get("name", ""))
         issues.extend(_simple_interface_field_issues(api.get("inputs", []), f"API.{name} inputs", requirement_id))
@@ -879,6 +938,11 @@ def _simple_decomposition_issues(
     }
     allocated_effects: list[str] = []
     allocated_obligations: list[str] = []
+    self_obligations = [str(item) for item in value.get("self_obligation_ids", [])]
+    allocated_obligations.extend(self_obligations)
+    unknown_self = set(self_obligations) - set(expected_obligations)
+    if unknown_self:
+        issues.append(_issue("OBLIGATION_OUT_OF_CONTRACT", f"Self ownership declares unknown obligations: {sorted(unknown_self)}", "MODULE_DECOMPOSITION", parent_id))
     names = [str(module.get("name", "")) for module in value.get("modules", [])]
     if len(names) != len(set(names)):
         issues.append(_issue(
@@ -1020,16 +1084,9 @@ def _simple_decomposition_issues(
         "MODULE_DECOMPOSITION",
         parent_id,
     ))
-    required_obligations = (
-        set(expected_obligations)
-        if parent.get("kind") == "API"
-        else {
-            obligation_id for obligation_id, obligation in expected_obligations.items()
-            if obligation.get("kind") == "PERSISTENCE"
-        }
-    )
+    required_obligations = set(expected_obligations)
     issues.extend(_allocation_issues(
-        [value for value in allocated_obligations if value in required_obligations],
+        allocated_obligations,
         required_obligations,
         "obligation",
         "MODULE_DECOMPOSITION",
@@ -1105,22 +1162,35 @@ def _behavioral_completeness_issues(design_ir: dict[str, Any]) -> list[DesignIss
             obligation_id = str(obligation.get("id", ""))
             implementers = [
                 module for module in modules
-                if module.get("kind") != "API"
-                and obligation_id in {
+                if obligation_id in {
+                    *{
+                        str(value)
+                        for value in module.get("self_obligation_ids", [])
+                    },
+                    *{
                     str(row.get("id", ""))
                     for row in module.get("obligations", [])
                     if isinstance(row, dict)
+                    },
                 }
             ]
             if not implementers:
                 issues.append(_issue(
                     "OBLIGATION_IMPLEMENTATION_MISSING",
-                    f"Behavioral obligation {obligation_id} has no FUNC/DB implementation owner",
+                    f"Behavioral obligation {obligation_id} has no implementation owner (self-owned parent, FUNC, or DB)",
                     "DESIGN_COMPLETENESS",
                     requirement_id,
                 ))
-            elif obligation.get("kind") == "PERSISTENCE" and not any(
-                module.get("kind") == "DB" for module in implementers
+            elif (
+                obligation.get("kind") == "PERSISTENCE"
+                and not any(module.get("kind") == "DB" for module in implementers)
+                and not any(
+                    obligation_id in {
+                        str(value)
+                        for value in module.get("self_obligation_ids", [])
+                    }
+                    for module in implementers
+                )
             ):
                 issues.append(_issue(
                     "PERSISTENCE_OBLIGATION_DB_MISSING",
@@ -1149,6 +1219,11 @@ def _materialize_apis(state: DesignState, requirement_id: str, contract: dict[st
             "outputs": [_expand_interface_field(field_item, fields) for field_item in item.get("outputs", [])],
             "effects": [_compact_module_effect(effects[item_effect["id"]]) for item_effect in item.get("effects", [])],
             "obligations": [copy.deepcopy(obligations[value]) for value in item.get("obligation_ids", [])],
+            "self_obligation_ids": (
+                [str(value) for value in decision.get("self_obligation_ids", [])]
+                if not api_ids
+                else []
+            ),
             "parent_id": None,
         }
         state.modules[module_id] = module
@@ -1166,6 +1241,15 @@ def _materialize_simple_decomposition(
     """Create child symbols and calls from the seven-field module format."""
 
     parent = state.modules[parent_id]
+    existing_self_obligations = [
+        str(value) for value in parent.get("self_obligation_ids", [])
+    ]
+    current_self_obligations = [
+        str(value) for value in decision.get("self_obligation_ids", [])
+    ]
+    parent["self_obligation_ids"] = list(dict.fromkeys(
+        [*existing_self_obligations, *current_self_obligations]
+    ))
     authoritative_effects = {item["id"]: item for item in _module_visible_effects(parent)}
     authoritative_obligations = {
         str(item["id"]): item for item in parent.get("obligations", []) if item.get("id")
@@ -1391,12 +1475,14 @@ def _allocation_issues(values: list[str], expected: set[str], label: str, phase:
                 "Repair by assigning every missing parent effect id to exactly one eligible direct child; "
                 "copy the complete effect unchanged and do not invent or duplicate effects."
             )
-        issues.append(_issue(
+        issue = _issue(
             f"{label.upper()}_ALLOCATION_MISMATCH",
             f"{label} allocation must cover the parent exactly: missing={missing} extra={extra}. {guidance}",
             phase,
             blame,
-        ))
+        )
+        issue.context.update({"missing": missing, "extra": extra, "expected": sorted(expected), "actual": sorted(actual)})
+        issues.append(issue)
     repeated = sorted({value for value in values if values.count(value) > 1})
     if repeated:
         issues.append(_issue(f"{label.upper()}_ALLOCATED_TWICE", f"{label} obligations are allocated more than once: {repeated}", phase, blame))
@@ -1439,6 +1525,10 @@ def _module_decomposition_output_schema(parent: dict[str, Any]) -> dict[str, Any
         for item in parent.get("obligations", [])
         if isinstance(item, dict) and str(item.get("id", ""))
     ]
+    schema["properties"]["self_obligation_ids"]["items"] = {
+        "type": "string",
+        "enum": sorted(set(obligation_ids)),
+    }
     step_properties["obligation_ids"]["items"] = {
         "type": "string",
         "enum": sorted(set(obligation_ids)),
@@ -1462,6 +1552,10 @@ def _allocation_output_schema(
         }
     )
     items["obligation_ids"]["items"] = {"type": "string", "enum": ids}
+    result["properties"]["self_obligation_ids"]["items"] = {
+        "type": "string",
+        "enum": ids,
+    }
     return result
 
 
@@ -1662,8 +1756,9 @@ def _module_decomposition_markdown(
         "",
         "### Obligation allocation ledger (mandatory)",
         "",
-        "- Direct-child obligation_ids must cover every parent obligation id exactly once.",
+        "- self_obligation_ids plus direct-child obligation_ids must cover every parent obligation id exactly once.",
         "- Copy ids verbatim; do not rename, omit, invent, or duplicate them.",
+        "- Put an id in self_obligation_ids when this parent implements it; otherwise put it in exactly one child.",
         "- Negative obligations (prevent/no-write/no-create) are real obligations, not empty behavior.",
         "- PERSISTENCE obligations must continue through a child path to a DB leaf.",
         "",
