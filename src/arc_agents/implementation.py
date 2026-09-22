@@ -46,6 +46,9 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
+FRONTEND_IMPLEMENTATION_OUTPUT_SCHEMA = copy.deepcopy(IMPLEMENTATION_OUTPUT_SCHEMA)
+FRONTEND_IMPLEMENTATION_OUTPUT_SCHEMA["properties"]["edits"]["maxItems"] = 8
+
 
 _PROJECT_CONVENTIONS: dict[str, Any] = {
     "frontend_styling": "Tailwind CSS v4 via @tailwindcss/vite",
@@ -181,6 +184,39 @@ Return exactly one JSON object and no prose:
 """
 
 
+FRONTEND_IMPLEMENTATION_INSTRUCTIONS = """You are ARC's bounded Frontend Implementation Agent.
+Implement the current requirement's frontend experience as a coherent, runnable UI.
+
+Use the supplied requirement and requirement_contract for behavior, and use design_context
+and its visual references for layout, hierarchy, styling, responsive composition, and content
+direction. The frontend target modules and their complete source are in writable_targets.
+The current failure analysis is evidence about what is broken; preserve exact observed facts
+and do not weaken frozen tests.
+
+Frontend priorities:
+- Implement the requirement-owned Page, Component, Layout, and Store modules as one connected flow.
+- Wire the injected API client and Store dependencies; do not use ad-hoc fetch, a second store,
+  window.location, or invented routes.
+- Use the exact routes, controls, labels, API symbols, Store actions, and target modules supplied
+  by design_context and writable_targets.
+- Build a finished responsive interface with semantic controls, associated labels, keyboard focus,
+  sufficient contrast, loading/error/success states, and Tailwind CSS v4 utility classes.
+- Use reference images only as visual guidance. Do not copy unrelated image content or invent
+  requirement data. Keep navigation and shared state coherent across all supplied screens.
+- Remove skeleton placeholders and data-arc-obligation markers from the proposed implementation.
+
+Patch scope:
+- Edit only frontend writable module ids in allowed_writable_module_ids.
+- Return only the text inside each module's implementation markers.
+- Do not change imports, exports, signatures, routes, generated types, tests, or compiler glue.
+- Prefer one focused replacement per module. Do not emit prose, markdown, diffs, or full files.
+- Keep each replacement concise and complete; never truncate JSX, strings, or object literals.
+
+Return exactly one JSON object:
+{"edits":[{"module_id":"exact frontend writable id","replacement":"complete region source"}]}
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class ImplementationRequest:
     requirement_id: str
@@ -230,6 +266,7 @@ class ImplementationAgent:
             50_000,
             min(int(max_context_characters), 1_000_000),
         )
+        self._allowed_kinds: set[str] | None = None
         self._agent = BaseStructuredAgent(
             model,
             schema_name="arc_implementation_patch",
@@ -400,6 +437,13 @@ class ImplementationAgent:
         writable_ids = {
             str(value) for value in requirement_targets.get("writable", []) if str(value)
         }
+        if self._allowed_kinds is not None:
+            writable_ids = {
+                module_id
+                for module_id in writable_ids
+                if str(bindings.get(module_id, {}).get("kind", "")).upper()
+                in self._allowed_kinds
+            }
         read_only_ids = {
             str(value) for value in requirement_targets.get("read_only", []) if str(value)
         }
@@ -506,6 +550,9 @@ class ImplementationAgent:
         dynamic_context = {
             "requirement_id": requirement_id,
             "iteration": request.iteration,
+            "implementation_phase": (
+                "FRONTEND_BOOTSTRAP" if bootstrap_failure else "TDD_REPAIR"
+            ),
             "requirement": request.requirement,
             "requirement_contract": request.requirement_contract,
             "failure_analysis": _failure_analysis_with_failed_tests(
@@ -617,11 +664,45 @@ class ImplementationAgent:
         return tests, errors
 
 
+class FrontendImplementationAgent(ImplementationAgent):
+    """Frontend-specialized agent with a frontend-only writable surface."""
+
+    FRONTEND_KINDS = {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
+
+    def __init__(
+        self,
+        model: JsonModel,
+        output_root: Path,
+        *,
+        retries: int = 2,
+        max_context_characters: int = 600_000,
+        trace: Callable[[str], None] | None = None,
+    ) -> None:
+        super().__init__(
+            model,
+            output_root,
+            retries=retries,
+            max_context_characters=max_context_characters,
+            trace=trace,
+        )
+        self._allowed_kinds = set(self.FRONTEND_KINDS)
+        self._agent = BaseStructuredAgent(
+            model,
+            schema_name="arc_frontend_implementation_patch",
+            instructions=FRONTEND_IMPLEMENTATION_INSTRUCTIONS,
+            output_schema=FRONTEND_IMPLEMENTATION_OUTPUT_SCHEMA,
+            retries=retries,
+            trace=trace,
+            model_log=self._write_model_log,
+        )
+
+
 def _format_model_log(payload: dict[str, Any]) -> str:
     sections = [
         "ARC MODEL INVOCATION",
         f"schema_name: {payload.get('schema_name', '')}",
         f"requirement_id: {payload.get('requirement_id', '')}",
+        f"implementation_phase: {_model_log_phase(payload)}",
         f"iteration: {payload.get('iteration', '')}",
         f"attempt: {payload.get('attempt', '')}",
         f"duration_ms: {payload.get('duration_ms', '')}",
@@ -645,6 +726,22 @@ def _format_model_log(payload: dict[str, Any]) -> str:
         "",
     ]
     return "\n".join(sections)
+
+
+def _model_log_phase(payload: dict[str, Any]) -> str:
+    input_payload = payload.get("input_payload")
+    if not isinstance(input_payload, dict):
+        return ""
+    segments = input_payload.get(CONTEXT_SEGMENTS_KEY)
+    if not isinstance(segments, list):
+        return ""
+    for segment in segments:
+        if not isinstance(segment, dict) or segment.get("name") != "current_task":
+            continue
+        task = segment.get("payload")
+        if isinstance(task, dict):
+            return str(task.get("implementation_phase", ""))
+    return ""
 
 
 def _validate_decision(
