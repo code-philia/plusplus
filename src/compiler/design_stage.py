@@ -176,7 +176,8 @@ API_DECOMPOSITION_SCHEMA: dict[str, Any] = {
 }
 
 
-REQUIREMENT_CONTRACT_INSTRUCTIONS = """Analyze one atomic requirement as a black box and fill the supplied fixed
+REQUIREMENT_CONTRACT_INSTRUCTIONS = """You are a senior product-contract analyst and domain modeler.
+Analyze one atomic requirement as a black box and fill the supplied fixed
 template. Keep every required key and use [] when a section is empty. Describe only the requirement spec, external
 inputs, observable outputs, required effects, and behavioral obligations. Set server_state to true only when satisfying
 the requirement requires server-side state or server responsibilities (database access, runtime session/cookie state,
@@ -196,7 +197,7 @@ CREATE on `session`, not SESSION_WRITE. Reserve SESSION_WRITE for a non-database
 requirement writes a browser cookie, include COOKIE_WRITE. In particular, checking whether values already exist for
 UNIQUE or COMPOSITE_UNIQUE constraints requires a READ effect even when the database also enforces the constraint. Do
 not hide required effects inside the prose spec.
-Database access is implemented through one compiler-owned client injected into DB modules. Treat schema table symbols
+Database access is implemented through one shared client injected into DB modules. Treat schema table symbols
 as Drizzle table definitions, never as repositories or in-memory data containers; do not model table rows through
 properties such as rows, data, or items.
 Reuse the established vocabulary. The context lists every API contract already frozen by earlier requirements as
@@ -213,7 +214,8 @@ Example shape:
 {"requirement_id":"REQ-1.1","spec":"Register one traveler.","server_state":true,"inputs":[{"semantic_id":"registration.username","name":"username","type":"string","description":"Requested username.","required":true}],"outputs":[{"semantic_id":"traveler.id","name":"traveler_id","type":"uuid","description":"Created traveler id.","required":true}],"effects":[{"id":"create_traveler","operation":"CREATE","target":"traveler","fields":["username"]}],"obligations":[{"id":"validate_registration","kind":"VALIDATION","description":"Reject invalid registration data.","scenario_ids":["REQ-1.1:scenario:1"]}]}
 """
 
-API_DECOMPOSITION_INSTRUCTIONS = """Turn one Requirement Contract into API modules. Keep one user action in one API
+API_DECOMPOSITION_INSTRUCTIONS = """You are a senior backend API architect.
+Turn one Requirement Contract into API modules. Keep one user action in one API
 unless the requirement explicitly defines multiple operations. Every API contains exactly kind, name, spec, inputs,
 outputs, effects, and obligation_ids. Set kind to API. Copy interface fields and effects from the supplied contract without changing
 their semantic identifiers, types, or required flags. Field names are local parameter labels and may be made clearer
@@ -226,7 +228,8 @@ complete parent obligation id set with the union of API obligation_ids exactly.
 Do not design child functions or implementation steps. Return only `{\"modules\": [...]}`.
 """
 
-MODULE_DECOMPOSITION_INSTRUCTIONS = """Read the layered Markdown context and decompose the current module from the top down.
+MODULE_DECOMPOSITION_INSTRUCTIONS = """You are a senior backend decomposition architect.
+Read the layered Markdown context and decompose the current module from the top down.
 Silently plan how the parent responsibility is completed, then return only its direct child modules in execution order.
 
 Every child contains exactly seven top-level fields: kind, name, spec, inputs, outputs, effects, and obligation_ids. Each interface field

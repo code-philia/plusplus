@@ -81,7 +81,8 @@ PAGE_LAYOUT_COMPONENT_SCHEMA: dict[str, Any] = {
     },
 }
 
-COMPONENT_INSTRUCTIONS = """Decompose exactly one Page or Layout into its direct meaningful functional Components.
+COMPONENT_INSTRUCTIONS = """You are a senior frontend component architect.
+Decompose exactly one Page or Layout into its direct meaningful functional Components.
 Return only the supplied JSON shape. Do not recursively create a DOM tree or implementation details. CREATE defines
 one new global component contract; REUSE must reference an existing compatible component by copying its registry name
 without the COMPONENT prefix. A Page parent may create PAGE or SHARED components. A Layout parent may create LAYOUT

@@ -17,7 +17,8 @@ from .model_client import StructuredModel, describe_model_error
 from .trace_payload import format_payload_trace
 
 
-SCREEN_PARTITION_INSTRUCTIONS = """Partition one already frozen screen into the components that implement it.
+SCREEN_PARTITION_INSTRUCTIONS = """You are a senior interaction and component-architecture specialist.
+Partition one already frozen screen into the components that implement it.
 A component is the unit a single requirement is implemented in: one cohesive region of the screen with its own data,
 its own local state, and its own interactions. Return the smallest set of components that satisfies these rules.
 

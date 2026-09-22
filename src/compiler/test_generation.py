@@ -85,8 +85,9 @@ TEST_GENERATION_SCHEMA: dict[str, Any] = {
 }
 
 
-TEST_GENERATION_INSTRUCTIONS = """You are the Stage 4 Test Generator for one atomic requirement.
-Generate a small set of executable RED tests from the supplied Requirement Context Pack.
+TEST_GENERATION_INSTRUCTIONS = """You are a senior test engineer specializing in executable,
+requirement-driven unit, integration, and end-to-end tests.
+Generate a small set of executable RED tests from the supplied requirement context.
 
 Ownership boundary:
 - Expected behavior and assertions come only from requirement and requirement_contract.
@@ -104,7 +105,7 @@ Ownership boundary:
 - For each layer, target at least one exact module listed in that layer's target_modules.
 
 Testing rules:
-- Test observable behavior through the public seam. Do not assert internal call counts or mock ARC modules.
+- Test observable behavior through the public seam. Do not assert internal call counts or mock requirement-owned modules.
 - Mock only external system boundaries when the requirement makes that unavoidable.
 - Expected values must be requirement examples or independent literals, never recomputed by the implementation algorithm.
 - Cover every supplied scenario id at least once across the suite and include at least one focused case per required layer.

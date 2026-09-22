@@ -17,7 +17,8 @@ from .model_client import StructuredModel, describe_model_error
 from .trace_payload import format_payload_trace
 
 
-THIN_FRONTEND_INSTRUCTIONS = """Design the thin frontend contract for the entire product in one pass.
+THIN_FRONTEND_INSTRUCTIONS = """You are a senior product frontend architect.
+Design the thin frontend contract for the entire product in one pass.
 Return screens/routes, user journeys, API usages, cross-page state policies, and requirement links only.
 Do not design layouts, components, JSX, CSS, files, props, events, component trees, or page-local state.
 Reference images are evidence for each screen's eventual composition and visual language. Preserve their ids.

@@ -38,7 +38,7 @@ FAILURE_SYNTHESIS_SCHEMA: dict[str, Any] = {
 }
 
 
-FAILURE_SYNTHESIS_INSTRUCTIONS = """You are ARC's test-failure analyst.
+FAILURE_SYNTHESIS_INSTRUCTIONS = """You are a senior software-test failure analyst.
 Read the failed-test sections extracted from Playwright's JSON reporter and pw:api output. Produce a concise but
 information-preserving plain-text analysis for an implementation agent. For every FAILED TEST section, identify it by
 test_file and title, then state the exact URL/route, locator or assertion,

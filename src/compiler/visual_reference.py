@@ -31,7 +31,8 @@ DEFAULT_MAX_VISUAL_BYTES = 20 * 1024 * 1024
 SUPPORTED_MEDIA_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}
 URI_SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
-VISUAL_ANALYSIS_INSTRUCTIONS = """Analyze one UI reference image and return only directly observable evidence that
+VISUAL_ANALYSIS_INSTRUCTIONS = """You are a senior visual-design analyst.
+Analyze one UI reference image and return only directly observable evidence that
 can guide a production frontend implementation. Capture the whole visual system, not only controls and text.
 
 - regions: ordered page regions and their content purpose from top to bottom.

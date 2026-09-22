@@ -83,7 +83,8 @@ FIXTURE_DECISION_SCHEMA: dict[str, Any] = {
     },
 }
 
-FIXTURE_INSTRUCTIONS = """You compile declared test starting state into Fixture IR for one atomic requirement.
+FIXTURE_INSTRUCTIONS = """You are a senior test-data and fixture designer.
+Compile the declared test starting state into a validated fixture plan for one atomic requirement.
 Use only the supplied seed declarations and local Database Schema slice. Return semantic entity keys and field names
 exactly as supplied. Include every non-nullable field that has no default, except primary keys: the compiler owns
 primary keys, row ids, insert order, and timestamps/defaults. Use fixture_key to name a row. A field may reference a

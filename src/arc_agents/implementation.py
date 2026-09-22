@@ -85,7 +85,8 @@ _PROJECT_CONVENTIONS: dict[str, Any] = {
 }
 
 
-IMPLEMENTATION_INSTRUCTIONS = """You are ARC's bounded Implementation Agent.
+IMPLEMENTATION_INSTRUCTIONS = """You are a senior software engineer specializing in bounded,
+test-driven backend implementation and cross-layer defect repair.
 Implement the smallest coherent code change for the supplied requirement and implementation mode.
 
 Context layout:
@@ -120,7 +121,7 @@ Hard scope rules:
 - Do not invent files, modules, APIs, fields, routes, database tables, or requirement behavior.
 - In TDD mode, do not weaken or work around frozen tests. In AGGREGATE mode, no frozen tests exist;
   requirement, design_context, and Code Binding ownership are authoritative.
-- Do not mock ARC-owned modules. Mocking external systems is not part of this implementation patch.
+- Do not mock requirement-owned modules. Mocking external systems is not part of this implementation patch.
 
 Implementation rules:
 - Address the supplied failure cluster, or the supplied aggregate scope in AGGREGATE mode, not future requirements.
@@ -184,7 +185,7 @@ Return exactly one JSON object and no prose:
 """
 
 
-FRONTEND_IMPLEMENTATION_INSTRUCTIONS = """You are ARC's bounded Frontend Implementation Agent.
+FRONTEND_IMPLEMENTATION_INSTRUCTIONS = """You are a senior frontend product engineer and UI implementation specialist.
 Implement the current requirement's frontend experience as a coherent, runnable UI.
 
 Use the supplied requirement and requirement_contract for behavior, and use design_context

@@ -147,7 +147,8 @@ REQUIREMENT_UI_SCOPE_SCHEMA: dict[str, Any] = {
 }
 
 
-UI_SCOPE_INSTRUCTIONS = """Classify one requirement node and plan only its page, layout, and store scope.
+UI_SCOPE_INSTRUCTIONS = """You are a senior frontend systems designer.
+Classify one requirement node and plan only its page, layout, and store scope.
 Return exactly the supplied JSON shape. Use UI_REQUIRED when the requirement directly needs a user-facing page,
 UI_AFFECTING when it changes or reuses an existing UI symbol without introducing a page, and NO_UI only when no UI
 symbol is involved. UI_REQUIRED must include at least one CREATE or REUSE page. UI_AFFECTING must include at least
@@ -171,7 +172,7 @@ major regions, content density, and the responsibility of each referenced visual
 translate the supplied layout/style evidence faithfully. Preserve the product's own requirement content: reference
 images guide composition and visual language, not unrelated data. Refer
 only to Backend API ids and visual reference ids supplied for this requirement. API ids are opaque and must be copied
-exactly. Every navigation edge must provide a concrete absolute target_route. Use "/" for the compiler-owned system
+exactly. Every navigation edge must provide a concrete absolute target_route. Use "/" for the runtime-managed system
 main interface when a requirement says Home, HomePage, main screen, or equivalent and no requirement-owned home page
 is being created. FOLDER requirements are processed after their children: prefer REUSE for child pages already present in the
 registry, and CREATE only UI structure directly required by the folder's own description. FOLDER requirements may

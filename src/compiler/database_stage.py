@@ -145,7 +145,8 @@ CONSTRAINT_DECISION_SCHEMA: dict[str, Any] = {
 }
 
 
-ENTITY_INSTRUCTIONS = """You are Pass 1, ENTITY_DISCOVERY, of a database schema compiler.
+ENTITY_INSTRUCTIONS = """You are a senior data-modeling specialist focused on persistent domain entities.
+Your task is to perform the entity-discovery pass for one atomic requirement.
 For exactly one atomic requirement, decide which persistent entities it reuses and which persistent entities must
 be introduced. Existing entities are compiler symbols: reuse them when their meaning fits. Do not produce fields,
 relationships, constraints, APIs, modules, or SQL. Entity keys are singular snake_case. Case-only name differences
@@ -166,7 +167,8 @@ Valid empty output example:
 {"requirement_id":"REQ-4.1","reuse_entities":[],"new_entities":[]}
 """
 
-FIELD_INSTRUCTIONS = """You are Pass 2, FIELD_DISCOVERY, of a database schema compiler.
+FIELD_INSTRUCTIONS = """You are a senior database-schema specialist focused on scalar domain fields.
+Your task is to perform the field-discovery pass for one atomic requirement.
 For exactly one atomic requirement, discover scalar domain fields only for entities already associated with it.
 Reuse existing fields whenever their meaning fits. Do not create entities, relationships, foreign-key fields,
 cross-field constraints, APIs, modules, or SQL. Do not put id in new_fields because the compiler creates it; id may
@@ -190,7 +192,8 @@ Valid no-field output example:
 {"requirement_id":"REQ-3.1","entities":[{"entity":"train_service","reuse_fields":[],"new_fields":[]}]}
 """
 
-RELATIONSHIP_INSTRUCTIONS = """You are Pass 3, RELATIONSHIP_RESOLUTION, of a database schema compiler.
+RELATIONSHIP_INSTRUCTIONS = """You are a senior data-modeling specialist focused on entity relationships.
+Your task is to resolve persistent relationships for one atomic requirement.
 For exactly one atomic requirement, decide only logical relationships among the supplied related entities. Choose
 parent, child, ONE_TO_ONE / ONE_TO_MANY / MANY_TO_MANY, and whether the child reference is required. Do not create
 entities, fields, foreign keys, constraints, APIs, modules, or SQL. The compiler lowers accepted relationships.
@@ -213,7 +216,8 @@ Valid no-relationship output example:
 {"requirement_id":"REQ-3.1","relationships":[]}
 """
 
-CONSTRAINT_INSTRUCTIONS = """You are Pass 4, CONSTRAINT_RESOLUTION, of a database schema compiler.
+CONSTRAINT_INSTRUCTIONS = """You are a senior database-integrity specialist focused on business constraints.
+Your task is to resolve integrity rules for one atomic requirement.
 For exactly one atomic requirement, extract integrity rules not already represented by field properties or
 relationships. Use UNIQUE, COMPOSITE_UNIQUE, or APPLICATION_RULE and fully qualified entity.field symbols.
 Simple length, range, enum, pattern, and date rules belong to field properties and must not be repeated here.
