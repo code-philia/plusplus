@@ -105,7 +105,16 @@ class BaseStructuredAgent:
                 )
             except Exception as exc:
                 last_errors = [f"AGENT_MODEL_FAILED: {_describe_error(exc)}"]
-                feedback = last_errors
+                error_text = str(exc).lower()
+                feedback = (
+                    [
+                        "The provider response was empty or invalid JSON. Return exactly one non-empty JSON object; "
+                        "do not emit Markdown, a code fence, prose, or an empty response."
+                    ]
+                    if "jsondecodeerror" in error_text
+                    or "empty" in error_text
+                    else last_errors
+                )
                 self._emit(last_errors[0])
                 if attempt <= self._retries:
                     delay = _transport_retry_delay(attempt)

@@ -154,10 +154,26 @@ class Model:
         if content is None:
             raise ValueError("Structured model response is empty.")
         text = str(content)
-        parsed = json.loads(text)
+        parsed = _parse_json_object(text)
         if not isinstance(parsed, dict):
             raise ValueError("Structured model response must be a JSON object.")
         return parsed
+
+
+def _parse_json_object(text: str) -> Any:
+    """Parse provider JSON while accepting lossless Markdown wrapping.
+
+    Compatible endpoints occasionally ignore the structured-output contract and
+    wrap the otherwise valid object in a ``json`` code fence.  Removing only that
+    wrapper is safe; arbitrary prose is deliberately not accepted.
+    """
+
+    candidate = text.strip().lstrip("\ufeff")
+    if candidate.startswith("```") and candidate.endswith("```"):
+        lines = candidate.splitlines()
+        if len(lines) >= 3 and lines[0].strip().startswith("```") and lines[-1].strip() == "```":
+            candidate = "\n".join(lines[1:-1]).strip()
+    return json.loads(candidate)
 
 
 def _user_messages(input_payload: dict[str, Any]) -> list[dict[str, str]]:

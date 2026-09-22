@@ -32,6 +32,7 @@ class ApplyResult:
     changed_modules: list[str] = field(default_factory=list)
     applied_edits: list[AppliedEdit] = field(default_factory=list)
     rejected_changes: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     schema_version: int = WRITE_GUARD_SCHEMA_VERSION
 
     @property
@@ -150,6 +151,7 @@ class WriteGuard:
 
         planned_files: list[_PlannedFile] = []
         applied_edits: list[AppliedEdit] = []
+        warnings: list[str] = []
         for relative, file_edits in sorted(edits_by_file.items()):
             target = (self.output_root / Path(relative)).resolve()
             if self.output_root not in target.parents or not target.is_file():
@@ -196,12 +198,18 @@ class WriteGuard:
                 if marker_error:
                     rejected.append(marker_error)
                     break
-                updated = _replace_region(
+                candidate = _replace_region(
                     updated,
                     start_marker=start_marker,
                     end_marker=end_marker,
                     replacement=edit.replacement,
                 )
+                if candidate == updated:
+                    warnings.append(
+                        f"ARC4528 PATCH_NO_CHANGES: ignored no-op edit for {module_id}."
+                    )
+                    continue
+                updated = candidate
                 file_applied.append(
                     AppliedEdit(
                         module_id=module_id,
@@ -214,9 +222,6 @@ class WriteGuard:
                 continue
             after_sha256 = hashlib.sha256(updated.encode("utf-8")).hexdigest()
             if updated == original:
-                rejected.append(
-                    f"ARC4528 PATCH_NO_CHANGES: proposed edits do not change {relative}."
-                )
                 continue
             for row in file_applied:
                 row.after_sha256 = after_sha256
@@ -235,6 +240,11 @@ class WriteGuard:
 
         if rejected:
             return self._rejected(requirement_id, rejected)
+        if not planned_files:
+            return self._rejected(
+                requirement_id,
+                ["ARC4528 PATCH_NO_CHANGES: proposed edits do not change any writable source."],
+            )
         if dry_run:
             return ApplyResult(
                 requirement_id=requirement_id,
@@ -244,6 +254,7 @@ class WriteGuard:
                     module_id for row in planned_files for module_id in row.module_ids
                 ),
                 applied_edits=applied_edits,
+                warnings=warnings,
             )
 
         written: list[_PlannedFile] = []
@@ -271,6 +282,7 @@ class WriteGuard:
                 module_id for row in planned_files for module_id in row.module_ids
             ),
             applied_edits=applied_edits,
+            warnings=warnings,
         )
 
     def snapshot(self, relative_files: list[str]) -> dict[str, str]:

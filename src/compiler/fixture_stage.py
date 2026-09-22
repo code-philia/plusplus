@@ -45,7 +45,6 @@ FIXTURE_DECISION_SCHEMA: dict[str, Any] = {
     "properties": {
         "fixture_sets": {
             "type": "array",
-            "minItems": 1,
             "maxItems": 4,
             "items": {
                 "type": "object",
@@ -55,7 +54,6 @@ FIXTURE_DECISION_SCHEMA: dict[str, Any] = {
                     "name": {"type": "string"},
                     "rows": {
                         "type": "array",
-                        "minItems": 1,
                         "maxItems": 64,
                         "items": {
                             "type": "object",
@@ -91,6 +89,8 @@ exactly as supplied. Include every non-nullable field that has no default, excep
 primary keys, row ids, insert order, and timestamps/defaults. Use fixture_key to name a row. A field may reference a
 previous row with {"fixture_key":"...","field":"id"}. Do not emit SQL, TypeScript, table names, column names,
 routes, implementation behavior, or undeclared example records. Return exactly one JSON object and no prose.
+If none of the declared records can be mapped to an entity in the supplied local schema, return
+{"fixture_sets":[]} so the compiler can continue without inventing database entities.
 """
 
 
@@ -182,9 +182,11 @@ class FixturePass:
             except Exception as exc:
                 feedback = [describe_model_error(exc)]
                 continue
-            if isinstance(decision.get("fixture_sets"), list) and decision["fixture_sets"]:
+            if isinstance(decision.get("fixture_sets"), list):
                 return decision
-            feedback = ["fixture_sets must contain at least one fixture set."]
+            feedback = [
+                "fixture_sets must be an array; use [] when no declared entity matches the local schema."
+            ]
         errors.append(
             f"ARC2402 FIXTURE_INVALID: {requirement_id}: "
             + (feedback[-1] if feedback else "no valid fixture output")
@@ -270,11 +272,15 @@ def _compile_decision(
             entity_key = str(raw_row.get("entity_key", ""))
             entity = entities.get(entity_key)
             if entity is None:
-                errors.append(f"ARC2402 FIXTURE_ENTITY_UNKNOWN: {requirement_id}: {entity_key!r}.")
+                warnings.append(
+                    f"ARC2401 FIXTURE_ENTITY_DROPPED: {requirement_id}: {entity_key!r} is not in the local schema; row skipped."
+                )
                 continue
             fixture_key = str(raw_row.get("fixture_key", "")).strip() or f"row_{set_index}_{row_index}"
             if fixture_key in known_keys:
-                errors.append(f"ARC2402 FIXTURE_KEY_DUPLICATE: {requirement_id}: {fixture_key!r}.")
+                warnings.append(
+                    f"ARC2401 FIXTURE_KEY_DROPPED: {requirement_id}: duplicate {fixture_key!r}; row skipped."
+                )
                 continue
             fields = {
                 str(field.get("name", "")): field
@@ -294,16 +300,20 @@ def _compile_decision(
                     target_field = str(value["field"])
                     target_values = known_rows.get(target_key)
                     if target_values is None or target_field not in target_values:
-                        errors.append(
-                            f"ARC2402 FIXTURE_REFERENCE_INVALID: {requirement_id}: "
+                        warnings.append(
+                            f"ARC2401 FIXTURE_REFERENCE_DROPPED: {requirement_id}: "
                             f"{fixture_key}.{field_name} -> {target_key}.{target_field}."
                         )
+                        values.pop(field_name, None)
                     else:
                         values[field_name] = copy.deepcopy(target_values[target_field])
                 elif not _value_matches(value, str(field.get("type", "")), bool(field.get("nullable"))):
-                    errors.append(
-                        f"ARC2402 FIXTURE_TYPE_INVALID: {requirement_id}: "
-                        f"{entity_key}.{field_name} expects {field.get('type')}."
+                    warnings.append(
+                        f"ARC2401 FIXTURE_VALUE_REPLACED: {requirement_id}: "
+                        f"{entity_key}.{field_name} expects {field.get('type')}; deterministic fallback used."
+                    )
+                    values[field_name] = _fallback_fixture_value(
+                        requirement_id, fixture_key, field_name, field
                     )
             for field_name, field in fields.items():
                 if field_name in values or bool(field.get("nullable")) or _has_default(field):
@@ -313,9 +323,12 @@ def _compile_decision(
                         requirement_id, fixture_key, field_name, str(field.get("type", "")), row_index
                     )
                     continue
-                errors.append(
-                    f"ARC2402 FIXTURE_REQUIRED_FIELD_MISSING: {requirement_id}: "
-                    f"{entity_key}.{field_name}."
+                values[field_name] = _fallback_fixture_value(
+                    requirement_id, fixture_key, field_name, field
+                )
+                warnings.append(
+                    f"ARC2401 FIXTURE_REQUIRED_FIELD_AUTOFILLED: {requirement_id}: "
+                    f"{entity_key}.{field_name}; deterministic fallback used."
                 )
             known_keys.add(fixture_key)
             known_rows[fixture_key] = copy.deepcopy(values)
@@ -433,6 +446,33 @@ def _stable_primary_key(
 def _stable_id(prefix: str, requirement_id: str, value: str) -> str:
     digest = hashlib.sha256(f"{requirement_id}\0{value}".encode("utf-8")).hexdigest()[:12]
     return f"{prefix}.{digest}"
+
+
+def _fallback_fixture_value(
+    requirement_id: str,
+    fixture_key: str,
+    field_name: str,
+    field: dict[str, Any],
+) -> Any:
+    """Keep a malformed seed usable without inventing a random value."""
+
+    field_type = str(field.get("type", "string"))
+    seed = f"arc-fixture:{requirement_id}:{fixture_key}:{field_name}"
+    if field_type == "integer":
+        return 1
+    if field_type == "number":
+        return 1
+    if field_type == "boolean":
+        return False
+    if field_type == "datetime":
+        return "1970-01-01T00:00:00.000Z"
+    if field_type == "date":
+        return "1970-01-01"
+    if field_type == "uuid":
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+    if field_type == "json":
+        return {}
+    return f"fixture_{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:10]}"
 
 
 def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:

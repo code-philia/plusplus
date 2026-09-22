@@ -333,6 +333,12 @@ _SELF_OWNERSHIP_RULE = (
 API_DECOMPOSITION_INSTRUCTIONS = (
     API_DECOMPOSITION_INSTRUCTIONS.rstrip() + "\n\n" + _SELF_OWNERSHIP_RULE + "\n"
 )
+API_DECOMPOSITION_INSTRUCTIONS += """
+Effect allocation rule: a READ effect may be copied to more than one independent API
+when each API genuinely needs the same lookup. CREATE, UPDATE, DELETE, SESSION_WRITE,
+COOKIE_WRITE, and EXTERNAL_IO effects are single-owner and must appear in exactly one API.
+Never duplicate a mutating effect merely to satisfy coverage.
+"""
 MODULE_DECOMPOSITION_INSTRUCTIONS = (
     MODULE_DECOMPOSITION_INSTRUCTIONS.rstrip() + "\n\n" + _SELF_OWNERSHIP_RULE + "\n"
 )
@@ -1312,7 +1318,37 @@ def _api_plan_issues(
         issues.append(_issue("API_INPUT_COVERAGE", f"Contract inputs are not exposed: {sorted(missing_inputs)}", "REQUIREMENT_API", requirement_id))
     if missing_outputs:
         issues.append(_issue("API_OUTPUT_COVERAGE", f"Contract outputs are not exposed: {sorted(missing_outputs)}", "REQUIREMENT_API", requirement_id))
-    issues.extend(_allocation_issues(allocated_effects, set(expected_effects), "effect", "REQUIREMENT_API", requirement_id))
+    # A READ is a reusable lookup contract: independent APIs may legitimately
+    # perform the same lookup. Mutating effects remain single-owner because
+    # duplicating CREATE/UPDATE/DELETE would duplicate side effects.
+    unique_effects = {
+        effect_id
+        for effect_id, effect in expected_effects.items()
+        if str(effect.get("operation", "")).upper() != "READ"
+    }
+    allocated_unique_effects = [
+        effect_id for effect_id in allocated_effects if effect_id in unique_effects
+    ]
+    issues.extend(_allocation_issues(
+        allocated_unique_effects,
+        unique_effects,
+        "effect",
+        "REQUIREMENT_API",
+        requirement_id,
+    ))
+    missing_read_effects = sorted(
+        effect_id
+        for effect_id, effect in expected_effects.items()
+        if str(effect.get("operation", "")).upper() == "READ"
+        and effect_id not in allocated_effects
+    )
+    if missing_read_effects:
+        issues.append(_issue(
+            "EFFECT_ALLOCATION_MISMATCH",
+            f"effect allocation must cover the parent exactly: missing={missing_read_effects}.",
+            "REQUIREMENT_API",
+            requirement_id,
+        ))
     issues.extend(_allocation_issues(allocated_obligations, expected_obligations, "obligation", "REQUIREMENT_API", requirement_id))
     return issues
 
