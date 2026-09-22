@@ -33,9 +33,9 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["module_id", "search", "replacement"],
+                "required": ["file", "search", "replacement"],
                 "properties": {
-                    "module_id": {"type": "string", "minLength": 1},
+                    "file": {"type": "string", "minLength": 1},
                     "search": {"type": "string", "minLength": 1, "maxLength": 80000},
                     "replacement": {
                         "type": "string",
@@ -49,10 +49,9 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
 
 FRONTEND_IMPLEMENTATION_OUTPUT_SCHEMA = copy.deepcopy(IMPLEMENTATION_OUTPUT_SCHEMA)
 # Frontend JSX/TSX regions are substantially larger and more coupled than
-# backend fragments.  Keep one module per response so truncation or malformed
-# JSON can only affect the current module; the orchestrator continues with
-# remaining modules in subsequent calls.
-FRONTEND_IMPLEMENTATION_OUTPUT_SCHEMA["properties"]["edits"]["maxItems"] = 1
+# backend fragments. Keep a bounded number of exact edits per response while
+# allowing multiple non-overlapping edits in the same source file.
+FRONTEND_IMPLEMENTATION_OUTPUT_SCHEMA["properties"]["edits"]["maxItems"] = 8
 
 
 _PROJECT_CONVENTIONS: dict[str, Any] = {
@@ -107,12 +106,16 @@ Authority and evidence:
 - Failure localization comes from the compiler's failure cluster; the readable
   failure_analysis text contains the model-oriented diagnosis and failed-test
   JSON/pw:api logs when the failing layer is Playwright.
-- Real files, symbols, call edges, and editable regions come from writable_targets.
+- Real files, symbols, call edges, editable regions, and complete source text come from
+  `writable_targets` (the module cards). Each card contains `module_id`, `file`, and `source`.
 - Read-only dependency interfaces are included only when needed by design evidence; they must never be edited.
 - Scope warnings are authoritative routing signals. If a warning identifies a
   compiler-owned, frozen-test, contract, infrastructure, or dependency issue,
   do not guess around it or edit outside the allowed implementation regions.
 - Each writable_targets entry contains its complete source, so use that field as the source of truth.
+  To construct an edit, first select a writable target module card, copy its `file` value exactly
+  as the relative output path, then copy an exact old fragment from that card's `source` into
+  `search`. Do not infer paths from module_id and do not look for a separate source-file section.
 - The writable surface contains every editable module owned by this requirement. Failure localization never limits
   the available source to one hop or one test layer. Diagnose across callers, callees, and sibling modules before
   choosing the smallest coherent patch.
@@ -121,11 +124,14 @@ Authority and evidence:
   whole problem; type errors commonly span several callers and callees.
 
 Hard scope rules:
-- Return replacements only for module ids in allowed_writable_module_ids.
+- Return replacements only for files represented by the supplied writable target module cards.
 - Each edit must include a short, exact `search` fragment copied from the supplied source and a
   `replacement` containing only its replacement text. The search fragment must be unique inside
   that module's implementation region. Exact matching is the authority; do not add or depend on
   a module marker in the patch payload.
+- The `edits` list is file-based. A relative file path may appear more than once, and this is
+  intentional: use one row per exact search/replacement pair. Never merge unrelated edits merely
+  because they share a file. Do not return module_id in the output.
 - Do not modify tests, assertions, imports, exports, signatures, routes, generated types, configs, or compiler glue.
 - Use only symbols already available in the supplied source file and public read-only interfaces.
 - Do not invent files, modules, APIs, fields, routes, database tables, or requirement behavior.
@@ -191,7 +197,7 @@ Implementation rules:
 - Prefer the smallest coherent search/replacement pair and preserve surrounding source.
 
 Return exactly one JSON object and no prose:
-{"edits":[{"module_id":"exact writable id","search":"unique old source fragment","replacement":"new source fragment"}]}
+{"edits":[{"file":"frontend/src/path/File.tsx","search":"unique old source fragment","replacement":"new source fragment"}]}
 """
 
 
@@ -217,20 +223,22 @@ Frontend priorities:
 - Remove skeleton placeholders and data-arc-obligation markers from the proposed implementation.
 
 Patch scope:
-- Edit only frontend writable module ids in allowed_writable_module_ids.
+- Edit only frontend writable files represented by the supplied writable target module cards.
+- For every edit, obtain `file` and the old text from the same `writable_targets` card; never
+  invent a path, use a module_id as a path, or rely on a separate `target_modules` list for source.
 - Return an exact `search` fragment copied from the current source and its replacement. The search
   fragment must be unique inside the module implementation region. Exact matching is sufficient;
   do not add a module marker solely for routing or patch identity.
 - Do not change imports, exports, signatures, routes, generated types, tests, or compiler glue.
-- Return exactly one edit for exactly one supplied frontend module. Do not emit prose, markdown,
-  diffs, or full files.
+- Return exact file-based edits. The same relative file may appear multiple times when it needs
+  multiple non-overlapping replacements. Do not emit module_id in the output.
 - Keep each replacement concise and complete; never truncate JSX, strings, or object literals.
 - Return only one module that needs to change for the current failure or bootstrap scope. If
   several modules are supplied, choose the first coherent module that can make progress; the caller
   will invoke you again for the remaining modules. Never combine multiple modules into one edit.
 
 Return exactly one JSON object:
-{"edits":[{"module_id":"exact frontend writable id","search":"unique old JSX or logic fragment","replacement":"new JSX or logic fragment"}]}
+{"edits":[{"file":"frontend/src/path/File.tsx","search":"unique old JSX or logic fragment","replacement":"new JSX or logic fragment"}]}
 """
 
 
@@ -247,6 +255,7 @@ class ImplementationRequest:
     design_context: dict[str, Any] | None = None
     previous_patch_metadata: dict[str, Any] | None = None
     failure_analysis_text: str = ""
+    retry_feedback: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -321,6 +330,7 @@ class ImplementationAgent:
                 allowed_ids=set(source_hashes),
                 focus_ids=focus_ids,
             ),
+            initial_feedback=list(request.retry_feedback),
         )
         if not invocation.ok or invocation.output is None:
             return ImplementationResult(
@@ -332,8 +342,8 @@ class ImplementationAgent:
 
         edits = tuple(
             ProposedEdit(
-                module_id=str(row["module_id"]),
-                expected_sha256=source_hashes[str(row["module_id"])],
+                file=str(row["file"]),
+                expected_sha256=source_hashes[str(row["file"])],
                 search=str(row["search"]),
                 replacement=str(row["replacement"]),
             )
@@ -471,7 +481,12 @@ class ImplementationAgent:
             for target in report.get("writable_targets", [])
             if isinstance(target, dict) and str(target.get("module_id", ""))
         }
-        focus_ids = reported_writable_ids & writable_ids
+        focus_files = {
+            _safe_workspace_file(str(bindings[module_id].get("file", "")), source=True)
+            for module_id in (reported_writable_ids & writable_ids)
+            if module_id in bindings
+        }
+        focus_files = {value for value in focus_files if value}
         # The general implementation agent may inspect a cross-layer backend
         # failure, but it must not opportunistically rewrite frontend modules
         # unless the failure cluster itself identifies a frontend target.  The
@@ -540,7 +555,12 @@ class ImplementationAgent:
                     f"ARC4530 IMPLEMENTATION_CONTEXT_INVALID: cannot read {relative}: {exc}"
                 )
                 continue
-            source_hashes[module_id] = digest
+            existing_digest = source_hashes.get(relative)
+            if existing_digest is not None and existing_digest != digest:
+                errors.append(
+                    f"ARC4530 IMPLEMENTATION_CONTEXT_INVALID: inconsistent file hash for {relative}."
+                )
+            source_hashes[relative] = digest
             card = _source_card(binding, digest=digest)
             card["source"] = source
             writable_cards.append(card)
@@ -554,7 +574,7 @@ class ImplementationAgent:
             )
         errors.extend(test_errors)
         if errors:
-            return {}, {}, focus_ids, list(dict.fromkeys(errors))
+            return {}, {}, focus_files, list(dict.fromkeys(errors))
 
         projected_design_context = _project_design_context(
             request.design_context,
@@ -619,7 +639,8 @@ class ImplementationAgent:
                 read_only_ids=read_only_ids,
             ),
             "previous_patch_metadata": request.previous_patch_metadata,
-            "allowed_writable_module_ids": sorted(source_hashes),
+            "prior_retry_feedback": list(request.retry_feedback),
+            "allowed_writable_files": sorted(source_hashes),
         }
         context = {
             CONTEXT_SEGMENTS_KEY: [
@@ -645,14 +666,14 @@ class ImplementationAgent:
             return (
                 {},
                 {},
-                focus_ids,
+                focus_files,
                 [
                     "ARC4532 IMPLEMENTATION_CONTEXT_TOO_LARGE: "
                     f"{context_size} characters exceeds {self._max_context_characters}; "
                     f"largest_sections: {largest_sections}."
                 ],
             )
-        return context, source_hashes, focus_ids, []
+        return context, source_hashes, focus_files, []
 
     def _frozen_tests(
         self,
@@ -809,34 +830,34 @@ def _validate_decision(
     errors: list[str] = []
     if not isinstance(edits, list) or not 1 <= len(edits) <= 16:
         return [*errors, "ARC4534 IMPLEMENTATION_OUTPUT_INVALID: edits must contain 1..16 rows."]
-    actual_ids: list[str] = []
+    actual_files: list[str] = []
     for row in edits:
-        if not isinstance(row, dict) or set(row) != {"module_id", "search", "replacement"}:
+        if not isinstance(row, dict) or set(row) != {"file", "search", "replacement"}:
             errors.append("ARC4534 IMPLEMENTATION_OUTPUT_INVALID: malformed edit row.")
             continue
-        module_id = str(row.get("module_id", "")).strip()
+        file = str(row.get("file", "")).strip()
         search = row.get("search")
         replacement = row.get("replacement")
-        actual_ids.append(module_id)
-        if module_id not in allowed_ids:
+        actual_files.append(file)
+        if file not in allowed_ids:
             errors.append(
-                f"ARC4535 IMPLEMENTATION_TARGET_INVALID: {module_id!r} is not writable."
+                f"ARC4535 IMPLEMENTATION_TARGET_INVALID: {file!r} is not a writable file."
             )
         if not isinstance(replacement, str) or not replacement.strip():
             errors.append(
-                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {module_id!r} has no replacement."
+                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} has no replacement."
             )
         if not isinstance(search, str) or not search.strip():
             errors.append(
-                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {module_id!r} has no search fragment."
+                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} has no search fragment."
             )
         elif len(search.encode("utf-8")) > 80_000:
             errors.append(
-                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {module_id!r} search fragment is too large."
+                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} search fragment is too large."
             )
         elif len(replacement.encode("utf-8")) > 200_000:
             errors.append(
-                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {module_id!r} replacement is too large."
+                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} replacement is too large."
             )
         elif any(
             token in replacement
@@ -848,15 +869,13 @@ def _validate_decision(
             )
         ):
             errors.append(
-                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {module_id!r} contains forbidden framing."
+                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} contains forbidden framing."
             )
         elif re.search(r"(?m)^\s*(?:import|export)\s", replacement):
             errors.append(
-                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {module_id!r} attempts to change "
+                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} attempts to change "
                 "a file-level import or export."
             )
-    if len(actual_ids) != len(set(actual_ids)):
-        errors.append("ARC4535 IMPLEMENTATION_TARGET_INVALID: duplicate module edits.")
     return list(dict.fromkeys(errors))
 
 
@@ -1193,8 +1212,8 @@ def _scope_warnings(
             "(tests, imports/exports, routes, generated glue, config, or markers); keep it read-only."
         )
     warnings.append(
-        "EDIT_SCOPE_WARNING: every module in allowed_writable_module_ids is available for diagnosis, "
-        "but only its marker-scoped implementation region may be replaced."
+        "EDIT_SCOPE_WARNING: every supplied writable source file is available for diagnosis, "
+        "but edits must use exact fragments inside writable marker-scoped implementation regions."
     )
     return list(dict.fromkeys(warnings))
 

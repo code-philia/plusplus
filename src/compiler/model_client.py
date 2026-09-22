@@ -52,7 +52,7 @@ def completion_request_kwargs(
         request["response_format"] = response_format
     if is_deepseek_model(model):
         request["reasoning_effort"] = "low"
-        request["extra_body"] = {"thinking": {"type": "disabled"}}
+        request["extra_body"] = {"thinking": {"type": "enabled"}}
     return request
 
 

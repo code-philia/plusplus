@@ -382,6 +382,7 @@ class NodeTDDOrchestrator:
             functional_iterations = 0
             visual_iterations = 0
             patch_iteration = 1 if frontend_implemented else 0
+            retry_feedback: tuple[str, ...] = ()
 
             while True:
                 cluster = _selected_cluster(reports)
@@ -416,6 +417,7 @@ class NodeTDDOrchestrator:
                         iteration=patch_iteration,
                         design_context=self._design_context(requirement_id),
                         previous_patch_metadata=previous_patch_metadata,
+                        retry_feedback=retry_feedback,
                     )
                 )
                 if not implementation.ok or implementation.patch is None:
@@ -434,14 +436,30 @@ class NodeTDDOrchestrator:
                     code_binding_registry=self.code_binding_registry,
                 )
                 if not applied.ok:
-                    return self._finish(
-                        result,
-                        "PATCH_REJECTED",
-                        applied.rejected_changes,
-                        iterations=functional_iterations,
-                        visual_iterations=visual_iterations,
-                        changed_files=changed_files,
+                    # Feed exact WriteGuard/compiler feedback into the next
+                    # implementation attempt instead of terminating the node.
+                    # The next model call receives the original requirement,
+                    # source context, and this rejection as additional evidence.
+                    retry_feedback = [
+                        "The previous implementation patch was rejected by the write guard.",
+                        *applied.rejected_changes,
+                    ]
+                    retry_feedback = tuple(retry_feedback)
+                    failure_analysis_text = "\n\n".join(
+                        value
+                        for value in (
+                            failure_analysis_text,
+                            "IMPLEMENTATION PATCH RETRY FEEDBACK:\n"
+                            + "\n".join(retry_feedback),
+                        )
+                        if value
                     )
+                    previous_patch_metadata = {
+                        "iteration": patch_iteration,
+                        "patch_rejected": True,
+                        "rejection_feedback": applied.rejected_changes,
+                    }
+                    continue
                 changed_files.update(_normalize_path(value) for value in applied.changed_files)
                 result.changed_files = sorted(changed_files)
                 previous_patch_metadata = {

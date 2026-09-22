@@ -5,9 +5,9 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class ProposedEdit:
-    """Replace one uniquely identified source fragment inside a module region."""
+    """Replace one exact source fragment in a writable source file."""
 
-    module_id: str
+    file: str
     expected_sha256: str
     search: str
     replacement: str
