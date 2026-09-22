@@ -58,6 +58,7 @@ class BaseStructuredAgent:
         output_schema: dict[str, Any],
         retries: int = 2,
         trace: Callable[[str], None] | None = None,
+        model_log: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._model = model
         self._schema_name = schema_name
@@ -65,6 +66,7 @@ class BaseStructuredAgent:
         self._output_schema = copy.deepcopy(output_schema)
         self._retries = max(0, min(int(retries), 5))
         self._trace = trace
+        self._model_log = model_log
 
     def invoke(
         self,
@@ -97,13 +99,47 @@ class BaseStructuredAgent:
                 )
             )
             try:
+                started = time.perf_counter()
                 output = self._model.generate_json(
                     schema_name=self._schema_name,
                     instructions=self._instructions,
                     input_payload=payload,
                     output_schema=self._output_schema,
                 )
+                if self._model_log is not None:
+                    try:
+                        self._model_log({
+                        "schema_name": self._schema_name,
+                        "instructions": self._instructions,
+                        "input_payload": payload,
+                        "output_schema": self._output_schema,
+                        "output": output,
+                        "error": None,
+                        "duration_ms": round((time.perf_counter() - started) * 1000),
+                        "attempt": attempt,
+                        "requirement_id": requirement_id,
+                        "iteration": iteration,
+                        })
+                    except Exception as log_exc:
+                        self._emit(f"MODEL_LOG_WRITE_FAILED: {type(log_exc).__name__}: {log_exc}")
             except Exception as exc:
+                if self._model_log is not None:
+                    try:
+                        self._model_log({
+                        "schema_name": self._schema_name,
+                        "instructions": self._instructions,
+                        "input_payload": payload,
+                        "output_schema": self._output_schema,
+                        "output": None,
+                        "error": _describe_error(exc),
+                        "duration_ms": round((time.perf_counter() - started) * 1000)
+                        if "started" in locals() else None,
+                        "attempt": attempt,
+                        "requirement_id": requirement_id,
+                        "iteration": iteration,
+                        })
+                    except Exception as log_exc:
+                        self._emit(f"MODEL_LOG_WRITE_FAILED: {type(log_exc).__name__}: {log_exc}")
                 last_errors = [f"AGENT_MODEL_FAILED: {_describe_error(exc)}"]
                 error_text = str(exc).lower()
                 feedback = (

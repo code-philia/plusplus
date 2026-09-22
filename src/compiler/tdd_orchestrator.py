@@ -1242,7 +1242,29 @@ def _blocked_state(reports: list[TestFailureReport]) -> str | None:
 
 
 def _report_messages(reports: list[TestFailureReport]) -> list[str]:
-    return list(dict.fromkeys(row.message for row in reports if row.message))
+    messages: list[str] = []
+    classes = {row.failure_class for row in reports}
+    if "TEST_MATERIALIZATION" in classes:
+        messages.append(
+            "COMPILER_OWNED_WARNING: test materialization failed; repair the compiler/test artifact, "
+            "not application implementation."
+        )
+    if "INFRASTRUCTURE" in classes:
+        messages.append(
+            "COMPILER_OWNED_WARNING: infrastructure failed before business behavior could be evaluated; "
+            "do not guess an application patch."
+        )
+    if "TEST_OR_CONTRACT_INCONSISTENT" in classes:
+        messages.append(
+            "COMPILER_OWNED_WARNING: test/contract/generated glue is inconsistent; frozen tests, imports, "
+            "routes, and compiler glue remain read-only."
+        )
+    if "DEFERRED_DEPENDENCY" in classes:
+        messages.append(
+            "DEPENDENCY_SCOPE_WARNING: repair the dependency under its owning requirement before retrying."
+        )
+    messages.extend(row.message for row in reports if row.message)
+    return list(dict.fromkeys(messages))
 
 
 def _normalize_path(value: Any) -> str:

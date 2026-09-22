@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -94,13 +95,17 @@ Authority and evidence:
 - Required behavior comes from requirement, scenarios, requirement_contract, and frozen_tests when present.
 - Module behavior and reference-derived frontend layout/style evidence may come from design_context.
 - Failure localization comes from the compiler's failure cluster; the readable
-  failure_analysis text contains the model-oriented diagnosis and complete raw
-  E2E report when the failing layer is Playwright.
+  failure_analysis text contains the model-oriented diagnosis and failed-test
+  JSON/pw:api logs when the failing layer is Playwright.
 - Real files, symbols, call edges, and editable regions come from writable_targets.
 - Read-only dependencies are context only and must never be edited.
+- Scope warnings are authoritative routing signals. If a warning identifies a
+  compiler-owned, frozen-test, contract, infrastructure, or dependency issue,
+  do not guess around it or edit outside the allowed implementation regions.
 - Source files are supplied in full so you can understand existing imports and public surfaces.
-- The writable surface contains every editable module owned by this requirement, not only the first stack-frame match.
-  Diagnose across callers, callees, and sibling modules before choosing the smallest coherent patch.
+- The writable surface contains every editable module owned by this requirement. Failure localization never limits
+  the available source to one hop or one test layer. Diagnose across callers, callees, and sibling modules before
+  choosing the smallest coherent patch.
 
 Hard scope rules:
 - Return replacements only for module ids in allowed_writable_module_ids.
@@ -231,7 +236,17 @@ class ImplementationAgent:
             output_schema=IMPLEMENTATION_OUTPUT_SCHEMA,
             retries=retries,
             trace=trace,
+            model_log=self._write_model_log,
         )
+
+    def _write_model_log(self, payload: dict[str, Any]) -> None:
+        log_root = self.output_root / ".arc" / "model_logs" / "implementation_agent"
+        log_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        requirement_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(payload.get("requirement_id", "unknown")))
+        attempt = int(payload.get("attempt", 0) or 0)
+        path = log_root / f"{stamp}-{requirement_id}-attempt-{attempt}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
     def implement(self, request: ImplementationRequest) -> ImplementationResult:
         requirement_id = str(request.requirement_id).strip()
@@ -394,83 +409,21 @@ class ImplementationAgent:
         }
         focus_ids = reported_writable_ids & writable_ids
         relevant_writable = set(writable_ids)
-        failed_layers = {
-            layer
-            for report in reports
-            if (layer := str(report.get("layer", "")).upper())
-            in {"UNIT", "INTEGRATION", "E2E"}
-        }
         bootstrap_failure = any(
             str(report.get("phase", "")) == "FRONTEND_BOOTSTRAP" for report in reports
         )
-        # Localized repair is no longer restricted to the first iteration: a later
-        # iteration of the same node still knows which modules the failure cluster
-        # points at, and carrying every requirement-owned module forward is the main
-        # source of context growth across a node.
-        focused_repair = mode == "TDD" and bool(focus_ids) and not bootstrap_failure
-        frontend_kinds = {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
-
-        def is_frontend(module_id: str) -> bool:
-            return str(bindings.get(module_id, {}).get("kind", "")) in frontend_kinds
-
-        focus_contains_frontend = any(is_frontend(module_id) for module_id in focus_ids)
-        if focused_repair and not focus_contains_frontend:
-            relevant_writable = _one_hop_writable(focus_ids, writable_ids, bindings)
-        layer_scope = "ALL_FAILED_LAYERS"
-        if focused_repair and failed_layers:
-            # A failed layer already says which half of the stack is under test:
-            # UNIT/INTEGRATION never execute a React module, and an E2E failure that
-            # localizes on a screen is a rendering or wiring defect, not a repository one.
-            if failed_layers <= {"UNIT", "INTEGRATION"}:
-                candidate = {
-                    module_id
-                    for module_id in relevant_writable
-                    if not is_frontend(module_id)
-                }
-                narrowed_scope = "BACKEND_ONLY_FOR_UNIT_INTEGRATION"
-            elif failed_layers == {"E2E"} and focus_contains_frontend:
-                candidate = {
-                    module_id
-                    for module_id in relevant_writable
-                    if is_frontend(module_id)
-                }
-                narrowed_scope = "FRONTEND_ONLY_FOR_E2E"
-            else:
-                candidate, narrowed_scope = set(), ""
-            if candidate and (not focus_ids or candidate & focus_ids):
-                relevant_writable = candidate
-                layer_scope = narrowed_scope
+        # Ordinary repair deliberately exposes the complete writable surface owned
+        # by this requirement. Failure localization is routing evidence only; it
+        # must not hide a caller, callee, or sibling that is several hops away.
+        layer_scope = "ALL_REQUIREMENT_OWNED_WRITABLE_MODULES"
         if not relevant_writable:
             errors.append(
                 f"ARC4530 IMPLEMENTATION_CONTEXT_INVALID: {requirement_id} has no writable targets."
             )
-        relevant_read_only = read_only_ids & {
-            str(value)
-            for module_id in relevant_writable
-            for value in bindings.get(module_id, {}).get("callees", [])
-            if str(value)
-        }
-        relevant_read_only.update(
-            module_id
-            for module_id in read_only_ids
-            if any(
-                str(value) in relevant_writable
-                for value in bindings.get(module_id, {}).get("callees", [])
-            )
-        )
-        relevant_read_only.update(
-            str(target.get("module_id", ""))
-            for report in reports
-            for target in report.get("read_only_dependencies", [])
-            if isinstance(target, dict) and str(target.get("module_id", "")) in read_only_ids
-        )
-        relevant_read_only.update(
-            _frontend_api_dependency_ids(
-                request.design_context,
-                screen_ids=relevant_writable,
-                allowed_ids=read_only_ids,
-            )
-        )
+        # Show every dependency owned by another requirement. They remain
+        # read-only, but hiding them makes cross-requirement failures look like
+        # missing implementation context.
+        relevant_read_only = set(read_only_ids)
 
         source_hashes: dict[str, str] = {}
         source_documents: dict[str, dict[str, Any]] = {}
@@ -520,7 +473,7 @@ class ImplementationAgent:
             frozen_tests, test_errors = self._frozen_tests(
                 requirement_id,
                 request.test_manifest,
-                layers=failed_layers,
+                layers=set(),
             )
         errors.extend(test_errors)
         if errors:
@@ -542,14 +495,10 @@ class ImplementationAgent:
             "policy": {
                 "one_failure_cluster": True,
                 "tests_are_frozen": mode == "TDD",
-                "tests_limited_to_failed_layers": mode == "TDD",
-                "writable_context_scope": (
-                    "FAILURE_TARGET_PLUS_ONE_HOP"
-                    if relevant_writable != writable_ids
-                    else "ALL_REQUIREMENT_OWNED"
-                ),
+                "tests_limited_to_failed_layers": False,
+                "writable_context_scope": "ALL_REQUIREMENT_OWNED_WRITABLE_MODULES",
                 "writable_layer_scope": layer_scope,
-                "design_context_scope": "WRITABLE_TARGET_PLUS_ONE_HOP",
+                "design_context_scope": "ALL_REQUIREMENT_OWNED_TARGETS",
                 "aggregate_mode_uses_design_and_binding_authority": mode == "AGGREGATE",
                 "output_is_region_replacement_only": True,
                 "side_effects_owned_by_orchestrator": True,
@@ -571,6 +520,10 @@ class ImplementationAgent:
             "requirement_contract": request.requirement_contract,
             "failure_analysis": request.failure_analysis_text
             or _fallback_failure_analysis(reports),
+            "scope_warnings": _scope_warnings(
+                reports,
+                read_only_ids=read_only_ids,
+            ),
             "frozen_tests": frozen_tests,
             "previous_patch_metadata": request.previous_patch_metadata,
             "allowed_writable_module_ids": sorted(source_hashes),
@@ -630,7 +583,7 @@ class ImplementationAgent:
         if not rows:
             return [], [
                 "ARC4530 IMPLEMENTATION_CONTEXT_INVALID: no frozen tests for "
-                f"{requirement_id} in failed layers {sorted(layers)}."
+                f"current requirement {requirement_id}."
             ]
         for row in rows:
             relative = _safe_workspace_file(str(row.get("test_file", "")), source=False)
@@ -733,33 +686,6 @@ def _report_dict(value: Any) -> dict[str, Any] | None:
         serialized = serializer()
         return serialized if isinstance(serialized, dict) else None
     return None
-
-
-def _one_hop_writable(
-    focus_ids: set[str],
-    writable_ids: set[str],
-    bindings: dict[str, dict[str, Any]],
-) -> set[str]:
-    """Return focused writable modules plus direct writable callers/callees."""
-
-    result = set(focus_ids) & writable_ids
-    for module_id in list(result):
-        binding = bindings.get(module_id, {})
-        result.update(
-            str(value)
-            for key in ("callers", "callees")
-            for value in binding.get(key, [])
-            if str(value) in writable_ids
-        )
-    result.update(
-        candidate_id
-        for candidate_id in writable_ids
-        if any(
-            str(value) in focus_ids
-            for value in bindings.get(candidate_id, {}).get("callees", [])
-        )
-    )
-    return result
 
 
 def _project_design_context(
@@ -959,35 +885,6 @@ def _compact_visual_reference(
     return projected
 
 
-def _frontend_api_dependency_ids(
-    design_context: dict[str, Any] | None,
-    *,
-    screen_ids: set[str],
-    allowed_ids: set[str],
-) -> set[str]:
-    if not isinstance(design_context, dict):
-        return set()
-    frontend = design_context.get("frontend", {})
-    if not isinstance(frontend, dict):
-        return set()
-    api_ids = {
-        str(row.get("api_id", ""))
-        for row in frontend.get("api_usages", [])
-        if isinstance(row, dict)
-        and str(row.get("screen_id", "")) in screen_ids
-        and str(row.get("api_id", ""))
-    }
-    api_ids.update(
-        str(value)
-        for row in frontend.get("screens", [])
-        if isinstance(row, dict) and str(row.get("id", "")) in screen_ids
-        for value in row.get("required_api_ids", [])
-        if str(value)
-    )
-    candidates = api_ids | {f"API_CLIENT::{api_id}" for api_id in api_ids}
-    return candidates & allowed_ids
-
-
 def _fallback_failure_analysis(reports: list[dict[str, Any]]) -> str:
     """Keep a plain-text repair brief when no synthesized analysis is present."""
 
@@ -1005,6 +902,54 @@ def _fallback_failure_analysis(reports: list[dict[str, Any]]) -> str:
             f"details={report.get('diagnostic_output') or '(none)'}"
         )
     return "\n\n".join(entries)
+
+
+def _scope_warnings(
+    reports: list[dict[str, Any]],
+    *,
+    read_only_ids: set[str],
+) -> list[str]:
+    """Make non-editable failure causes explicit in the agent's task message."""
+
+    warnings: list[str] = []
+    classes = {str(report.get("failure_class", "")) for report in reports}
+    compiler_owned = {
+        "TEST_MATERIALIZATION":
+            "Test generation/materialization is compiler-owned; repair the compiler or frozen test artifact, not business code.",
+        "INFRASTRUCTURE":
+            "The failure is infrastructure-owned; do not invent an application patch to compensate for it.",
+        "TEST_OR_CONTRACT_INCONSISTENT":
+            "The test/contract is inconsistent or compiler-owned; do not weaken frozen tests or change generated glue.",
+    }
+    for failure_class, message in compiler_owned.items():
+        if failure_class in classes:
+            warnings.append(f"COMPILER_OWNED_WARNING [{failure_class}]: {message}")
+    if "DEFERRED_DEPENDENCY" in classes or read_only_ids:
+        warnings.append(
+            "DEPENDENCY_SCOPE_WARNING: dependency-owned modules are read-only. "
+            "修复应回到拥有该模块的 requirement；WriteGuard will reject edits to those modules."
+        )
+    diagnostic_text = "\n".join(
+        str(report.get("diagnostic_output", "")) for report in reports
+    ).lower()
+    compiler_tokens = (
+        "frozen test",
+        "generated glue",
+        "compiler-owned",
+        "import/export",
+        "marker",
+        "route is compiler-owned",
+    )
+    if any(token in diagnostic_text for token in compiler_tokens):
+        warnings.append(
+            "COMPILER_OWNED_WARNING: the diagnostic references compiler-owned structure "
+            "(tests, imports/exports, routes, generated glue, config, or markers); keep it read-only."
+        )
+    warnings.append(
+        "EDIT_SCOPE_WARNING: every module in allowed_writable_module_ids is available for diagnosis, "
+        "but only its marker-scoped implementation region may be replaced."
+    )
+    return list(dict.fromkeys(warnings))
 
 
 def _source_card(binding: dict[str, Any], *, digest: str | None) -> dict[str, Any]:

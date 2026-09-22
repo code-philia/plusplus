@@ -217,7 +217,7 @@ class FailureAnalyzer:
             and command.status != "PASSED"
         ]
         if not e2e_commands:
-            return "\n\n".join(
+            plain_context = "\n\n".join(
                 "FAILURE ANALYSIS\n"
                 f"failure_class={report.failure_class}\n"
                 f"phase={report.phase}\n"
@@ -226,6 +226,8 @@ class FailureAnalyzer:
                 f"details={report.diagnostic_output or '(none)'}"
                 for report in reports
             )
+            warning = _failure_scope_warning(reports)
+            return "\n\n".join(value for value in (warning, plain_context) if value)
         raw_parts: list[str] = []
         pw_api_parts: list[str] = []
         for command in e2e_commands:
@@ -294,7 +296,8 @@ class FailureAnalyzer:
                 f"{synthesis}"
                 for section in failed_sections
             )
-        return (
+        warning = _failure_scope_warning(reports)
+        context = (
             "PLAYWRIGHT FAILURE ANALYSIS\n"
             f"Requirement: {test_run.requirement_id}\n\n"
             "Model analysis:\n"
@@ -303,6 +306,9 @@ class FailureAnalyzer:
             f"{routing}\n\n"
             "Failed Playwright test logs (JSON reporter + pw:api):\n"
             f"{annotated_failure_log}"
+        )
+        return "\n\n".join(
+            value for value in (warning, context) if value
         )
 
     def _failed_test_sections(
@@ -759,6 +765,39 @@ def _fallback_e2e_failure_log(
         "key_failure_log:\n"
         f"{raw_report or '(Playwright produced no report text.)'}"
     )
+
+
+def _failure_scope_warning(reports: list[TestFailureReport]) -> str:
+    """Explain why a failure must be fixed by the compiler or another node."""
+
+    classes = {report.failure_class for report in reports}
+    warnings: list[str] = []
+    if "TEST_MATERIALIZATION" in classes:
+        warnings.append(
+            "COMPILER_OWNED_WARNING [TEST_MATERIALIZATION]: test generation/materialization "
+            "must be repaired by the compiler; ImplementationAgent must not edit frozen tests."
+        )
+    if "INFRASTRUCTURE" in classes:
+        warnings.append(
+            "COMPILER_OWNED_WARNING [INFRASTRUCTURE]: the test environment or process "
+            "failed before business behavior could be evaluated; do not guess an application patch."
+        )
+    if "TEST_OR_CONTRACT_INCONSISTENT" in classes:
+        warnings.append(
+            "COMPILER_OWNED_WARNING [TEST_OR_CONTRACT_INCONSISTENT]: contract, generated glue, "
+            "or frozen test inputs are inconsistent; keep tests, imports, routes, and glue read-only."
+        )
+    if "DEFERRED_DEPENDENCY" in classes:
+        warnings.append(
+            "DEPENDENCY_SCOPE_WARNING: the failure crossed into a dependency-owned module; "
+            "repair that module under its owning requirement before retrying this node."
+        )
+    if any(report.read_only_dependencies for report in reports):
+        warnings.append(
+            "READ_ONLY_SCOPE_WARNING: read-only dependency source is provided for diagnosis only; "
+            "WriteGuard will reject edits outside the current requirement's writable modules."
+        )
+    return "\n".join(dict.fromkeys(warnings))
 
 
 def _read_source_excerpt(root: Path, relative: str, *, line: int | None) -> str:

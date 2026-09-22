@@ -444,6 +444,15 @@ class RequirementTestGenerationPass:
             "RequirementTestGenerationPass", workspace_root=self._output_root
         )
 
+    def _write_model_log(self, payload: dict[str, Any]) -> None:
+        log_root = self._output_root / ".arc" / "model_logs" / "test_generation"
+        log_root.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime()) + f"{time.time_ns() % 1_000_000_000:09d}Z"
+        requirement_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(payload.get("requirement_id", "unknown")))
+        attempt = int(payload.get("attempt", 0) or 0)
+        path = log_root / f"{stamp}-{requirement_id}-attempt-{attempt}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
     def compile(
         self,
         *,
@@ -715,13 +724,43 @@ class RequirementTestGenerationPass:
             self._trace_json("MODEL_INPUT", requirement_id, payload)
             started = time.perf_counter()
             try:
+                model_started = time.perf_counter()
                 decision = self._model.generate_json(
                     schema_name="arc_requirement_tests",
                     instructions=TEST_GENERATION_INSTRUCTIONS,
                     input_payload=payload,
                     output_schema=TEST_GENERATION_SCHEMA,
                 )
+                try:
+                    self._write_model_log({
+                    "schema_name": "arc_requirement_tests",
+                    "instructions": TEST_GENERATION_INSTRUCTIONS,
+                    "input_payload": payload,
+                    "output_schema": TEST_GENERATION_SCHEMA,
+                    "output": decision,
+                    "error": None,
+                    "duration_ms": round((time.perf_counter() - model_started) * 1000),
+                    "attempt": attempt + 1,
+                    "requirement_id": requirement_id,
+                    })
+                except Exception as log_exc:
+                    self._trace(f"MODEL_LOG_WRITE_FAILED: {type(log_exc).__name__}: {log_exc}")
             except Exception as exc:
+                try:
+                    self._write_model_log({
+                    "schema_name": "arc_requirement_tests",
+                    "instructions": TEST_GENERATION_INSTRUCTIONS,
+                    "input_payload": payload,
+                    "output_schema": TEST_GENERATION_SCHEMA,
+                    "output": None,
+                    "error": describe_model_error(exc),
+                    "duration_ms": round((time.perf_counter() - model_started) * 1000)
+                    if "model_started" in locals() else None,
+                    "attempt": attempt + 1,
+                    "requirement_id": requirement_id,
+                    })
+                except Exception as log_exc:
+                    self._trace(f"MODEL_LOG_WRITE_FAILED: {type(log_exc).__name__}: {log_exc}")
                 last_errors = [
                     f"ARC4421 TEST_MODEL_FAILED: {requirement_id}: {describe_model_error(exc)}"
                 ]
