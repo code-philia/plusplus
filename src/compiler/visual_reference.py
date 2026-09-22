@@ -24,7 +24,11 @@ from .frontend_ir import (
     FrontendDesignIssue,
 )
 from .trace_payload import format_payload_trace
-from .model_client import describe_model_error, response_format_unavailable
+from .model_client import (
+    completion_request_kwargs,
+    describe_model_error,
+    response_format_unavailable,
+)
 
 
 DEFAULT_MAX_VISUAL_BYTES = 20 * 1024 * 1024
@@ -131,17 +135,18 @@ class VisualModel:
         if self._structured_output_mode == "json_schema":
             try:
                 response = self._client.chat.completions.create(
-                    model=self.model,
-                    stream=False,
-                    messages=messages,
-                    response_format={
+                    **completion_request_kwargs(
+                        model=self.model,
+                        messages=messages,
+                        response_format={
                         "type": "json_schema",
                         "json_schema": {
                             "name": schema_name,
                             "strict": True,
                             "schema": output_schema,
                         },
-                    },
+                        },
+                    )
                 )
             except Exception as exc:
                 if not response_format_unavailable(exc):
@@ -165,10 +170,11 @@ class VisualModel:
         if response is None and self._structured_output_mode == "json_object":
             try:
                 response = self._client.chat.completions.create(
-                    model=self.model,
-                    stream=False,
-                    messages=fallback_messages,
-                    response_format={"type": "json_object"},
+                    **completion_request_kwargs(
+                        model=self.model,
+                        messages=fallback_messages,
+                        response_format={"type": "json_object"},
+                    )
                 )
             except Exception as exc:
                 if not response_format_unavailable(exc):
@@ -177,9 +183,10 @@ class VisualModel:
 
         if response is None:
             response = self._client.chat.completions.create(
-                model=self.model,
-                stream=False,
-                messages=fallback_messages,
+                **completion_request_kwargs(
+                    model=self.model,
+                    messages=fallback_messages,
+                )
             )
         content = response.choices[0].message.content
         if content is None:
