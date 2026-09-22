@@ -23,9 +23,8 @@ ACTIONABLE_FAILURE_CLASSES = {
 IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["summary", "edits"],
+    "required": ["edits"],
     "properties": {
-        "summary": {"type": "string", "minLength": 1},
         "edits": {
             "type": "array",
             "minItems": 1,
@@ -170,7 +169,7 @@ Implementation rules:
 - A replacement must be complete source text for the inside of its implementation region.
 
 Return exactly one JSON object and no prose:
-{"summary":"short implementation intent","edits":[{"module_id":"exact writable id","replacement":"source inside markers"}]}
+{"edits":[{"module_id":"exact writable id","replacement":"source inside markers"}]}
 """
 
 
@@ -185,7 +184,7 @@ class ImplementationRequest:
     iteration: int
     mode: str = "TDD"
     design_context: dict[str, Any] | None = None
-    previous_patch_summary: dict[str, Any] | None = None
+    previous_patch_metadata: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -193,7 +192,6 @@ class ImplementationResult:
     requirement_id: str
     status: str
     patch: ProposedPatch | None = None
-    summary: str = ""
     attempts: int = 0
     errors: list[str] = field(default_factory=list)
     schema_version: int = IMPLEMENTATION_AGENT_SCHEMA_VERSION
@@ -270,7 +268,6 @@ class ImplementationAgent:
             requirement_id=requirement_id,
             status="PATCH_PROPOSED",
             patch=ProposedPatch(requirement_id=requirement_id, edits=edits),
-            summary=str(invocation.output["summary"]),
             attempts=invocation.attempts,
         )
 
@@ -575,7 +572,7 @@ class ImplementationAgent:
             "requirement_contract": request.requirement_contract,
             "failure_reports": projected_reports,
             "frozen_tests": frozen_tests,
-            "previous_patch_summary": request.previous_patch_summary,
+            "previous_patch_metadata": request.previous_patch_metadata,
             "allowed_writable_module_ids": sorted(source_hashes),
         }
         context = {
@@ -680,13 +677,10 @@ def _validate_decision(
     allowed_ids: set[str],
     focus_ids: set[str],
 ) -> list[str]:
-    if not isinstance(decision, dict) or set(decision) != {"summary", "edits"}:
-        return ["ARC4534 IMPLEMENTATION_OUTPUT_INVALID: output must contain summary and edits."]
-    summary = decision.get("summary")
+    if not isinstance(decision, dict) or set(decision) != {"edits"}:
+        return ["ARC4534 IMPLEMENTATION_OUTPUT_INVALID: output must contain edits only."]
     edits = decision.get("edits")
     errors: list[str] = []
-    if not isinstance(summary, str) or not summary.strip():
-        errors.append("ARC4534 IMPLEMENTATION_OUTPUT_INVALID: summary is invalid.")
     if not isinstance(edits, list) or not 1 <= len(edits) <= 16:
         return [*errors, "ARC4534 IMPLEMENTATION_OUTPUT_INVALID: edits must contain 1..16 rows."]
     actual_ids: list[str] = []

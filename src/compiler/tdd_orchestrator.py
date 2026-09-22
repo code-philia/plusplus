@@ -235,8 +235,8 @@ class NodeTDDOrchestrator:
             )
 
             changed_files: set[str] = set()
-            previous_patch_summary: dict[str, Any] | None = None
-            frontend_implemented, frontend_errors, frontend_summary = (
+            previous_patch_metadata: dict[str, Any] | None = None
+            frontend_implemented, frontend_errors, frontend_patch_metadata = (
                 self._preimplement_frontend(requirement_id)
             )
             if frontend_errors:
@@ -249,7 +249,7 @@ class NodeTDDOrchestrator:
             if frontend_implemented:
                 changed_files.update(frontend_implemented)
                 result.changed_files = sorted(changed_files)
-                previous_patch_summary = frontend_summary
+                previous_patch_metadata = frontend_patch_metadata
                 self._transition(requirement_id, "FRONTEND_IMPLEMENTED")
 
             baseline = self._run_and_analyze(
@@ -319,7 +319,7 @@ class NodeTDDOrchestrator:
                         failure_reports=tuple(cluster),
                         iteration=patch_iteration,
                         design_context=self._design_context(requirement_id),
-                        previous_patch_summary=previous_patch_summary,
+                        previous_patch_metadata=previous_patch_metadata,
                     )
                 )
                 if not implementation.ok or implementation.patch is None:
@@ -348,9 +348,8 @@ class NodeTDDOrchestrator:
                     )
                 changed_files.update(_normalize_path(value) for value in applied.changed_files)
                 result.changed_files = sorted(changed_files)
-                previous_patch_summary = {
+                previous_patch_metadata = {
                     "iteration": patch_iteration,
-                    "summary": implementation.summary,
                     "changed_files": applied.changed_files,
                     "changed_modules": applied.changed_modules,
                     "failure_fingerprint_before": cluster[0].failure_fingerprint,
@@ -395,9 +394,9 @@ class NodeTDDOrchestrator:
                     )
                 reports = verification.analysis.reports
                 fingerprint = _selected_cluster(reports)[0].failure_fingerprint
-                if previous_patch_summary is not None:
-                    previous_patch_summary["failure_fingerprint_after"] = fingerprint
-                    previous_patch_summary["failure_changed"] = fingerprint != last_fingerprint
+                if previous_patch_metadata is not None:
+                    previous_patch_metadata["failure_fingerprint_after"] = fingerprint
+                    previous_patch_metadata["failure_changed"] = fingerprint != last_fingerprint
                 if fingerprint == last_fingerprint:
                     unchanged_failures += 1
                 else:
@@ -734,7 +733,6 @@ class NodeTDDOrchestrator:
         return changed, [], {
             "iteration": 1,
             "phase": "FRONTEND_BOOTSTRAP",
-            "summary": implementation.summary,
             "changed_files": applied.changed_files,
             "changed_modules": applied.changed_modules,
         }
