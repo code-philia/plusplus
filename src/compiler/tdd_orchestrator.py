@@ -109,13 +109,20 @@ class _RunAnalysis:
     infrastructure_retries: int
 
 
+@dataclass(slots=True)
+class _CompilableCheckpoint:
+    sources: dict[str, str]
+    changed_files: list[str] = field(default_factory=list)
+
+
 class NodeTDDOrchestrator:
     """Own the deterministic RED-to-GREEN lifecycle for exactly one node.
 
     The implementation model can only propose marker-scoped edits. This class
     owns test execution, failure routing, write authorization, budgets, state,
-    regression checks, and artifacts. In explicit resume mode it restores only
-    validated NODE_ACCEPTED checkpoints; ordinary runs always start clean.
+    regression checks, and artifacts. Failed nodes retain their latest
+    workspace-typecheck-passing source checkpoint rather than reverting to the
+    original skeleton.
     """
 
     def __init__(
@@ -175,7 +182,7 @@ class NodeTDDOrchestrator:
         self.node_states: dict[str, str] = {}
         self._state_history: dict[str, list[str]] = {}
         self._accepted_results: dict[str, NodeTDDResult] = {}
-        self._node_snapshots: dict[str, dict[str, str]] = {}
+        self._node_checkpoints: dict[str, _CompilableCheckpoint] = {}
         self._tdd_root = self.output_root / ".arc" / "tdd"
         if resume and self.test_manifest is not None:
             self._restore_accepted_checkpoints()
@@ -221,11 +228,10 @@ class NodeTDDOrchestrator:
             self.test_manifest = generation.manifest
             self._transition(requirement_id, "TESTS_GENERATED")
             self._transition(requirement_id, "TESTS_FROZEN")
-            # Everything written from here on is provisional. A node that does not
-            # reach acceptance gives its files back exactly as the skeleton left them,
-            # so a later node never inherits a partially implemented region.
-            self._node_snapshots[requirement_id] = self.write_guard.snapshot(
-                self._writable_files(requirement_id)
+            # The skeleton is the initial known-compilable checkpoint. Later
+            # implementation rounds replace it after workspace typecheck passes.
+            self._node_checkpoints[requirement_id] = _CompilableCheckpoint(
+                sources=self.write_guard.snapshot(self._writable_files(requirement_id))
             )
 
             changed_files: set[str] = set()
@@ -251,6 +257,11 @@ class NodeTDDOrchestrator:
                 iteration=0,
                 include_typecheck=bool(frontend_implemented),
                 changed_files=sorted(changed_files),
+            )
+            self._record_compilable_checkpoint(
+                requirement_id,
+                baseline.test_run,
+                changed_files,
             )
             result.infrastructure_retries += baseline.infrastructure_retries
             if baseline.analysis.errors:
@@ -351,6 +362,11 @@ class NodeTDDOrchestrator:
                     include_typecheck=True,
                     changed_files=sorted(changed_files),
                 )
+                self._record_compilable_checkpoint(
+                    requirement_id,
+                    verification.test_run,
+                    changed_files,
+                )
                 result.infrastructure_retries += verification.infrastructure_retries
                 if verification.analysis.errors:
                     return self._finish(
@@ -439,10 +455,8 @@ class NodeTDDOrchestrator:
                 self._transition(requirement_id, "NO_IMPLEMENTATION_REQUIRED")
                 return self._finish(result, "NODE_ACCEPTED", [])
 
-            # Same isolation contract as an atomic node: a rejected aggregate patch
-            # leaves nothing behind for the next requirement to inherit.
-            self._node_snapshots[requirement_id] = self.write_guard.snapshot(
-                self._writable_files(requirement_id)
+            self._node_checkpoints[requirement_id] = _CompilableCheckpoint(
+                sources=self.write_guard.snapshot(self._writable_files(requirement_id))
             )
 
             target_ids = sorted(str(row["module_id"]) for row in writable_targets)
@@ -506,7 +520,10 @@ class NodeTDDOrchestrator:
                     applied.rejected_changes,
                     iterations=1,
                 )
-            verification_errors = self._verify_aggregate_patch()
+            verification_errors = self._verify_aggregate_patch(
+                requirement_id,
+                set(applied.changed_files),
+            )
             if verification_errors:
                 return self._finish(
                     result,
@@ -532,7 +549,11 @@ class NodeTDDOrchestrator:
                 changed_files=result.changed_files,
             )
 
-    def _verify_aggregate_patch(self) -> list[str]:
+    def _verify_aggregate_patch(
+        self,
+        requirement_id: str,
+        changed_files: set[str],
+    ) -> list[str]:
         """Apply the same post-patch gates to aggregate and atomic edits."""
 
         typecheck = self.test_runner.run_workspace_typecheck()
@@ -542,6 +563,18 @@ class NodeTDDOrchestrator:
                 "ARC4549 AGGREGATE_TYPECHECK_FAILED: full workspace typecheck failed: "
                 + detail[-4000:]
             ]
+        self._record_compilable_checkpoint(
+            requirement_id,
+            TestRunResult(
+                requirement_id=requirement_id,
+                status="PASSED",
+                selected_layers=[],
+                selected_test_ids=[],
+                selected_files=[],
+                commands=[typecheck],
+            ),
+            changed_files,
+        )
         test_requirement_ids = {
             str(row.get("requirement_id", ""))
             for row in (self.test_manifest or {}).get("requirements", [])
@@ -751,6 +784,30 @@ class NodeTDDOrchestrator:
             ):
                 return _RunAnalysis(test_run, analysis, retries)
             retries += 1
+
+    def _record_compilable_checkpoint(
+        self,
+        requirement_id: str,
+        test_run: TestRunResult,
+        changed_files: set[str] | list[str],
+    ) -> None:
+        """Keep the newest source state whose workspace typecheck passed."""
+
+        typecheck_passed = any(
+            str(command.phase).upper() == "TYPECHECK"
+            and command.status == "PASSED"
+            for command in test_run.commands
+        )
+        if not typecheck_passed:
+            return
+        self._node_checkpoints[requirement_id] = _CompilableCheckpoint(
+            sources=self.write_guard.snapshot(self._writable_files(requirement_id)),
+            changed_files=sorted({_normalize_path(value) for value in changed_files}),
+        )
+        self._log.info(
+            f"ARC4554 COMPILE_CHECKPOINT_UPDATED requirement={requirement_id} "
+            f"changed_files={len(changed_files)}"
+        )
 
     def _write_iteration_diagnostics(
         self,
@@ -1070,49 +1127,49 @@ class NodeTDDOrchestrator:
             self._state_history.get(result.requirement_id or "unknown", [])
         )
         result.errors = list(dict.fromkeys(str(value) for value in errors if str(value)))
+        if status == "NODE_ACCEPTED":
+            self._node_checkpoints.pop(result.requirement_id, None)
+            self._accepted_results[result.requirement_id] = copy.deepcopy(result)
+        else:
+            self._restore_last_compilable_checkpoint(result)
         result_path = self._node_root(result.requirement_id or "unknown") / "result.json"
         write_json_atomic(result_path, result.to_dict())
         result.artifacts["result"] = str(result_path)
-        if status == "NODE_ACCEPTED":
-            self._node_snapshots.pop(result.requirement_id, None)
-            self._accepted_results[result.requirement_id] = copy.deepcopy(result)
-            return result
-        self._roll_back_node(result)
         return result
 
-    def _roll_back_node(self, result: NodeTDDResult) -> None:
-        """Undo a rejected node's edits so the next node starts from the skeleton."""
+    def _restore_last_compilable_checkpoint(self, result: NodeTDDResult) -> None:
+        """Retain the newest typecheck-passing version after node failure."""
 
-        snapshot = self._node_snapshots.pop(result.requirement_id, None)
-        if not snapshot:
+        checkpoint = self._node_checkpoints.pop(result.requirement_id, None)
+        if checkpoint is None:
             return
-        restored, errors = self.write_guard.restore(snapshot)
+        restored, errors = self.write_guard.restore(checkpoint.sources)
         if restored:
-            result.changed_files = []
+            result.changed_files = list(checkpoint.changed_files)
             self._log.info(
-                f"ARC4552 NODE_ROLLED_BACK requirement={result.requirement_id} "
+                f"ARC4554 NODE_RESTORED_COMPILE_CHECKPOINT requirement={result.requirement_id} "
                 f"status={result.status} restored_files={len(restored)}"
             )
             result.errors = list(
                 dict.fromkeys(
                     [
                         *result.errors,
-                        "ARC4552 NODE_ROLLED_BACK: reverted "
-                        f"{len(restored)} file(s) to the frozen skeleton after "
-                        f"{result.status}.",
+                        "ARC4554 NODE_RESTORED_COMPILE_CHECKPOINT: reverted "
+                        f"{len(restored)} file(s) to the latest workspace-typecheck-passing "
+                        f"version after {result.status}.",
                     ]
                 )
             )
         if errors:
             self._log.info(
-                f"ARC4552 NODE_ROLLBACK_INCOMPLETE requirement={result.requirement_id} "
+                f"ARC4554 NODE_RESTORE_COMPILE_CHECKPOINT_INCOMPLETE requirement={result.requirement_id} "
                 f"failures={errors}"
             )
             result.errors = list(
                 dict.fromkeys(
                     [
                         *result.errors,
-                        f"ARC4552 NODE_ROLLED_BACK: incomplete rollback {errors}.",
+                        f"ARC4554 NODE_RESTORE_COMPILE_CHECKPOINT_INCOMPLETE: {errors}.",
                     ]
                 )
             )

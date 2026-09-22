@@ -288,9 +288,9 @@ class WriteGuard:
     def snapshot(self, relative_files: list[str]) -> dict[str, str]:
         """Capture the current text of every file a node is allowed to touch.
 
-        A node that never reaches acceptance must not leave half-written regions
-        behind: the next node would read them as settled code and build on a
-        behavior nobody validated. The snapshot is the undo record for that.
+        The TDD orchestrator uses this as a source checkpoint. It may be the
+        generated skeleton initially, then is replaced after a workspace
+        typecheck passes.
         """
 
         captured: dict[str, str] = {}
