@@ -249,35 +249,6 @@ class ImplementationAgent:
         path.write_text(_format_model_log(payload), encoding="utf-8")
 
 
-def _format_model_log(payload: dict[str, Any]) -> str:
-    sections = [
-        "ARC MODEL INVOCATION",
-        f"schema_name: {payload.get('schema_name', '')}",
-        f"requirement_id: {payload.get('requirement_id', '')}",
-        f"iteration: {payload.get('iteration', '')}",
-        f"attempt: {payload.get('attempt', '')}",
-        f"duration_ms: {payload.get('duration_ms', '')}",
-        "",
-        "===== INSTRUCTIONS =====",
-        str(payload.get("instructions", "")),
-        "",
-        "===== INPUT PAYLOAD =====",
-        json.dumps(payload.get("input_payload", {}), ensure_ascii=False, indent=2, default=str),
-        "",
-        "===== OUTPUT SCHEMA =====",
-        json.dumps(payload.get("output_schema", {}), ensure_ascii=False, indent=2, default=str),
-        "",
-        "===== MODEL OUTPUT =====",
-        json.dumps(payload.get("output"), ensure_ascii=False, indent=2, default=str)
-        if payload.get("output") is not None
-        else "(no parsed model output)",
-        "",
-        "===== ERROR =====",
-        str(payload.get("error") or "(none)"),
-        "",
-    ]
-    return "\n".join(sections)
-
     def implement(self, request: ImplementationRequest) -> ImplementationResult:
         requirement_id = str(request.requirement_id).strip()
         context, source_hashes, focus_ids, errors = self._build_context(request)
@@ -652,6 +623,36 @@ def _format_model_log(payload: dict[str, Any]) -> str:
                 }
             )
         return tests, errors
+
+
+def _format_model_log(payload: dict[str, Any]) -> str:
+    sections = [
+        "ARC MODEL INVOCATION",
+        f"schema_name: {payload.get('schema_name', '')}",
+        f"requirement_id: {payload.get('requirement_id', '')}",
+        f"iteration: {payload.get('iteration', '')}",
+        f"attempt: {payload.get('attempt', '')}",
+        f"duration_ms: {payload.get('duration_ms', '')}",
+        "",
+        "===== INSTRUCTIONS =====",
+        str(payload.get("instructions", "")),
+        "",
+        "===== INPUT PAYLOAD =====",
+        json.dumps(payload.get("input_payload", {}), ensure_ascii=False, indent=2, default=str),
+        "",
+        "===== OUTPUT SCHEMA =====",
+        json.dumps(payload.get("output_schema", {}), ensure_ascii=False, indent=2, default=str),
+        "",
+        "===== MODEL OUTPUT =====",
+        json.dumps(payload.get("output"), ensure_ascii=False, indent=2, default=str)
+        if payload.get("output") is not None
+        else "(no parsed model output)",
+        "",
+        "===== ERROR =====",
+        str(payload.get("error") or "(none)"),
+        "",
+    ]
+    return "\n".join(sections)
 
 
 def _validate_decision(
