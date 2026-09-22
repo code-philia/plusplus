@@ -425,6 +425,36 @@ class TestStaticValidator:
         return TestStaticValidationResult(ok=not errors, errors=errors)
 
 
+def _format_model_log(payload: dict[str, Any]) -> str:
+    sections = [
+        "ARC MODEL INVOCATION",
+        f"schema_name: {payload.get('schema_name', '')}",
+        f"requirement_id: {payload.get('requirement_id', '')}",
+        f"iteration: {payload.get('iteration', '')}",
+        f"attempt: {payload.get('attempt', '')}",
+        f"duration_ms: {payload.get('duration_ms', '')}",
+        "",
+        "===== INSTRUCTIONS =====",
+        str(payload.get("instructions", "")),
+        "",
+        "===== INPUT PAYLOAD =====",
+        json.dumps(payload.get("input_payload", {}), ensure_ascii=False, indent=2, default=str),
+        "",
+        "===== OUTPUT SCHEMA =====",
+        json.dumps(payload.get("output_schema", {}), ensure_ascii=False, indent=2, default=str),
+        "",
+        "===== MODEL OUTPUT =====",
+        json.dumps(payload.get("output"), ensure_ascii=False, indent=2, default=str)
+        if payload.get("output") is not None
+        else "(no parsed model output)",
+        "",
+        "===== ERROR =====",
+        str(payload.get("error") or "(none)"),
+        "",
+    ]
+    return "\n".join(sections)
+
+
 class RequirementTestGenerationPass:
     """Generate and freeze a bounded set of tests for each atomic requirement."""
 
@@ -450,8 +480,8 @@ class RequirementTestGenerationPass:
         stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime()) + f"{time.time_ns() % 1_000_000_000:09d}Z"
         requirement_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(payload.get("requirement_id", "unknown")))
         attempt = int(payload.get("attempt", 0) or 0)
-        path = log_root / f"{stamp}-{requirement_id}-attempt-{attempt}.json"
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        path = log_root / f"{stamp}-{requirement_id}-attempt-{attempt}.log"
+        path.write_text(_format_model_log(payload), encoding="utf-8")
 
     def compile(
         self,
