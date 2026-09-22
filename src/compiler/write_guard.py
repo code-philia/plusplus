@@ -55,7 +55,7 @@ class _PlannedFile:
 
 
 class WriteGuard:
-    """Validate and apply marker-scoped source replacements for one requirement."""
+    """Validate and apply exact fragment replacements for one requirement."""
 
     def __init__(
         self,
@@ -198,12 +198,18 @@ class WriteGuard:
                 if marker_error:
                     rejected.append(marker_error)
                     break
-                candidate = _replace_region(
+                candidate, exact_error = _replace_exact(
                     updated,
                     start_marker=start_marker,
                     end_marker=end_marker,
+                    search=edit.search,
                     replacement=edit.replacement,
                 )
+                if exact_error:
+                    rejected.append(
+                        f"ARC4529 PATCH_SEARCH_INVALID: {module_id}: {exact_error}"
+                    )
+                    break
                 if candidate == updated:
                     warnings.append(
                         f"ARC4528 PATCH_NO_CHANGES: ignored no-op edit for {module_id}."
@@ -454,6 +460,37 @@ def _replace_region(
     if body:
         body += newline
     return source[:region_start] + body + source[region_end:]
+
+
+def _replace_exact(
+    source: str,
+    *,
+    start_marker: str,
+    end_marker: str,
+    search: str,
+    replacement: str,
+) -> tuple[str, str | None]:
+    """Replace one exact fragment, constrained to a module implementation region."""
+
+    start = source.index(start_marker)
+    end = source.index(end_marker)
+    region_start = source.find("\n", start + len(start_marker)) + 1
+    region_end = source.rfind("\n", 0, end) + 1
+    region = source[region_start:region_end]
+    if not isinstance(search, str) or not search.strip():
+        return source, "search fragment must be non-empty."
+    normalized_search = search.replace("\r\n", "\n").replace("\r", "\n")
+    normalized_region = region.replace("\r\n", "\n").replace("\r", "\n")
+    count = normalized_region.count(normalized_search)
+    if count == 0:
+        return source, "search fragment was not found inside the implementation region."
+    if count != 1:
+        return source, f"search fragment is ambiguous inside the implementation region ({count} matches)."
+    normalized_replacement = replacement.replace("\r\n", "\n").replace("\r", "\n")
+    updated_region = normalized_region.replace(normalized_search, normalized_replacement, 1)
+    newline = "\r\n" if "\r\n" in source else "\n"
+    updated_region = updated_region.replace("\n", newline)
+    return source[:region_start] + updated_region + source[region_end:], None
 
 
 def _read_source(path: Path) -> str:

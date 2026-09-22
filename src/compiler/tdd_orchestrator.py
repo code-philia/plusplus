@@ -52,7 +52,7 @@ TERMINAL_NODE_STATES = {
 class NodeTDDPolicy:
     """Budgets for one requirement-local TDD run."""
 
-    max_iterations_per_node: int = 3
+    max_iterations_per_node: int = 10
     no_progress_limit: int = 3
     infra_retry_count: int = 2
 
@@ -74,7 +74,7 @@ class NodeTDDPolicy:
         values = os.environ if environment is None else environment
         return cls(
             max_iterations_per_node=_bounded_int(
-                values, "ARC_TDD_MAX_ITERATIONS_PER_NODE", 3, 1, 50
+                values, "ARC_TDD_MAX_ITERATIONS_PER_NODE", 10, 1, 50
             ),
             no_progress_limit=_bounded_int(
                 values, "ARC_TDD_NO_PROGRESS_LIMIT", 3, 1, 10
@@ -211,6 +211,49 @@ class NodeTDDOrchestrator:
         self,
         reports: list[TestFailureReport],
     ) -> ImplementationAgent:
+        type_reports = [
+            report
+            for report in reports
+            if str(getattr(report, "failure_class", "")).upper() == "TYPE_CONTRACT"
+            or str(getattr(report, "phase", "")).upper() == "TYPECHECK"
+        ]
+        if type_reports:
+            # TypeScript already tells us which files failed.  Use the binding
+            # registry to route a genuinely frontend-only type error to the
+            # frontend specialist; retain the general agent for backend,
+            # cross-layer, read-only, or otherwise unmapped diagnostics.
+            bindings = {
+                str(row.get("module_id", "")): row
+                for row in self.code_binding_registry.get("code_bindings", [])
+                if isinstance(row, dict) and str(row.get("module_id", ""))
+            }
+            diagnostic_ids = {
+                str(module_id)
+                for report in type_reports
+                for module_id in report.target_modules
+                if str(module_id)
+            }
+            writable_ids = {
+                str(target.get("module_id", ""))
+                for report in type_reports
+                for target in report.writable_targets
+                if isinstance(target, dict) and str(target.get("module_id", ""))
+            }
+            frontend_kinds = {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
+            # Some typecheck diagnostics cannot be mapped to a concrete module
+            # id, but their writable target set is still precise.  Fall back to
+            # that set instead of incorrectly routing a frontend-only error to
+            # the general agent merely because target_modules is empty.
+            routing_ids = diagnostic_ids or writable_ids
+            all_frontend = bool(routing_ids) and all(
+                str(bindings.get(module_id, {}).get("kind", "")).upper()
+                in frontend_kinds
+                for module_id in routing_ids
+            )
+            fully_writable = not diagnostic_ids or diagnostic_ids <= writable_ids
+            if all_frontend and fully_writable:
+                return self.frontend_implementation_agent
+            return self.implementation_agent
         frontend_ids = {
             str(row.get("module_id", ""))
             for report in reports
@@ -219,7 +262,16 @@ class NodeTDDOrchestrator:
             and str(row.get("kind", "")).upper()
             in {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
         }
-        if frontend_ids:
+        target_kinds = {
+            str(row.get("kind", "")).upper()
+            for report in reports
+            for row in report.writable_targets
+            if isinstance(row, dict) and str(row.get("kind", ""))
+        }
+        # A mixed frontend/backend failure must stay with the general agent;
+        # the frontend specialist is only appropriate when every localized
+        # writable target is frontend-owned.
+        if frontend_ids and target_kinds <= {"PAGE", "COMPONENT", "LAYOUT", "STORE"}:
             return self.frontend_implementation_agent
         return self.implementation_agent
 
@@ -503,6 +555,45 @@ class NodeTDDOrchestrator:
                 sources=self.write_guard.snapshot(self._writable_files(requirement_id))
             )
 
+            frontend_kinds = {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
+            if writable_targets and all(
+                str(row.get("kind", "")).upper() in frontend_kinds
+                for row in writable_targets
+            ):
+                changed, errors, batch_count = self._implement_frontend_aggregate_batches(
+                    requirement_id,
+                    writable_targets,
+                    requirement,
+                )
+                if errors:
+                    return self._finish(
+                        result,
+                        "AGENT_FAILED",
+                        errors,
+                        iterations=batch_count,
+                        changed_files=changed,
+                    )
+                verification_errors = self._verify_aggregate_patch(
+                    requirement_id,
+                    changed,
+                )
+                if verification_errors:
+                    return self._finish(
+                        result,
+                        "REGRESSION_FAILED",
+                        verification_errors,
+                        iterations=batch_count,
+                        changed_files=changed,
+                    )
+                self._transition(requirement_id, "AGGREGATE_IMPLEMENTED")
+                return self._finish(
+                    result,
+                    "NODE_ACCEPTED",
+                    [],
+                    iterations=batch_count,
+                    changed_files=changed,
+                )
+
             target_ids = sorted(str(row["module_id"]) for row in writable_targets)
             fingerprint = hashlib.sha256(
                 f"{requirement_id}:aggregate-implementation".encode("utf-8")
@@ -592,6 +683,117 @@ class NodeTDDOrchestrator:
                 iterations=result.iterations,
                 changed_files=result.changed_files,
             )
+
+    def _implement_frontend_aggregate_batches(
+        self,
+        requirement_id: str,
+        writable_targets: list[dict[str, Any]],
+        requirement: dict[str, Any],
+    ) -> tuple[set[str], list[str], int]:
+        """Implement aggregate frontend targets one module per model call.
+
+        Aggregate requirements do not have a failing test to narrow the scope,
+        so sending several full JSX regions to one response is especially
+        risky.  A single module per call keeps the response small and makes a
+        truncated response affect only the current module.
+        """
+
+        remaining = {
+            str(row.get("module_id", ""))
+            for row in writable_targets
+            if str(row.get("module_id", "")).strip()
+        }
+        changed_files: set[str] = set()
+        batch = 0
+        errors: list[str] = []
+        while remaining:
+            batch += 1
+            resolved = CodeTargetResolver(
+                self.code_binding_registry
+            ).resolve_requirement_targets(requirement_id)
+            targets = [
+                row
+                for row in resolved.get("owned_targets", [])
+                if isinstance(row, dict)
+                and bool(row.get("editable"))
+                and str(row.get("kind", "")).upper()
+                in {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
+                and str(row.get("module_id", "")) in remaining
+            ]
+            if not targets:
+                errors.append(
+                    "ARC4544 FRONTEND_AGGREGATE_STALLED: no remaining writable frontend "
+                    "target could be resolved."
+                )
+                break
+            target = targets[0]
+            module_id = str(target["module_id"])
+            self._log.info(
+                f"FRONTEND_AGGREGATE_BATCH requirement={requirement_id} "
+                f"batch={batch} module={module_id} remaining={len(remaining)}"
+            )
+            fingerprint = hashlib.sha256(
+                f"{requirement_id}:aggregate-frontend:{batch}:{module_id}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            report = TestFailureReport(
+                requirement_id=requirement_id,
+                iteration=batch,
+                test_id=f"aggregate:{requirement_id}",
+                test_ids=[f"aggregate:{requirement_id}"],
+                layer="AGGREGATE",
+                phase="FRONTEND_BOOTSTRAP",
+                failure_class="IMPLEMENTATION_BEHAVIOR",
+                message="Implement this one frontend module in the aggregate requirement.",
+                stack_frames=[],
+                target_modules=[module_id],
+                writable_targets=[copy.deepcopy(target)],
+                read_only_dependencies=[],
+                changed_files=sorted(changed_files),
+                failure_fingerprint=fingerprint,
+                diagnostic_output=(
+                    "Implement only the supplied frontend module. Preserve the declared "
+                    "routes, API clients, stores, and visual direction; return one complete "
+                    "search/replacement edit for this module."
+                ),
+            )
+            implementation = self.frontend_implementation_agent.implement(
+                ImplementationRequest(
+                    requirement_id=requirement_id,
+                    requirement=requirement,
+                    requirement_contract={},
+                    test_manifest={},
+                    code_binding_registry=self.code_binding_registry,
+                    failure_reports=(report,),
+                    iteration=batch,
+                    mode="AGGREGATE",
+                    design_context=self._design_context(requirement_id),
+                )
+            )
+            if not implementation.ok or implementation.patch is None:
+                errors.extend(
+                    implementation.errors
+                    or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."]
+                )
+                break
+            applied = self.write_guard.apply(
+                implementation.patch,
+                code_binding_registry=self.code_binding_registry,
+            )
+            if not applied.ok:
+                errors.extend(applied.rejected_changes)
+                break
+            applied_ids = set(applied.changed_modules).intersection(remaining)
+            if not applied_ids:
+                errors.append(
+                    "ARC4544 FRONTEND_AGGREGATE_STALLED: the patch did not change the "
+                    "current frontend module."
+                )
+                break
+            remaining.difference_update(applied_ids)
+            changed_files.update(_normalize_path(value) for value in applied.changed_files)
+        return changed_files, errors, batch
 
     def _verify_aggregate_patch(
         self,
@@ -699,7 +901,15 @@ class NodeTDDOrchestrator:
         self,
         requirement_id: str,
     ) -> tuple[set[str], list[str], dict[str, Any] | None]:
-        """Implement a requirement-owned browser path before its first E2E run."""
+        """Implement a requirement-owned browser path before its first E2E run.
+
+        Frontend bootstrap is deliberately processed in bounded batches.  A
+        requirement may own many Pages, Components, Layouts, and Stores, but a
+        single large JSX response is both slow and vulnerable to JSON
+        truncation.  After each batch is applied, the resolver is called again
+        so the next model call sees the current source rather than the frozen
+        skeleton.  Successful batches are never regenerated.
+        """
 
         e2e_tests = [
             str(row.get("test_id", ""))
@@ -722,67 +932,124 @@ class NodeTDDOrchestrator:
         ]
         if not frontend_targets:
             return set(), [], None
-        target_ids = sorted(str(row["module_id"]) for row in frontend_targets)
-        fingerprint = hashlib.sha256(
-            f"{requirement_id}:frontend-bootstrap".encode("utf-8")
-        ).hexdigest()
-        report = TestFailureReport(
-            requirement_id=requirement_id,
-            iteration=0,
-            test_id=e2e_tests[0],
-            test_ids=e2e_tests,
-            layer="E2E",
-            phase="FRONTEND_BOOTSTRAP",
-            failure_class="IMPLEMENTATION_BEHAVIOR",
-            message=(
-                "Implement the complete requirement-owned frontend path immediately after "
-                "test generation and before the first E2E execution."
-            ),
-            stack_frames=[],
-            target_modules=target_ids,
-            writable_targets=copy.deepcopy(frontend_targets),
-            read_only_dependencies=[],
-            changed_files=[],
-            failure_fingerprint=fingerprint,
-            diagnostic_output=(
-                "Build the functional responsive UI, wire the injected API client and runtime "
-                "Store, use declared target_route values, and route successful Home transitions "
-                "to `/`. Do not perform a separate visual-refinement pass."
-            ),
-        )
         self._transition(requirement_id, "FRONTEND_IMPLEMENTING")
         self._log.info(
             f"IMPLEMENTATION_PHASE requirement={requirement_id} phase=FRONTEND_BOOTSTRAP"
         )
-        implementation = self.frontend_implementation_agent.implement(
-            ImplementationRequest(
-                requirement_id=requirement_id,
-                requirement=self.requirement_ir["nodes"][requirement_id],
-                requirement_contract=self._requirement_contract(requirement_id),
-                test_manifest=self.test_manifest or {},
-                code_binding_registry=self.code_binding_registry,
-                failure_reports=(report,),
-                iteration=1,
-                design_context=self._design_context(requirement_id),
+        changed: set[str] = set()
+        changed_files: list[str] = []
+        changed_modules: list[str] = []
+        remaining_ids = {
+            str(row["module_id"])
+            for row in frontend_targets
+            if str(row.get("module_id", "")).strip()
+        }
+        batch_number = 0
+        max_batch_size = 6
+
+        while remaining_ids:
+            batch_number += 1
+            resolved = CodeTargetResolver(
+                self.code_binding_registry
+            ).resolve_requirement_targets(requirement_id)
+            current_targets = [
+                row
+                for row in resolved.get("owned_targets", [])
+                if isinstance(row, dict)
+                and bool(row.get("editable"))
+                and str(row.get("kind", ""))
+                in {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
+                and str(row.get("module_id", "")) in remaining_ids
+            ]
+            if not current_targets:
+                return changed, [
+                    "ARC4544 FRONTEND_BOOTSTRAP_STALLED: no remaining writable frontend targets "
+                    "could be resolved for the next batch."
+                ], None
+
+            batch_targets = current_targets[:max_batch_size]
+            batch_ids = [str(row["module_id"]) for row in batch_targets]
+            self._log.info(
+                "FRONTEND_BOOTSTRAP_BATCH "
+                f"requirement={requirement_id} batch={batch_number} "
+                f"size={len(batch_ids)} remaining={len(remaining_ids)} "
+                f"modules={','.join(batch_ids)}"
             )
-        )
-        if not implementation.ok or implementation.patch is None:
-            return set(), (
-                implementation.errors
-                or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."]
-            ), None
-        applied = self.write_guard.apply(
-            implementation.patch,
-            code_binding_registry=self.code_binding_registry,
-        )
-        if not applied.ok:
-            return set(), applied.rejected_changes, None
-        changed = {_normalize_path(value) for value in applied.changed_files}
+            fingerprint = hashlib.sha256(
+                f"{requirement_id}:frontend-bootstrap:{batch_number}:{','.join(batch_ids)}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            report = TestFailureReport(
+                requirement_id=requirement_id,
+                iteration=batch_number,
+                test_id=e2e_tests[0],
+                test_ids=e2e_tests,
+                layer="E2E",
+                phase="FRONTEND_BOOTSTRAP",
+                failure_class="IMPLEMENTATION_BEHAVIOR",
+                message=(
+                    "Implement this bounded batch of the requirement-owned frontend path "
+                    "before the first E2E execution."
+                ),
+                stack_frames=[],
+                target_modules=batch_ids,
+                writable_targets=copy.deepcopy(batch_targets),
+                read_only_dependencies=[],
+                changed_files=changed_files.copy(),
+                failure_fingerprint=fingerprint,
+                diagnostic_output=(
+                    "Build the functional responsive UI, wire the injected API client and runtime "
+                    "Store, use declared target_route values, and route successful Home transitions "
+                    "to `/`. This is frontend bootstrap batch "
+                    f"{batch_number}; implement only the supplied modules and keep each replacement "
+                    "complete."
+                ),
+            )
+            implementation = self.frontend_implementation_agent.implement(
+                ImplementationRequest(
+                    requirement_id=requirement_id,
+                    requirement=self.requirement_ir["nodes"][requirement_id],
+                    requirement_contract=self._requirement_contract(requirement_id),
+                    test_manifest=self.test_manifest or {},
+                    code_binding_registry=self.code_binding_registry,
+                    failure_reports=(report,),
+                    iteration=batch_number,
+                    design_context=self._design_context(requirement_id),
+                )
+            )
+            if not implementation.ok or implementation.patch is None:
+                return changed, (
+                    implementation.errors
+                    or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."]
+                ), None
+            applied = self.write_guard.apply(
+                implementation.patch,
+                code_binding_registry=self.code_binding_registry,
+            )
+            if not applied.ok:
+                return changed, applied.rejected_changes, None
+            applied_module_ids = set(applied.changed_modules).intersection(remaining_ids)
+            if not applied_module_ids:
+                return changed, [
+                    "ARC4544 FRONTEND_BOOTSTRAP_STALLED: the model patch applied no new "
+                    "frontend module in the current batch."
+                ], None
+            remaining_ids.difference_update(applied_module_ids)
+            changed.update(_normalize_path(value) for value in applied.changed_files)
+            changed_files.extend(
+                value for value in applied.changed_files if value not in changed_files
+            )
+            changed_modules.extend(
+                value for value in applied.changed_modules if value not in changed_modules
+            )
+
         return changed, [], {
-            "iteration": 1,
+            "iteration": batch_number,
             "phase": "FRONTEND_BOOTSTRAP",
-            "changed_files": applied.changed_files,
-            "changed_modules": applied.changed_modules,
+            "changed_files": changed_files,
+            "changed_modules": changed_modules,
+            "batches": batch_number,
         }
 
     def _run_and_analyze(

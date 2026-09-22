@@ -33,9 +33,10 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["module_id", "replacement"],
+                "required": ["module_id", "search", "replacement"],
                 "properties": {
                     "module_id": {"type": "string", "minLength": 1},
+                    "search": {"type": "string", "minLength": 1, "maxLength": 80000},
                     "replacement": {
                         "type": "string",
                         "minLength": 1,
@@ -47,7 +48,11 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 FRONTEND_IMPLEMENTATION_OUTPUT_SCHEMA = copy.deepcopy(IMPLEMENTATION_OUTPUT_SCHEMA)
-FRONTEND_IMPLEMENTATION_OUTPUT_SCHEMA["properties"]["edits"]["maxItems"] = 8
+# Frontend JSX/TSX regions are substantially larger and more coupled than
+# backend fragments.  Keep one module per response so truncation or malformed
+# JSON can only affect the current module; the orchestrator continues with
+# remaining modules in subsequent calls.
+FRONTEND_IMPLEMENTATION_OUTPUT_SCHEMA["properties"]["edits"]["maxItems"] = 1
 
 
 _PROJECT_CONVENTIONS: dict[str, Any] = {
@@ -111,11 +116,16 @@ Authority and evidence:
 - The writable surface contains every editable module owned by this requirement. Failure localization never limits
   the available source to one hop or one test layer. Diagnose across callers, callees, and sibling modules before
   choosing the smallest coherent patch.
+- For TYPECHECK/TYPE_CONTRACT failures, inspect every source file and line/column
+  listed in failure_analysis. Do not assume the first or test-local file is the
+  whole problem; type errors commonly span several callers and callees.
 
 Hard scope rules:
 - Return replacements only for module ids in allowed_writable_module_ids.
-- Each replacement is only the text BETWEEN that module's ARC implementation markers.
-- Do not include either implementation marker, an @arc-module marker, markdown fences, or a whole file.
+- Each edit must include a short, exact `search` fragment copied from the supplied source and a
+  `replacement` containing only its replacement text. The search fragment must be unique inside
+  that module's implementation region. Exact matching is the authority; do not add or depend on
+  a module marker in the patch payload.
 - Do not modify tests, assertions, imports, exports, signatures, routes, generated types, configs, or compiler glue.
 - Use only symbols already available in the supplied source file and public read-only interfaces.
 - Do not invent files, modules, APIs, fields, routes, database tables, or requirement behavior.
@@ -178,10 +188,10 @@ Implementation rules:
 - Treat screens and journeys as one connected product graph. Keep navigation, shared visual language, API usage, and
   cross-page state coherent across every supplied screen; choose layout and internal component decomposition here.
 - If several supplied failures are consequences of the same root cause, fix that root cause once.
-- A replacement must be complete source text for the inside of its implementation region.
+- Prefer the smallest coherent search/replacement pair and preserve surrounding source.
 
 Return exactly one JSON object and no prose:
-{"edits":[{"module_id":"exact writable id","replacement":"source inside markers"}]}
+{"edits":[{"module_id":"exact writable id","search":"unique old source fragment","replacement":"new source fragment"}]}
 """
 
 
@@ -208,13 +218,19 @@ Frontend priorities:
 
 Patch scope:
 - Edit only frontend writable module ids in allowed_writable_module_ids.
-- Return only the text inside each module's implementation markers.
+- Return an exact `search` fragment copied from the current source and its replacement. The search
+  fragment must be unique inside the module implementation region. Exact matching is sufficient;
+  do not add a module marker solely for routing or patch identity.
 - Do not change imports, exports, signatures, routes, generated types, tests, or compiler glue.
-- Prefer one focused replacement per module. Do not emit prose, markdown, diffs, or full files.
+- Return exactly one edit for exactly one supplied frontend module. Do not emit prose, markdown,
+  diffs, or full files.
 - Keep each replacement concise and complete; never truncate JSX, strings, or object literals.
+- Return only one module that needs to change for the current failure or bootstrap scope. If
+  several modules are supplied, choose the first coherent module that can make progress; the caller
+  will invoke you again for the remaining modules. Never combine multiple modules into one edit.
 
 Return exactly one JSON object:
-{"edits":[{"module_id":"exact frontend writable id","replacement":"complete region source"}]}
+{"edits":[{"module_id":"exact frontend writable id","search":"unique old JSX or logic fragment","replacement":"new JSX or logic fragment"}]}
 """
 
 
@@ -318,6 +334,7 @@ class ImplementationAgent:
             ProposedEdit(
                 module_id=str(row["module_id"]),
                 expected_sha256=source_hashes[str(row["module_id"])],
+                search=str(row["search"]),
                 replacement=str(row["replacement"]),
             )
             for row in invocation.output["edits"]
@@ -455,6 +472,27 @@ class ImplementationAgent:
             if isinstance(target, dict) and str(target.get("module_id", ""))
         }
         focus_ids = reported_writable_ids & writable_ids
+        # The general implementation agent may inspect a cross-layer backend
+        # failure, but it must not opportunistically rewrite frontend modules
+        # unless the failure cluster itself identifies a frontend target.  The
+        # frontend specialist is selected by the orchestrator for those
+        # clusters.  This keeps the full backend writable surface available
+        # without allowing an unrelated unit/integration repair to produce a
+        # large UI rewrite and new frontend type errors.
+        frontend_kinds = {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
+        reported_frontend = any(
+            str(target.get("kind", "")).upper() in frontend_kinds
+            for report in reports
+            for target in report.get("writable_targets", [])
+            if isinstance(target, dict)
+        )
+        if self._allowed_kinds is None and not reported_frontend:
+            writable_ids = {
+                module_id
+                for module_id in writable_ids
+                if str(bindings.get(module_id, {}).get("kind", "")).upper()
+                not in frontend_kinds
+            }
         relevant_writable = set(writable_ids)
         bootstrap_failure = any(
             str(report.get("phase", "")) == "FRONTEND_BOOTSTRAP" for report in reports
@@ -523,6 +561,7 @@ class ImplementationAgent:
             requirement_id=requirement_id,
             target_ids=relevant_writable | relevant_read_only,
             full_visual_analysis=bootstrap_failure,
+            frontend_only=self._allowed_kinds is not None,
         )
         # Stable segment: everything that stays byte-identical across the iterations
         # of one node, ordered cheapest-to-largest so the provider prefix cache keeps
@@ -555,8 +594,21 @@ class ImplementationAgent:
                 "FRONTEND_BOOTSTRAP" if bootstrap_failure else "TDD_REPAIR"
             ),
             "requirement": request.requirement,
-            "requirement_contract": request.requirement_contract,
-            "failure_analysis": _failure_analysis_with_failed_tests(
+            "requirement_contract": (
+                _project_frontend_contract(request.requirement_contract)
+                if self._allowed_kinds is not None
+                else request.requirement_contract
+            ),
+            "failure_analysis": _project_frontend_failure_analysis(
+                _failure_analysis_with_failed_tests(
+                    request.failure_analysis_text
+                    or _fallback_failure_analysis(reports),
+                    frozen_tests,
+                    reports,
+                )
+            )
+            if self._allowed_kinds is not None
+            else _failure_analysis_with_failed_tests(
                 request.failure_analysis_text
                 or _fallback_failure_analysis(reports),
                 frozen_tests,
@@ -759,10 +811,11 @@ def _validate_decision(
         return [*errors, "ARC4534 IMPLEMENTATION_OUTPUT_INVALID: edits must contain 1..16 rows."]
     actual_ids: list[str] = []
     for row in edits:
-        if not isinstance(row, dict) or set(row) != {"module_id", "replacement"}:
+        if not isinstance(row, dict) or set(row) != {"module_id", "search", "replacement"}:
             errors.append("ARC4534 IMPLEMENTATION_OUTPUT_INVALID: malformed edit row.")
             continue
         module_id = str(row.get("module_id", "")).strip()
+        search = row.get("search")
         replacement = row.get("replacement")
         actual_ids.append(module_id)
         if module_id not in allowed_ids:
@@ -772,6 +825,14 @@ def _validate_decision(
         if not isinstance(replacement, str) or not replacement.strip():
             errors.append(
                 f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {module_id!r} has no replacement."
+            )
+        if not isinstance(search, str) or not search.strip():
+            errors.append(
+                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {module_id!r} has no search fragment."
+            )
+        elif len(search.encode("utf-8")) > 80_000:
+            errors.append(
+                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {module_id!r} search fragment is too large."
             )
         elif len(replacement.encode("utf-8")) > 200_000:
             errors.append(
@@ -809,12 +870,25 @@ def _report_dict(value: Any) -> dict[str, Any] | None:
     return None
 
 
+def _project_frontend_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    """Keep behavior needed by UI implementation without backend decomposition noise."""
+
+    if not isinstance(contract, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in ("spec", "server_state", "inputs", "outputs", "effects", "obligations"):
+        if key in contract:
+            result[key] = copy.deepcopy(contract[key])
+    return result
+
+
 def _project_design_context(
     design_context: dict[str, Any] | None,
     *,
     requirement_id: str,
     target_ids: set[str],
     full_visual_analysis: bool = True,
+    frontend_only: bool = False,
 ) -> dict[str, Any]:
     """Keep only Design evidence reachable from this implementation request."""
 
@@ -936,6 +1010,10 @@ def _project_design_context(
             for row in design_context.get("backend_modules", [])
             if isinstance(row, dict)
             and str(row.get("id", row.get("module_id", ""))) in target_ids
+            and (
+                not frontend_only
+                or str(row.get("kind", "")).upper() in {"API", "API_CLIENT"}
+            )
         ],
         "active_requirement_link": projected_link,
         "frontend": {
@@ -1041,6 +1119,17 @@ def _failure_analysis_with_failed_tests(
         for test in selected
     ]
     return "\n\n".join(value for value in (analysis_text, *source_sections) if value)
+
+
+def _project_frontend_failure_analysis(analysis: str) -> str:
+    """Drop duplicated implementation excerpts; writable_targets already carry full source."""
+
+    return re.sub(
+        r"\nrelevant_source:\n.*?(?=\nFAILED TEST:|\Z)",
+        "\nrelevant_source: (see writable_targets.source)\n",
+        str(analysis or ""),
+        flags=re.DOTALL,
+    )
 
 
 def _fallback_failure_analysis(reports: list[dict[str, Any]]) -> str:

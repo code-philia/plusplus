@@ -121,7 +121,7 @@ class TestRunner:
             "E2E": _bounded_float(
                 self.environment,
                 "ARC_TDD_E2E_TIMEOUT_SECONDS",
-                120.0,
+                10.0,
                 10.0,
                 1800.0,
             ),

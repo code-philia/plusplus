@@ -5,10 +5,11 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class ProposedEdit:
-    """Replace only the source text between one module's implementation markers."""
+    """Replace one uniquely identified source fragment inside a module region."""
 
     module_id: str
     expected_sha256: str
+    search: str
     replacement: str
 
 

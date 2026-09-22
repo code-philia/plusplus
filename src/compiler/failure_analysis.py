@@ -45,6 +45,10 @@ test_file and title, then state the exact URL/route, locator or assertion,
 expected value, received value, browser/runtime error, and the most relevant source location whenever those facts are
 present. Separate observed facts from hypotheses. Do not invent missing facts, do not propose code, and do not omit a
 useful error detail merely because it is repetitive. The failed-test sections remain attached after your analysis.
+For TYPECHECK or TYPE_CONTRACT failures, preserve every source file path and
+line/column mentioned in the compiler output. Never collapse the diagnostic to
+one representative file and never omit a file merely because it is not the
+failed test's direct target; all listed files are relevant routing evidence.
 Return exactly one JSON object with one non-empty `analysis` string and no prose outside the JSON object.
 """
 
@@ -464,6 +468,14 @@ class FailureAnalyzer:
         }
         for frame in stack_frames:
             target_modules.update(modules_by_file.get(frame.file, []))
+        # TypeScript often reports files as ``src/...`` while the binding
+        # registry stores ``backend/src/...`` or ``frontend/src/...``.  Resolve
+        # every known binding file mentioned anywhere in the diagnostic, not
+        # only files that happened to produce a parsed stack frame.  This keeps
+        # multi-file type contracts visible to the repair agent.
+        target_modules.update(
+            _diagnostic_module_ids(output, modules_by_file)
+        )
         writable_targets, read_only_targets = _relevant_targets(
             resolved_targets,
             binding_by_id,
@@ -927,6 +939,39 @@ def _relevant_targets(
         [_target_card(binding_by_id[value]) for value in sorted(writable_ids) if value in binding_by_id],
         [_target_card(binding_by_id[value]) for value in sorted(read_only_ids) if value in binding_by_id],
     )
+
+
+def _diagnostic_module_ids(
+    output: str,
+    modules_by_file: dict[str, list[str]],
+) -> set[str]:
+    """Return every bound module whose source path appears in diagnostics.
+
+    Compiler output is not consistent about path prefixes: depending on the
+    command it may print ``backend/src/x.ts``, ``src/x.ts``, or a Windows
+    absolute path.  Matching against known registry paths (and their
+    backend/frontend-stripped suffixes) is both safer and more complete than
+    trying to parse a single stack-frame grammar.
+    """
+
+    normalized_output = str(output or "").replace("\\", "/").lower()
+    matched: set[str] = set()
+    for raw_file, module_ids in modules_by_file.items():
+        relative = _normalize_relative(raw_file).replace("\\", "/")
+        if not relative:
+            continue
+        candidates = {relative.lower()}
+        if relative.startswith(("backend/", "frontend/")):
+            candidates.add(relative.lower().split("/", 1)[1])
+        if any(
+            re.search(
+                re.escape(candidate) + r"(?:[:(,\s]|$)",
+                normalized_output,
+            )
+            for candidate in candidates
+        ):
+            matched.update(str(value) for value in module_ids if str(value))
+    return matched
 
 
 def _target_card(binding: dict[str, Any]) -> dict[str, Any]:
