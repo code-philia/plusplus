@@ -87,22 +87,23 @@ Implement the smallest coherent code change for the supplied requirement and imp
 
 Context layout:
 - Context arrives as two user messages. The first, "stable_project_context", holds policy, project conventions,
-  design evidence, read-only dependencies, and the full source of every writable file. The second, "current_task",
-  holds the requirement, contract, failure cluster, frozen tests, and the ids you may edit.
+  design evidence, and writable_targets (each with its complete source). The second, "current_task",
+  holds the requirement, contract, failure cluster, failed-test analysis/source, and the ids you may edit.
 - The second message is the task. Read the first for facts, then satisfy the second.
 
 Authority and evidence:
-- Required behavior comes from requirement, scenarios, requirement_contract, and frozen_tests when present.
+- Required behavior comes from requirement, scenarios, requirement_contract, and the failed-test
+  source/analysis sections when present.
 - Module behavior and reference-derived frontend layout/style evidence may come from design_context.
 - Failure localization comes from the compiler's failure cluster; the readable
   failure_analysis text contains the model-oriented diagnosis and failed-test
   JSON/pw:api logs when the failing layer is Playwright.
 - Real files, symbols, call edges, and editable regions come from writable_targets.
-- Read-only dependencies are context only and must never be edited.
+- Read-only dependency interfaces are included only when needed by design evidence; they must never be edited.
 - Scope warnings are authoritative routing signals. If a warning identifies a
   compiler-owned, frozen-test, contract, infrastructure, or dependency issue,
   do not guess around it or edit outside the allowed implementation regions.
-- Source files are supplied in full so you can understand existing imports and public surfaces.
+- Each writable_targets entry contains its complete source, so use that field as the source of truth.
 - The writable surface contains every editable module owned by this requirement. Failure localization never limits
   the available source to one hop or one test layer. Diagnose across callers, callees, and sibling modules before
   choosing the smallest coherent patch.
@@ -427,7 +428,6 @@ class ImplementationAgent:
         relevant_read_only = set(read_only_ids)
 
         source_hashes: dict[str, str] = {}
-        source_documents: dict[str, dict[str, Any]] = {}
         writable_cards: list[dict[str, Any]] = []
         for module_id in sorted(relevant_writable):
             binding = bindings.get(module_id)
@@ -458,17 +458,10 @@ class ImplementationAgent:
                 )
                 continue
             source_hashes[module_id] = digest
-            source_documents.setdefault(
-                relative,
-                {"file": relative, "sha256": digest, "source": source},
-            )
-            writable_cards.append(_source_card(binding, digest=digest))
+            card = _source_card(binding, digest=digest)
+            card["source"] = source
+            writable_cards.append(card)
 
-        read_only_cards = [
-            _source_card(bindings[module_id], digest=None)
-            for module_id in sorted(relevant_read_only)
-            if module_id in bindings
-        ]
         frozen_tests, test_errors = ([], [])
         if mode == "TDD":
             frozen_tests, test_errors = self._frozen_tests(
@@ -506,11 +499,7 @@ class ImplementationAgent:
             },
             "project_conventions": _PROJECT_CONVENTIONS,
             "design_context": projected_design_context,
-            "read_only_dependencies": read_only_cards,
             "writable_targets": writable_cards,
-            "writable_source_files": [
-                source_documents[key] for key in sorted(source_documents)
-            ],
         }
         # Dynamic segment: the current task. It is the last user message, so the model
         # reads it closest to its own turn and no cached prefix is invalidated by it.
@@ -519,13 +508,16 @@ class ImplementationAgent:
             "iteration": request.iteration,
             "requirement": request.requirement,
             "requirement_contract": request.requirement_contract,
-            "failure_analysis": request.failure_analysis_text
-            or _fallback_failure_analysis(reports),
+            "failure_analysis": _failure_analysis_with_failed_tests(
+                request.failure_analysis_text
+                or _fallback_failure_analysis(reports),
+                frozen_tests,
+                reports,
+            ),
             "scope_warnings": _scope_warnings(
                 reports,
                 read_only_ids=read_only_ids,
             ),
-            "frozen_tests": frozen_tests,
             "previous_patch_metadata": request.previous_patch_metadata,
             "allowed_writable_module_ids": sorted(source_hashes),
         }
@@ -841,21 +833,12 @@ def _project_design_context(
 
     return {
         "requirement_id": requirement_id,
-        "module_ids": sorted(
-            str(value)
-            for value in design_context.get("module_ids", [])
-            if str(value) in target_ids
-        ),
         "backend_modules": [
             _compact_design_module(row)
             for row in design_context.get("backend_modules", [])
             if isinstance(row, dict)
             and str(row.get("id", row.get("module_id", ""))) in target_ids
         ],
-        "frontend_scope": "IMPLEMENTATION_TARGET_ONE_HOP",
-        "writable_component_ids": sorted(
-            str(row.get("id", "")) for row in owned_components
-        ),
         "active_requirement_link": projected_link,
         "frontend": {
             "screens": screens,
@@ -871,9 +854,8 @@ def _project_design_context(
 def _compact_design_module(row: dict[str, Any]) -> dict[str, Any]:
     fields = (
         "id", "module_id", "kind", "name", "description", "requirement_id",
-        "file", "symbol", "public_signature", "inputs", "outputs", "effects",
-        "callees", "callers", "route", "method", "request", "response",
-        "obligations", "behavioral_obligations", "constraints",
+        "effects", "callees", "callers", "obligations", "behavioral_obligations",
+        "constraints",
     )
     return {key: copy.deepcopy(row.get(key)) for key in fields if key in row}
 
@@ -914,6 +896,53 @@ def _compact_visual_reference(
     }
     projected["analysis_scope"] = "REGIONS_AND_CONTROLS_ONLY"
     return projected
+
+
+def _failure_analysis_with_failed_tests(
+    analysis: str,
+    frozen_tests: list[dict[str, Any]],
+    reports: list[dict[str, Any]],
+) -> str:
+    """Attach only failed test sources to the corresponding failure context.
+
+    The manifest is still validated internally, but the model does not need every
+    frozen test. This keeps unrelated tests out of the implementation prompt while
+    preserving the exact source for each test implicated by the failure cluster.
+    """
+
+    if not frozen_tests:
+        return analysis
+    failed_ids = {
+        str(test_id)
+        for report in reports
+        for test_id in report.get("test_ids", [])
+        if str(test_id)
+    }
+    analysis_text = str(analysis or "")
+    mentioned_files = set(re.findall(r"(?m)^test_file:\s*(\S+)", analysis_text))
+    selected: list[dict[str, Any]] = []
+    for test in frozen_tests:
+        test_ids = {str(value) for value in test.get("test_ids", []) if str(value)}
+        test_file = str(test.get("test_file", ""))
+        if (
+            failed_ids.intersection(test_ids)
+            or (test_file and test_file in analysis_text)
+            or (test_file and PurePosixPath(test_file).name in mentioned_files)
+        ):
+            selected.append(test)
+    if not selected:
+        return analysis_text
+    if "FAILED TEST SOURCE:" in analysis_text or "test_source:\n" in analysis_text:
+        return analysis_text
+    source_sections = [
+        "FAILED TEST SOURCE:\n"
+        f"test_file: {test.get('test_file', '(unknown)')}\n"
+        f"layer: {test.get('layer', '(unknown)')}\n"
+        f"test_ids: {', '.join(str(value) for value in test.get('test_ids', []))}\n"
+        f"source:\n{test.get('source', '')}"
+        for test in selected
+    ]
+    return "\n\n".join(value for value in (analysis_text, *source_sections) if value)
 
 
 def _fallback_failure_analysis(reports: list[dict[str, Any]]) -> str:

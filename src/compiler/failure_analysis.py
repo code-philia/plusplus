@@ -288,14 +288,11 @@ class FailureAnalyzer:
                 )
         else:
             synthesis = "No failure-analysis model was configured; use the failed-test logs below."
+        # Keep the synthesized diagnosis in one place below.  Do not append the
+        # same analysis to every failed-test section: with multiple failures that
+        # duplicated the complete synthesis once per test and made the repair
+        # context unnecessarily repetitive.
         annotated_failure_log = failure_log
-        if failed_sections and synthesis:
-            annotated_failure_log = "\n\n".join(
-                f"{section}\n"
-                "failure_analysis:\n"
-                f"{synthesis}"
-                for section in failed_sections
-            )
         warning = _failure_scope_warning(reports)
         context = (
             "PLAYWRIGHT FAILURE ANALYSIS\n"
@@ -367,6 +364,13 @@ class FailureAnalyzer:
                 reports=reports,
                 module_ids=set(module_ids),
             )
+            test_source = "(test source unavailable)"
+            if test_file:
+                test_path = self.output_root / Path(test_file)
+                try:
+                    test_source = test_path.read_text(encoding="utf-8")
+                except OSError:
+                    pass
             sections.append(
                 f"FAILED TEST: {title}\n"
                 f"test_id: {test_id}\n"
@@ -377,6 +381,7 @@ class FailureAnalyzer:
                 f"key_failure_log:\n{call_log}\n"
                 f"pw:api_stop_trace:\n{chr(10).join(pw_api_lines) or '(no pw:api lines captured)'}\n"
                 f"stack:\n{stack}\n"
+                f"test_source:\n{test_source}\n"
                 f"relevant_source:\n{source_context}"
             )
         return sections
@@ -402,7 +407,7 @@ class FailureAnalyzer:
             excerpt = _read_source_excerpt(self.output_root, relative, line=line)
             if excerpt:
                 return f"// {relative}\n{excerpt}"
-        return "(source excerpt unavailable; consult writable_source_files in stable context)"
+        return "(source excerpt unavailable; consult writable_targets in stable context)"
 
     def _report_for_command(
         self,
