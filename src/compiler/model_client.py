@@ -29,6 +29,33 @@ class ModelConfigurationError(RuntimeError):
     """Raised when a semantic pass has no usable model configuration."""
 
 
+def is_deepseek_model(model: str) -> bool:
+    """Return whether a model name needs DeepSeek reasoning parameters."""
+
+    return str(model).strip().lower().startswith("deepseek")
+
+
+def completion_request_kwargs(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    response_format: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build provider request arguments, including DeepSeek-only controls."""
+
+    request: dict[str, Any] = {
+        "model": model,
+        "stream": False,
+        "messages": messages,
+    }
+    if response_format is not None:
+        request["response_format"] = response_format
+    if is_deepseek_model(model):
+        request["reasoning_effort"] = "low"
+        request["extra_body"] = {"thinking": {"type": "disabled"}}
+    return request
+
+
 def describe_model_error(error: BaseException) -> str:
     """Render the public exception and its underlying transport cause."""
 
@@ -104,17 +131,18 @@ class Model:
         if self._structured_output_mode == "json_schema":
             try:
                 response = self._client.chat.completions.create(
-                    model=self.model,
-                    stream=False,
-                    messages=messages,
-                    response_format={
+                    **completion_request_kwargs(
+                        model=self.model,
+                        messages=messages,
+                        response_format={
                         "type": "json_schema",
                         "json_schema": {
                             "name": schema_name,
                             "strict": True,
                             "schema": output_schema,
                         },
-                    },
+                        },
+                    )
                 )
             except Exception as exc:
                 if not response_format_unavailable(exc):
@@ -134,10 +162,11 @@ class Model:
         if response is None and self._structured_output_mode == "json_object":
             try:
                 response = self._client.chat.completions.create(
-                    model=self.model,
-                    stream=False,
-                    messages=fallback_messages,
-                    response_format={"type": "json_object"},
+                    **completion_request_kwargs(
+                        model=self.model,
+                        messages=fallback_messages,
+                        response_format={"type": "json_object"},
+                    )
                 )
             except Exception as exc:
                 if not response_format_unavailable(exc):
@@ -146,9 +175,10 @@ class Model:
 
         if response is None:
             response = self._client.chat.completions.create(
-                model=self.model,
-                stream=False,
-                messages=fallback_messages,
+                **completion_request_kwargs(
+                    model=self.model,
+                    messages=fallback_messages,
+                )
             )
         content = response.choices[0].message.content
         if content is None:
