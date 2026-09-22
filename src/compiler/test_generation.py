@@ -59,7 +59,6 @@ TEST_GENERATION_SCHEMA: dict[str, Any] = {
                                 "title": {
                                     "type": "string",
                                     "minLength": 1,
-                                    "maxLength": 160,
                                 },
                                 "source_scenario_ids": {
                                     "type": "array",
@@ -78,7 +77,6 @@ TEST_GENERATION_SCHEMA: dict[str, Any] = {
                     "code": {
                         "type": "string",
                         "minLength": 1,
-                        "maxLength": 30000,
                     },
                 },
             },
@@ -1128,10 +1126,16 @@ def _project_frontend_subgraph(
             or str(row.get("requirement_id", "")) == requirement_id
         )
     ]
+    screen_components = [
+        _project_frontend_row(row, "component")
+        for row in frontend_ir.get("screen_components", [])
+        if isinstance(row, dict) and str(row.get("screen_id", "")) in screen_ids
+    ]
     if "E2E" not in required_layers:
-        return {"screens": [], "journeys": [], "api_usages": [], "shared_state_policies": []}
+        return {"screens": [], "screen_components": [], "journeys": [], "api_usages": [], "shared_state_policies": []}
     return {
         "screens": screens,
+        "screen_components": screen_components,
         "journeys": journeys,
         "api_usages": api_usages,
         "shared_state_policies": shared_state_policies,
@@ -1141,6 +1145,7 @@ def _project_frontend_subgraph(
 def _project_frontend_row(row: dict[str, Any], kind: str) -> dict[str, Any]:
     fields = {
         "screen": ("id", "route", "title", "description", "requirement_ids", "required_api_ids", "navigation_targets", "visual_reference_ids"),
+        "component": ("id", "screen_id", "purpose", "requirement_ids", "required_api_ids", "observable_states", "visual_reference_ids"),
         "journey": ("id", "requirement_id", "source_screen_id", "target_screen_id", "steps", "api_id"),
         "api_usage": ("screen_id", "consumer_id", "api_id", "purpose", "trigger"),
         "state": ("id", "name", "requirement_ids", "persistence", "storage_key", "state", "actions"),

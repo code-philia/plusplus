@@ -759,7 +759,7 @@ def _visual_analysis_error(value: Any, reference_id: str) -> str | None:
         items = value.get(key)
         if not isinstance(items, list) or len(items) > 64:
             return f"Invalid visual analysis: {key} must be a list with at most 64 items."
-        if any(not isinstance(item, str) or not item.strip() or len(item) > 240 for item in items):
+        if any(not isinstance(item, str) or not item.strip() for item in items):
             return f"Invalid visual analysis: {key} contains an invalid observation."
     return None
 

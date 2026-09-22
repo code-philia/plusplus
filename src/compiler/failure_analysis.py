@@ -20,6 +20,7 @@ FAILURE_CLASSES = (
     "IMPLEMENTATION_BEHAVIOR",
     "VISUAL_BEHAVIOR",
     "TEST_OR_CONTRACT_INCONSISTENT",
+    "DEFERRED_DEPENDENCY",
 )
 
 
@@ -49,6 +50,7 @@ class TestFailureReport:
     failure_fingerprint: str
     command: list[str] = field(default_factory=list)
     diagnostic_output: str = ""
+    deferred_dependency_modules: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -120,6 +122,14 @@ class FailureAnalyzer:
             if isinstance(row, dict)
             and str(row.get("requirement_id", "")) == requirement_id
         ]
+        # Every module this requirement may edit. A stub hit outside that set is a
+        # dependency the schedule has not built yet, not a defect in this node.
+        owned_module_ids = {
+            str(value)
+            for key in ("owned", "writable")
+            for value in resolved.get(key, [])
+            if str(value)
+        }
         reports: list[TestFailureReport] = []
         failed_commands = [row for row in test_run.commands if row.status != "PASSED"]
         for command_result in failed_commands:
@@ -133,6 +143,7 @@ class FailureAnalyzer:
                     binding_by_id=binding_by_id,
                     modules_by_file=modules_by_file,
                     changed_files=changed_files or [],
+                    owned_module_ids=owned_module_ids,
                 )
             )
 
@@ -160,6 +171,7 @@ class FailureAnalyzer:
         binding_by_id: dict[str, dict[str, Any]],
         modules_by_file: dict[str, list[str]],
         changed_files: list[str],
+        owned_module_ids: set[str],
     ) -> TestFailureReport:
         output = _clean_output(
             "\n".join(
@@ -173,7 +185,19 @@ class FailureAnalyzer:
             )
         )
         phase = _failure_phase(command_result, output)
-        failure_class = _failure_class(command_result, phase, output)
+        deferred = sorted(
+            {
+                str(value)
+                for value in command_result.stub_hits
+                if str(value) and str(value) not in owned_module_ids
+            }
+        )
+        failure_class = _failure_class(
+            command_result,
+            phase,
+            output,
+            deferred_modules=deferred,
+        )
         matching_tests = _matching_tests(command_result, output, test_rows)
         test_ids = sorted(
             {
@@ -222,6 +246,7 @@ class FailureAnalyzer:
             failure_fingerprint=fingerprint,
             command=list(command_result.command),
             diagnostic_output=output,
+            deferred_dependency_modules=deferred,
         )
 
     def _report_for_runner_failure(
@@ -414,7 +439,13 @@ def _failure_phase(command: TestCommandResult, output: str) -> str:
     return "ASSERTION"
 
 
-def _failure_class(command: TestCommandResult, phase: str, output: str) -> str:
+def _failure_class(
+    command: TestCommandResult,
+    phase: str,
+    output: str,
+    *,
+    deferred_modules: list[str] | None = None,
+) -> str:
     lowered = output.lower()
     if phase == "BOOTSTRAP":
         return "INFRASTRUCTURE"
@@ -433,6 +464,12 @@ def _failure_class(command: TestCommandResult, phase: str, output: str) -> str:
         )
     ):
         return "TEST_OR_CONTRACT_INCONSISTENT"
+    # Checked last, so a real type error or a broken test still wins: a behavioral
+    # failure that ran through another requirement's skeleton says nothing about this
+    # requirement's code, and routing it to the implementation agent would only buy a
+    # patch that works around a module the schedule builds later.
+    if deferred_modules:
+        return "DEFERRED_DEPENDENCY"
     return "IMPLEMENTATION_BEHAVIOR"
 
 

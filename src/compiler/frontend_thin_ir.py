@@ -16,17 +16,17 @@ from .frontend_ir import (
 FRONTEND_IR_SCHEMA_VERSION = 3
 
 
-def _strings(*, maximum: int = 64, length: int = 300) -> dict[str, Any]:
-    return {"type": "array", "maxItems": maximum, "items": {"type": "string", "minLength": 1, "maxLength": length}}
+def _strings(*, maximum: int = 64) -> dict[str, Any]:
+    return {"type": "array", "maxItems": maximum, "items": {"type": "string", "minLength": 1}}
 
 
 NAVIGATION_TARGET_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["trigger", "target_route", "condition"],
     "properties": {
-        "trigger": {"type": "string", "minLength": 1, "maxLength": 160},
-        "target_route": {"type": "string", "pattern": r"^/", "maxLength": 240},
-        "condition": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 300}, {"type": "null"}]},
+        "trigger": {"type": "string", "minLength": 1},
+        "target_route": {"type": "string", "pattern": r"^/"},
+        "condition": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
     },
 }
 
@@ -35,12 +35,28 @@ SCREEN_SCHEMA = {
     "required": ["id", "route", "purpose", "route_inputs", "requirement_ids", "entry_conditions", "observable_states", "required_api_ids", "navigation_targets", "visual_reference_ids"],
     "properties": {
         "id": {"type": "string", "pattern": r"^PAGE\.[A-Za-z][A-Za-z0-9]*$"},
-        "route": {"type": "string", "pattern": r"^/", "maxLength": 240},
-        "purpose": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "route": {"type": "string", "pattern": r"^/"},
+        "purpose": {"type": "string", "minLength": 1},
         "route_inputs": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
         "requirement_ids": _strings(), "entry_conditions": _strings(maximum=16),
         "observable_states": _strings(maximum=24), "required_api_ids": _strings(maximum=24),
         "navigation_targets": {"type": "array", "items": NAVIGATION_TARGET_SCHEMA},
+        "visual_reference_ids": _strings(maximum=24),
+    },
+}
+
+SCREEN_COMPONENT_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["id", "screen_id", "purpose", "requirement_ids", "inputs", "required_api_ids", "shared_state_ids", "observable_states", "visual_reference_ids"],
+    "properties": {
+        "id": {"type": "string", "pattern": r"^COMPONENT\.[A-Za-z][A-Za-z0-9]*$"},
+        "screen_id": {"type": "string", "pattern": r"^PAGE\."},
+        "purpose": {"type": "string", "minLength": 1},
+        "requirement_ids": _strings(),
+        "inputs": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
+        "required_api_ids": _strings(maximum=24),
+        "shared_state_ids": _strings(maximum=16),
+        "observable_states": _strings(maximum=24),
         "visual_reference_ids": _strings(maximum=24),
     },
 }
@@ -52,10 +68,10 @@ JOURNEY_SCHEMA = {
         "id": {"type": "string", "pattern": r"^JOURNEY\.[A-Za-z][A-Za-z0-9]*$"},
         "requirement_id": {"type": "string", "minLength": 1},
         "source_screen_id": {"type": "string", "pattern": r"^PAGE\."},
-        "trigger": {"type": "string", "minLength": 1, "maxLength": 200},
+        "trigger": {"type": "string", "minLength": 1},
         "api_id": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
-        "success_target_route": {"anyOf": [{"type": "string", "pattern": r"^/", "maxLength": 240}, {"type": "null"}]},
-        "failure_behavior": {"type": "string", "minLength": 1, "maxLength": 400},
+        "success_target_route": {"anyOf": [{"type": "string", "pattern": r"^/"}, {"type": "null"}]},
+        "failure_behavior": {"type": "string", "minLength": 1},
     },
 }
 
@@ -78,7 +94,7 @@ SHARED_STATE_POLICY_SCHEMA = {
     "required": ["id", "purpose", "state", "actions", "persistence", "requirement_ids"],
     "properties": {
         "id": {"type": "string", "pattern": r"^STORE\.[A-Za-z][A-Za-z0-9]*$"},
-        "purpose": {"type": "string", "minLength": 1, "maxLength": 600},
+        "purpose": {"type": "string", "minLength": 1},
         "state": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
         "actions": {"type": "array", "items": STORE_ACTION_SCHEMA},
         "persistence": STORE_PERSISTENCE_SCHEMA,
@@ -95,16 +111,23 @@ REQUIREMENT_LINK_SCHEMA = {
     },
 }
 
+OPTIONAL_FRONTEND_DESIGN_TABLES = ("screen_components",)
+
 FRONTEND_DESIGN_TABLE_SCHEMAS = {
     "visual_references": {"type": "array", "items": VISUAL_REFERENCE_SCHEMA},
     "screens": {"type": "array", "items": SCREEN_SCHEMA},
+    "screen_components": {"type": "array", "items": SCREEN_COMPONENT_SCHEMA},
     "journeys": {"type": "array", "items": JOURNEY_SCHEMA},
     "api_usages": {"type": "array", "items": API_USAGE_SCHEMA},
     "shared_state_policies": {"type": "array", "items": SHARED_STATE_POLICY_SCHEMA},
 }
 FRONTEND_DESIGN_IR_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["schema_version", *FRONTEND_DESIGN_TABLE_SCHEMAS, "requirement_links"],
+    "required": [
+        "schema_version",
+        *(key for key in FRONTEND_DESIGN_TABLE_SCHEMAS if key not in OPTIONAL_FRONTEND_DESIGN_TABLES),
+        "requirement_links",
+    ],
     "properties": {"schema_version": {"type": "integer", "const": FRONTEND_IR_SCHEMA_VERSION}, **FRONTEND_DESIGN_TABLE_SCHEMAS, "requirement_links": {"type": "array", "items": REQUIREMENT_LINK_SCHEMA}},
 }
 
@@ -121,8 +144,6 @@ def repair_shape(value: Any, schema: dict[str, Any]) -> Any:
     if kind == "array" and isinstance(value, list):
         rows = value[:schema["maxItems"]] if isinstance(schema.get("maxItems"), int) else value
         return [repair_shape(row, schema.get("items", {})) for row in rows]
-    if kind == "string" and isinstance(value, str) and isinstance(schema.get("maxLength"), int):
-        return value[:schema["maxLength"]]
     return copy.deepcopy(value)
 
 

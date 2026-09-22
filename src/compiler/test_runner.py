@@ -45,6 +45,7 @@ class TestCommandResult:
     stderr: str = ""
     error: str | None = None
     timed_out: bool = False
+    stub_hits: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -56,6 +57,7 @@ class TestRunResult:
     selected_files: list[str]
     commands: list[TestCommandResult] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    stub_hits: list[str] = field(default_factory=list)
     duration_ms: int = 0
     schema_version: int = TEST_RUNNER_SCHEMA_VERSION
 
@@ -79,6 +81,12 @@ class TestRunner:
         self.output_root = output_root.expanduser().resolve()
         self.environment = dict(os.environ if environment is None else environment)
         self.environment.setdefault("CI", "1")
+        # Unimplemented modules append their id here while a command runs, so a
+        # failure can be attributed to a deferred dependency instead of to the
+        # requirement under test. The path is absolute because the backend process
+        # is started by Playwright with its own working directory.
+        self._stub_log = self.output_root / ".arc" / "runtime" / "stub-hits.log"
+        self.environment.setdefault("ARC_STUB_LOG", str(self._stub_log))
         self._log = SynchronousLog("TestRunner", workspace_root=self.output_root)
         self._timeouts = {
             "TYPECHECK": _bounded_float(
@@ -368,6 +376,7 @@ class TestRunner:
                 error=f"ARC4506 TEST_COMMAND_UNAVAILABLE: {command[0]}",
             )
         actual_command = [executable, *command[1:]]
+        self._reset_stub_log()
         try:
             process = subprocess.Popen(
                 actual_command,
@@ -442,6 +451,7 @@ class TestRunner:
                     else f"ARC4507 TEST_COMMAND_TIMEOUT: exceeded {timeout:g}s."
                 ),
                 timed_out=True,
+                stub_hits=self._collect_stub_hits(),
             )
         except OSError as exc:
             terminate_process_tree(process)
@@ -462,9 +472,11 @@ class TestRunner:
             )
         duration_ms = round((time.perf_counter() - started) * 1000)
         status = "PASSED" if process.returncode == 0 else "FAILED"
+        stub_hits = self._collect_stub_hits()
         self._log.info(
             f"FINISHED phase={phase} layer={layer or '-'} status={status} "
-            f"returncode={process.returncode} duration_ms={duration_ms}"
+            f"returncode={process.returncode} duration_ms={duration_ms} "
+            f"stub_hits={len(stub_hits)}"
         )
         return TestCommandResult(
             phase=phase,
@@ -476,9 +488,32 @@ class TestRunner:
             duration_ms=duration_ms,
             stdout=_bounded_output(stdout),
             stderr=_bounded_output(stderr),
+            stub_hits=stub_hits,
         )
 
+    def _reset_stub_log(self) -> None:
+        """Start every command with an empty stub ledger."""
+
+        try:
+            self._stub_log.parent.mkdir(parents=True, exist_ok=True)
+            self._stub_log.write_text("", encoding="utf-8")
+        except OSError:
+            # The ledger is diagnostic; losing it must not abort a test run.
+            pass
+
+    def _collect_stub_hits(self) -> list[str]:
+        """Read the module ids that answered from a skeleton during this command."""
+
+        try:
+            raw = self._stub_log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+        return sorted({line.strip() for line in raw.splitlines() if line.strip()})
+
     def _finish(self, result: TestRunResult, started: float) -> TestRunResult:
+        result.stub_hits = sorted(
+            {value for row in result.commands for value in row.stub_hits}
+        )
         result.status = (
             "PASSED"
             if result.commands and all(row.status == "PASSED" for row in result.commands)

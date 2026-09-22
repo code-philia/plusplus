@@ -42,11 +42,11 @@ def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
     return {"anyOf": [schema, {"type": "null"}]}
 
 
-def _string_list(*, max_items: int = 64, max_length: int = 240) -> dict[str, Any]:
+def _string_list(*, max_items: int = 64) -> dict[str, Any]:
     return {
         "type": "array",
         "maxItems": max_items,
-        "items": {"type": "string", "minLength": 1, "maxLength": max_length},
+        "items": {"type": "string", "minLength": 1},
     }
 
 
@@ -64,8 +64,8 @@ UI_SCOPE_LAYOUT_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "action": _ACTION_SCHEMA,
-        "name": {"type": "string", "minLength": 1, "maxLength": 80},
-        "spec": {"type": "string", "maxLength": 800},
+        "name": {"type": "string", "minLength": 1},
+        "spec": {"type": "string"},
         "render_obligations": {"type": "array", "items": RENDER_OBLIGATION_SCHEMA},
         "visual_reference_ids": _string_list(),
     },
@@ -77,8 +77,8 @@ UI_SCOPE_STORE_SCHEMA: dict[str, Any] = {
     "required": ["action", "name", "spec", "state", "actions", "persistence"],
     "properties": {
         "action": _ACTION_SCHEMA,
-        "name": {"type": "string", "minLength": 1, "maxLength": 80},
-        "spec": {"type": "string", "maxLength": 800},
+        "name": {"type": "string", "minLength": 1},
+        "spec": {"type": "string"},
         "state": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
         "actions": {"type": "array", "items": STORE_ACTION_SCHEMA},
         "persistence": STORE_PERSISTENCE_SCHEMA,
@@ -103,12 +103,12 @@ UI_SCOPE_PAGE_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "action": _ACTION_SCHEMA,
-        "name": {"type": "string", "minLength": 1, "maxLength": 80},
-        "spec": {"type": "string", "maxLength": 800},
-        "route": {"type": "string", "maxLength": 240},
+        "name": {"type": "string", "minLength": 1},
+        "spec": {"type": "string"},
+        "route": {"type": "string"},
         "route_inputs": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
         "layout_name": _nullable(
-            {"type": "string", "minLength": 1, "maxLength": 80}
+            {"type": "string", "minLength": 1}
         ),
         "api_dependencies": _string_list(),
         "store_names": _string_list(),
@@ -123,7 +123,7 @@ REQUIREMENT_UI_SCOPE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["requirement_id", "ui_scope", "layouts", "stores", "pages"],
     "properties": {
-        "requirement_id": {"type": "string", "minLength": 1, "maxLength": 120},
+        "requirement_id": {"type": "string", "minLength": 1},
         "ui_scope": {
             "type": "string",
             "enum": ["UI_REQUIRED", "UI_AFFECTING", "NO_UI"],

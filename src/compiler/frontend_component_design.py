@@ -34,11 +34,11 @@ def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
     return {"anyOf": [schema, {"type": "null"}]}
 
 
-def _string_list(*, max_items: int = 64, max_length: int = 240) -> dict[str, Any]:
+def _string_list(*, max_items: int = 64) -> dict[str, Any]:
     return {
         "type": "array",
         "maxItems": max_items,
-        "items": {"type": "string", "minLength": 1, "maxLength": max_length},
+        "items": {"type": "string", "minLength": 1},
     }
 
 
@@ -57,9 +57,9 @@ COMPONENT_PLAN_ITEM_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "action": {"type": "string", "enum": ["CREATE", "REUSE"]},
-        "name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "name": {"type": "string", "minLength": 1},
         "scope": {"type": "string", "enum": ["LAYOUT", "PAGE", "SHARED"]},
-        "spec": {"type": "string", "maxLength": 800},
+        "spec": {"type": "string"},
         "inputs": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
         "events": {"type": "array", "items": EVENT_SCHEMA},
         "render_obligations": {"type": "array", "items": RENDER_OBLIGATION_SCHEMA},

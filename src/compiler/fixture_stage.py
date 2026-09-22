@@ -52,7 +52,7 @@ FIXTURE_DECISION_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": ["name", "rows"],
                 "properties": {
-                    "name": {"type": "string", "maxLength": 120},
+                    "name": {"type": "string"},
                     "rows": {
                         "type": "array",
                         "minItems": 1,

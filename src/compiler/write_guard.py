@@ -273,6 +273,52 @@ class WriteGuard:
             applied_edits=applied_edits,
         )
 
+    def snapshot(self, relative_files: list[str]) -> dict[str, str]:
+        """Capture the current text of every file a node is allowed to touch.
+
+        A node that never reaches acceptance must not leave half-written regions
+        behind: the next node would read them as settled code and build on a
+        behavior nobody validated. The snapshot is the undo record for that.
+        """
+
+        captured: dict[str, str] = {}
+        for value in dict.fromkeys(relative_files):
+            relative = _safe_relative_source(str(value))
+            if relative is None:
+                continue
+            target = (self.output_root / Path(relative)).resolve()
+            if self.output_root not in target.parents or not target.is_file():
+                continue
+            try:
+                captured[relative] = _read_source(target)
+            except (OSError, UnicodeError):
+                continue
+        return captured
+
+    def restore(self, snapshot: dict[str, str]) -> tuple[list[str], list[str]]:
+        """Put every snapshotted file back, reporting what changed and what failed."""
+
+        restored: list[str] = []
+        errors: list[str] = []
+        for relative, original in sorted(snapshot.items()):
+            safe = _safe_relative_source(str(relative))
+            if safe is None:
+                errors.append(f"unsafe snapshot path {relative!r}")
+                continue
+            target = (self.output_root / Path(safe)).resolve()
+            if self.output_root not in target.parents:
+                errors.append(f"snapshot path escapes workspace: {safe}")
+                continue
+            try:
+                if target.is_file() and _read_source(target) == original:
+                    continue
+                _write_source_atomic(target, original)
+            except (OSError, UnicodeError) as exc:
+                errors.append(f"{safe}: {exc}")
+                continue
+            restored.append(safe)
+        return restored, errors
+
     def _seed_data_error(
         self,
         *,

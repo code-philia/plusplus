@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-from .base import BaseStructuredAgent, JsonModel
+from .base import CONTEXT_SEGMENTS_KEY, BaseStructuredAgent, JsonModel
 from .contracts import ProposedEdit, ProposedPatch
 
 
@@ -25,7 +25,7 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["summary", "edits"],
     "properties": {
-        "summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "summary": {"type": "string", "minLength": 1},
         "edits": {
             "type": "array",
             "minItems": 1,
@@ -35,11 +35,10 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": ["module_id", "replacement"],
                 "properties": {
-                    "module_id": {"type": "string", "minLength": 1, "maxLength": 300},
+                    "module_id": {"type": "string", "minLength": 1},
                     "replacement": {
                         "type": "string",
                         "minLength": 1,
-                        "maxLength": 200000,
                     },
                 },
             },
@@ -48,8 +47,49 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+_PROJECT_CONVENTIONS: dict[str, Any] = {
+    "frontend_styling": "Tailwind CSS v4 via @tailwindcss/vite",
+    "frontend_css_entry": "frontend/src/index.css",
+    "frontend_edits_use_static_utility_classes": True,
+    "reference_images_are_visual_guidance_not_content_fixtures": True,
+    "backend_runtime": {
+        "already_imported_in_every_backend_module": [
+            "newId",
+            "now",
+            "nowIso",
+            "HttpError",
+            "NotImplementedError",
+        ],
+        "identifiers": "Mint every new identifier with newId(prefix?) from runtime/ids; never hand-roll uuids, counters, or Date.now-based ids.",
+        "clock": "Read the current time with now() (Date) or nowIso() (ISO-8601 string) from runtime/clock; never call new Date() or Date.now() directly.",
+        "errors": "Signal an expected failure by throwing HttpError.badRequest/unauthorized/forbidden/notFound/conflict/unprocessable(message, code?, details?). The compiler already wraps every API region in try/catch and serializes the response as {\"error\":{code,message,details?}}; never build that envelope, set a status code, or call res.json for a failure.",
+        "drizzle_operators": "and, or, eq, ne, gt, gte, lt, lte, like, inArray, isNull, isNotNull, asc, desc, and sql are already imported in every DB module.",
+    },
+    "frontend_runtime": {
+        "already_imported_in_every_page_and_component": [
+            "useState",
+            "useEffect",
+            "useMemo",
+            "useRef",
+            "useCallback",
+            "useNavigate",
+        ],
+        "stores": "A Store is created by the compiler through createStore(initialState, ({getState, setState}) => actions) and persisted by persistStore. Inside a Store region, return only the actions object and mutate through setState. Read a Store from a Page or Component with useStoreState(store) for the whole state or useStore(store, select) for a slice; never mutate store state directly and never call its subscribe/getState from render.",
+        "navigation": "Navigate with the injected useNavigate() hook; never assign window.location.",
+        "screen_composition": "A partitioned Page owns no requirement: its region only composes the Components listed in its child props and forwards route inputs. Every behavior, API call, and store read for a requirement lives in the Component that owns it, and that Component is self-sufficient — it fetches its own data and reads its own stores instead of expecting the Page to pass them down.",
+        "api_errors": "requestJson throws ApiClientError with status, code, and details when a route fails. Catch it to render user-facing error states instead of inspecting raw responses.",
+    },
+}
+
+
 IMPLEMENTATION_INSTRUCTIONS = """You are ARC's bounded Implementation Agent.
 Implement the smallest coherent code change for the supplied requirement and implementation mode.
+
+Context layout:
+- Context arrives as two user messages. The first, "stable_project_context", holds policy, project conventions,
+  design evidence, read-only dependencies, and the full source of every writable file. The second, "current_task",
+  holds the requirement, contract, failure cluster, frozen tests, and the ids you may edit.
+- The second message is the task. Read the first for facts, then satisfy the second.
 
 Authority and evidence:
 - Required behavior comes from requirement, scenarios, requirement_contract, and frozen_tests when present.
@@ -79,17 +119,23 @@ Implementation rules:
 - In a DB module, use the compiler-injected `database` Drizzle client together with the imported schema table symbols.
   READ/CREATE/UPDATE/DELETE effects must execute through database.select/insert/update/delete respectively. A table
   symbol is schema metadata, not a repository: never inspect rows, data, items, or arbitrary properties on it.
-- Use the injected `eq`, `and`, and `or` Drizzle operators for predicates; do not emulate filtering after loading an
-  entire table when the predicate can be expressed by the database.
+- Use the injected Drizzle operators (`eq`, `ne`, `and`, `or`, `gt`, `gte`, `lt`, `lte`, `like`, `inArray`, `isNull`,
+  `isNotNull`, `asc`, `desc`, `sql`) for predicates, ordering, and aggregates; do not emulate filtering, sorting, or
+  counting in TypeScript after loading an entire table when the database can express it.
 - Never create another SQLite/Drizzle connection, replace persistence with a module-level array or object, or report a
   successful database write after merely constructing an id or return value. The injected client is the sole owner of
   the connection, including when DATABASE_URL is `:memory:` during tests.
 - Seed fixtures are compiler-owned test setup. Never hard-code fixture records or `Seed data:` literals in a DB/FUNC/API
   implementation, and never make a read repository insert, synthesize, or return missing fixture rows. Tests must apply
   requirement.seed_fixtures through the compiler-owned seeding support before exercising application behavior.
-- In an HTTP handler, map only expected requirement-level validation and conflict failures to 4xx responses. Rethrow
-  unexpected database, runtime, and compiler-glue errors so the global error handler and test diagnostics preserve the
-  real root cause; never disguise every exception as invalid user input.
+- In an HTTP handler, map only expected requirement-level validation and conflict failures to 4xx responses by throwing
+  the injected `HttpError` (badRequest/unauthorized/forbidden/notFound/conflict/unprocessable). The compiler owns the
+  surrounding try/catch and the `{"error":{code,message}}` envelope, so never assemble an error body, set a status code,
+  or send a failure response yourself. Let unexpected database, runtime, and compiler-glue errors propagate so the global
+  error handler and test diagnostics preserve the real root cause; never disguise every exception as invalid user input.
+- Use the compiler-owned runtime instead of re-implementing it: `newId()` for identifiers and `now()`/`nowIso()` for the
+  current time in backend modules, `useNavigate()` for frontend navigation, and the Store's `setState`/`useStoreState`/
+  `useStore` for shared state. These symbols are already imported; see project_conventions for the exact contract.
 - Every frontend Page, Layout, or Component edit must be a finished, responsive UI implementation, even when the
   current failure is classified as functional rather than visual. Do not stop at unstyled semantic markup.
 - A generated UI skeleton may contain data-arc-obligation placeholders, but your replacement must remove those
@@ -107,8 +153,9 @@ Implementation rules:
   main-interface transition targets the compiler-owned system route `/`; after a successful action, navigate there.
 - Store reload behavior is defined by design_context.frontend.shared_state_policies[].persistence. Keep transient state in MEMORY and
   implement reload-surviving state through the supplied LOCAL_STORAGE runtime Store and storage_key.
-- For a Store target, replace only its runtime implementation region. Preserve its State, Actions, and Value interfaces
-  and the compiler-owned persistence boundary around that region.
+- For a Store target, replace only its runtime implementation region: return the Actions object built from the supplied
+  `setState`/`getState` helpers. Preserve its State, Actions, and Value interfaces, the createStore call, and the
+  compiler-owned persistence boundary around that region.
 - Translate design_context into an internally coherent visual direction: content hierarchy, page composition,
   responsive containers, spacing rhythm, typography scale, palette, borders, surfaces, states, and one restrained
   signature detail appropriate to the product. Keep the direction consistent across all supplied frontend modules.
@@ -347,22 +394,52 @@ class ImplementationAgent:
         }
         focus_ids = reported_writable_ids & writable_ids
         relevant_writable = set(writable_ids)
-        first_failure_repair = (
-            mode == "TDD"
-            and bool(focus_ids)
-            and all(int(report.get("iteration", -1)) == 0 for report in reports)
-            and all(
-                str(report.get("phase", "")) != "FRONTEND_BOOTSTRAP"
-                for report in reports
-            )
+        failed_layers = {
+            layer
+            for report in reports
+            if (layer := str(report.get("layer", "")).upper())
+            in {"UNIT", "INTEGRATION", "E2E"}
+        }
+        bootstrap_failure = any(
+            str(report.get("phase", "")) == "FRONTEND_BOOTSTRAP" for report in reports
         )
+        # Localized repair is no longer restricted to the first iteration: a later
+        # iteration of the same node still knows which modules the failure cluster
+        # points at, and carrying every requirement-owned module forward is the main
+        # source of context growth across a node.
+        focused_repair = mode == "TDD" and bool(focus_ids) and not bootstrap_failure
         frontend_kinds = {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
-        focus_contains_frontend = any(
-            str(bindings.get(module_id, {}).get("kind", "")) in frontend_kinds
-            for module_id in focus_ids
-        )
-        if first_failure_repair and not focus_contains_frontend:
+
+        def is_frontend(module_id: str) -> bool:
+            return str(bindings.get(module_id, {}).get("kind", "")) in frontend_kinds
+
+        focus_contains_frontend = any(is_frontend(module_id) for module_id in focus_ids)
+        if focused_repair and not focus_contains_frontend:
             relevant_writable = _one_hop_writable(focus_ids, writable_ids, bindings)
+        layer_scope = "ALL_FAILED_LAYERS"
+        if focused_repair and failed_layers:
+            # A failed layer already says which half of the stack is under test:
+            # UNIT/INTEGRATION never execute a React module, and an E2E failure that
+            # localizes on a screen is a rendering or wiring defect, not a repository one.
+            if failed_layers <= {"UNIT", "INTEGRATION"}:
+                candidate = {
+                    module_id
+                    for module_id in relevant_writable
+                    if not is_frontend(module_id)
+                }
+                narrowed_scope = "BACKEND_ONLY_FOR_UNIT_INTEGRATION"
+            elif failed_layers == {"E2E"} and focus_contains_frontend:
+                candidate = {
+                    module_id
+                    for module_id in relevant_writable
+                    if is_frontend(module_id)
+                }
+                narrowed_scope = "FRONTEND_ONLY_FOR_E2E"
+            else:
+                candidate, narrowed_scope = set(), ""
+            if candidate and (not focus_ids or candidate & focus_ids):
+                relevant_writable = candidate
+                layer_scope = narrowed_scope
         if not relevant_writable:
             errors.append(
                 f"ARC4530 IMPLEMENTATION_CONTEXT_INVALID: {requirement_id} has no writable targets."
@@ -440,12 +517,6 @@ class ImplementationAgent:
         ]
         frozen_tests, test_errors = ([], [])
         if mode == "TDD":
-            failed_layers = {
-                str(report.get("layer", "")).upper()
-                for report in reports
-                if str(report.get("layer", "")).upper()
-                in {"UNIT", "INTEGRATION", "E2E"}
-            }
             frozen_tests, test_errors = self._frozen_tests(
                 requirement_id,
                 request.test_manifest,
@@ -459,28 +530,19 @@ class ImplementationAgent:
             request.design_context,
             requirement_id=requirement_id,
             target_ids=relevant_writable | relevant_read_only,
+            full_visual_analysis=bootstrap_failure,
         )
         projected_reports = _project_failure_reports(
             reports,
             target_ids=relevant_writable | relevant_read_only,
         )
-        context = {
+        # Stable segment: everything that stays byte-identical across the iterations
+        # of one node, ordered cheapest-to-largest so the provider prefix cache keeps
+        # as long a common prefix as possible. Source files come last because they are
+        # both the largest section and the one that changes once a patch lands.
+        stable_context = {
             "schema_version": IMPLEMENTATION_AGENT_SCHEMA_VERSION,
             "implementation_mode": mode,
-            "requirement_id": requirement_id,
-            "iteration": request.iteration,
-            "requirement": request.requirement,
-            "requirement_contract": request.requirement_contract,
-            "design_context": projected_design_context,
-            "failure_reports": projected_reports,
-            "frozen_tests": frozen_tests,
-            "allowed_writable_module_ids": sorted(source_hashes),
-            "writable_targets": writable_cards,
-            "writable_source_files": [
-                source_documents[key] for key in sorted(source_documents)
-            ],
-            "read_only_dependencies": read_only_cards,
-            "previous_patch_summary": request.previous_patch_summary,
             "policy": {
                 "one_failure_cluster": True,
                 "tests_are_frozen": mode == "TDD",
@@ -490,25 +552,46 @@ class ImplementationAgent:
                     if relevant_writable != writable_ids
                     else "ALL_REQUIREMENT_OWNED"
                 ),
+                "writable_layer_scope": layer_scope,
                 "design_context_scope": "WRITABLE_TARGET_PLUS_ONE_HOP",
                 "aggregate_mode_uses_design_and_binding_authority": mode == "AGGREGATE",
                 "output_is_region_replacement_only": True,
                 "side_effects_owned_by_orchestrator": True,
             },
-            "project_conventions": {
-                "frontend_styling": "Tailwind CSS v4 via @tailwindcss/vite",
-                "frontend_css_entry": "frontend/src/index.css",
-                "frontend_edits_use_static_utility_classes": True,
-                "reference_images_are_visual_guidance_not_content_fixtures": True,
-            },
+            "project_conventions": _PROJECT_CONVENTIONS,
+            "design_context": projected_design_context,
+            "read_only_dependencies": read_only_cards,
+            "writable_targets": writable_cards,
+            "writable_source_files": [
+                source_documents[key] for key in sorted(source_documents)
+            ],
         }
+        # Dynamic segment: the current task. It is the last user message, so the model
+        # reads it closest to its own turn and no cached prefix is invalidated by it.
+        dynamic_context = {
+            "requirement_id": requirement_id,
+            "iteration": request.iteration,
+            "requirement": request.requirement,
+            "requirement_contract": request.requirement_contract,
+            "failure_reports": projected_reports,
+            "frozen_tests": frozen_tests,
+            "previous_patch_summary": request.previous_patch_summary,
+            "allowed_writable_module_ids": sorted(source_hashes),
+        }
+        context = {
+            CONTEXT_SEGMENTS_KEY: [
+                {"name": "stable_project_context", "payload": stable_context},
+                {"name": "current_task", "payload": dynamic_context},
+            ]
+        }
+        sections = {**stable_context, **dynamic_context}
         context_size = len(
             json.dumps(context, ensure_ascii=False, separators=(",", ":"))
         )
         if context_size > self._max_context_characters:
             section_sizes = {
                 key: len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
-                for key, value in context.items()
+                for key, value in sections.items()
             }
             largest_sections = ", ".join(
                 f"{key}={size}"
@@ -602,7 +685,7 @@ def _validate_decision(
     summary = decision.get("summary")
     edits = decision.get("edits")
     errors: list[str] = []
-    if not isinstance(summary, str) or not summary.strip() or len(summary) > 1000:
+    if not isinstance(summary, str) or not summary.strip():
         errors.append("ARC4534 IMPLEMENTATION_OUTPUT_INVALID: summary is invalid.")
     if not isinstance(edits, list) or not 1 <= len(edits) <= 16:
         return [*errors, "ARC4534 IMPLEMENTATION_OUTPUT_INVALID: edits must contain 1..16 rows."]
@@ -690,6 +773,7 @@ def _project_design_context(
     *,
     requirement_id: str,
     target_ids: set[str],
+    full_visual_analysis: bool = True,
 ) -> dict[str, Any]:
     """Keep only Design evidence reachable from this implementation request."""
 
@@ -707,7 +791,29 @@ def _project_design_context(
         for row in available_screens
         if str(row.get("id", "")) in target_ids
     ]
+    available_components = [
+        row for row in frontend.get("screen_components", []) if isinstance(row, dict)
+    ]
+    owned_components = [
+        row for row in available_components if str(row.get("id", "")) in target_ids
+    ]
+    # A partitioned page owns nothing itself, so the writable component is what
+    # pulls its host screen into scope.
+    for row in owned_components:
+        host_id = str(row.get("screen_id", ""))
+        if host_id and host_id not in {str(item.get("id", "")) for item in screens}:
+            host = next(
+                (item for item in available_screens if str(item.get("id", "")) == host_id),
+                None,
+            )
+            if host is not None:
+                screens.append(_compact_frontend_design_row(host, "screen"))
     primary_screen_ids = {str(row.get("id", "")) for row in screens}
+    screen_components = [
+        _compact_frontend_design_row(row, "component")
+        for row in available_components
+        if str(row.get("screen_id", "")) in primary_screen_ids
+    ]
     route_index = {
         str(row.get("route", "")): row
         for row in available_screens
@@ -751,7 +857,7 @@ def _project_design_context(
         if str(value)
     }
     visual_references = [
-        _compact_frontend_design_row(row, "visual")
+        _compact_visual_reference(row, full_analysis=full_visual_analysis)
         for row in frontend.get("visual_references", [])
         if isinstance(row, dict) and str(row.get("id", "")) in visual_ids
     ]
@@ -796,9 +902,13 @@ def _project_design_context(
             and str(row.get("id", row.get("module_id", ""))) in target_ids
         ],
         "frontend_scope": "IMPLEMENTATION_TARGET_ONE_HOP",
+        "writable_component_ids": sorted(
+            str(row.get("id", "")) for row in owned_components
+        ),
         "active_requirement_link": projected_link,
         "frontend": {
             "screens": screens,
+            "screen_components": screen_components,
             "journeys": journeys,
             "api_usages": api_usages,
             "shared_state_policies": shared_state_policies,
@@ -821,11 +931,38 @@ def _compact_frontend_design_row(row: dict[str, Any], kind: str) -> dict[str, An
     fields = {
         "screen": ("id", "route", "title", "description", "requirement_ids", "required_api_ids", "navigation_targets", "visual_reference_ids"),
         "journey": ("id", "requirement_id", "source_screen_id", "target_screen_id", "steps", "api_id"),
+        "component": ("id", "screen_id", "purpose", "requirement_ids", "inputs", "required_api_ids", "shared_state_ids", "observable_states", "visual_reference_ids"),
         "api_usage": ("screen_id", "consumer_id", "api_id", "purpose", "trigger"),
         "state": ("id", "name", "requirement_ids", "persistence", "storage_key", "state", "actions"),
         "visual": ("id", "uri", "path", "description", "analysis", "style_summary"),
     }[kind]
     return {key: copy.deepcopy(row.get(key)) for key in fields if key in row}
+
+
+def _compact_visual_reference(
+    row: dict[str, Any],
+    *,
+    full_analysis: bool,
+) -> dict[str, Any]:
+    """Stage visual evidence by phase.
+
+    The first frontend bootstrap pass establishes the visual direction and needs
+    the complete analysis. Every later functional repair only needs to keep the
+    established composition recognizable, so the layout and style cue lists are
+    dropped and only the region/control inventory survives.
+    """
+
+    projected = _compact_frontend_design_row(row, "visual")
+    analysis = projected.get("analysis")
+    if full_analysis or not isinstance(analysis, dict):
+        return projected
+    projected["analysis"] = {
+        key: copy.deepcopy(analysis[key])
+        for key in ("reference_id", "regions", "visible_controls")
+        if key in analysis
+    }
+    projected["analysis_scope"] = "REGIONS_AND_CONTROLS_ONLY"
+    return projected
 
 
 def _frontend_api_dependency_ids(

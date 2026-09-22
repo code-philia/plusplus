@@ -95,11 +95,11 @@ def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
     return {"anyOf": [schema, {"type": "null"}]}
 
 
-def _string_list(*, max_items: int = 64, max_length: int = 240) -> dict[str, Any]:
+def _string_list(*, max_items: int = 64) -> dict[str, Any]:
     return {
         "type": "array",
         "maxItems": max_items,
-        "items": {"type": "string", "minLength": 1, "maxLength": max_length},
+        "items": {"type": "string", "minLength": 1},
     }
 
 
@@ -111,10 +111,9 @@ SEMANTIC_FIELD_SCHEMA: dict[str, Any] = {
         "semantic_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 120,
         },
-        "name": {"type": "string", "minLength": 1, "maxLength": 64},
-        "type": {"type": "string", "minLength": 1, "maxLength": 160},
+        "name": {"type": "string", "minLength": 1},
+        "type": {"type": "string", "minLength": 1},
         "required": {"type": "boolean"},
     },
 }
@@ -173,14 +172,14 @@ RENDER_OBLIGATION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["id", "kind", "label", "semantic_id", "required"],
     "properties": {
-        "id": {"type": "string", "minLength": 1, "maxLength": 80},
+        "id": {"type": "string", "minLength": 1},
         "kind": {
             "type": "string",
             "enum": ["ACTION", "FEEDBACK", "FIELD", "NAVIGATION", "REGION", "TEXT"],
         },
-        "label": {"type": "string", "minLength": 1, "maxLength": 200},
+        "label": {"type": "string", "minLength": 1},
         "semantic_id": _nullable(
-            {"type": "string", "minLength": 1, "maxLength": 120}
+            {"type": "string", "minLength": 1}
         ),
         "required": {"type": "boolean"},
     },
@@ -191,8 +190,8 @@ EVENT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["name", "payload_type", "async"],
     "properties": {
-        "name": {"type": "string", "minLength": 1, "maxLength": 64},
-        "payload_type": _nullable({"type": "string", "minLength": 1, "maxLength": 120}),
+        "name": {"type": "string", "minLength": 1},
+        "payload_type": _nullable({"type": "string", "minLength": 1}),
         "async": {"type": "boolean"},
     },
 }
@@ -202,10 +201,10 @@ NAVIGATION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["trigger", "target", "target_route", "condition"],
     "properties": {
-        "trigger": {"type": "string", "minLength": 1, "maxLength": 120},
-        "target": {"type": "string", "minLength": 1, "maxLength": 200},
-        "target_route": {"type": "string", "pattern": r"^/", "maxLength": 240},
-        "condition": _nullable({"type": "string", "minLength": 1, "maxLength": 300}),
+        "trigger": {"type": "string", "minLength": 1},
+        "target": {"type": "string", "minLength": 1},
+        "target_route": {"type": "string", "pattern": r"^/"},
+        "condition": _nullable({"type": "string", "minLength": 1}),
     },
 }
 
@@ -216,7 +215,7 @@ STORE_PERSISTENCE_SCHEMA: dict[str, Any] = {
     "properties": {
         "kind": {"type": "string", "enum": ["MEMORY", "LOCAL_STORAGE"]},
         "storage_key": _nullable(
-            {"type": "string", "minLength": 1, "maxLength": 120}
+            {"type": "string", "minLength": 1}
         ),
     },
 }
@@ -234,7 +233,7 @@ LAYOUT_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "id": {"type": "string", "pattern": r"^LAYOUT\.[A-Za-z][A-Za-z0-9]*$"},
-        "spec": {"type": "string", "minLength": 1, "maxLength": 800},
+        "spec": {"type": "string", "minLength": 1},
         "requirement_ids": _string_list(),
         "component_ids": _string_list(),
         "render_obligations": {"type": "array", "items": RENDER_OBLIGATION_SCHEMA},
@@ -261,8 +260,8 @@ PAGE_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "id": {"type": "string", "pattern": r"^PAGE\.[A-Za-z][A-Za-z0-9]*$"},
-        "spec": {"type": "string", "minLength": 1, "maxLength": 800},
-        "route": {"type": "string", "pattern": r"^/", "maxLength": 240},
+        "spec": {"type": "string", "minLength": 1},
+        "route": {"type": "string", "pattern": r"^/"},
         "route_inputs": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
         "requirement_ids": _string_list(),
         "layout_id": _nullable(
@@ -293,7 +292,7 @@ COMPONENT_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "id": {"type": "string", "pattern": r"^COMPONENT\.[A-Za-z][A-Za-z0-9]*$"},
-        "spec": {"type": "string", "minLength": 1, "maxLength": 800},
+        "spec": {"type": "string", "minLength": 1},
         "scope": {"type": "string", "enum": ["LAYOUT", "PAGE", "SHARED"]},
         "owner_page_id": _nullable({"type": "string", "pattern": r"^PAGE\."}),
         "owner_layout_id": _nullable({"type": "string", "pattern": r"^LAYOUT\."}),
@@ -301,6 +300,17 @@ COMPONENT_SCHEMA: dict[str, Any] = {
         "events": {"type": "array", "items": EVENT_SCHEMA},
         "render_obligations": {"type": "array", "items": RENDER_OBLIGATION_SCHEMA},
         "visual_reference_ids": _string_list(),
+        # Optional: a component produced by the screen partition is a writable
+        # unit in its own right, so it carries the ownership and dependency
+        # surface a page carries. Components produced by the older page-first
+        # design omit these keys.
+        "requirement_ids": _string_list(),
+        "layout_id": _nullable(
+            {"type": "string", "pattern": r"^LAYOUT\.[A-Za-z][A-Za-z0-9]*$"}
+        ),
+        "component_ids": _string_list(),
+        "api_dependencies": _string_list(),
+        "store_dependencies": _string_list(),
     },
 }
 
@@ -309,8 +319,8 @@ STORE_ACTION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["name", "input_type"],
     "properties": {
-        "name": {"type": "string", "minLength": 1, "maxLength": 64},
-        "input_type": _nullable({"type": "string", "minLength": 1, "maxLength": 120}),
+        "name": {"type": "string", "minLength": 1},
+        "input_type": _nullable({"type": "string", "minLength": 1}),
     },
 }
 
@@ -320,7 +330,7 @@ STORE_SCHEMA: dict[str, Any] = {
     "required": ["id", "spec", "state", "actions", "persistence", "requirement_ids"],
     "properties": {
         "id": {"type": "string", "pattern": r"^STORE\.[A-Za-z][A-Za-z0-9]*$"},
-        "spec": {"type": "string", "minLength": 1, "maxLength": 800},
+        "spec": {"type": "string", "minLength": 1},
         "state": {"type": "array", "items": SEMANTIC_FIELD_SCHEMA},
         "actions": {"type": "array", "items": STORE_ACTION_SCHEMA},
         "persistence": STORE_PERSISTENCE_SCHEMA,
@@ -401,7 +411,8 @@ def repair_schema_shape(value: Any, schema: dict[str, Any]) -> Any:
 
     This intentionally does not invent required semantic values or repair references.
     Individual Frontend Design passes own those decisions. It only removes unknown
-    object properties, clamps arrays, and truncates strings to frozen IR limits.
+    object properties and clamps arrays. Text is never truncated: a verbose spec
+    is still a correct spec, and half a sentence frozen into the IR is not.
     """
 
     if "anyOf" in schema:
@@ -428,9 +439,6 @@ def repair_schema_shape(value: Any, schema: dict[str, Any]) -> Any:
         if not isinstance(item_schema, dict):
             return copy.deepcopy(items)
         return [repair_schema_shape(item, item_schema) for item in items]
-    if expected_type == "string" and isinstance(value, str):
-        maximum = schema.get("maxLength")
-        return value[:maximum] if isinstance(maximum, int) else value
     return copy.deepcopy(value)
 
 
@@ -495,12 +503,9 @@ def schema_shape_errors(value: Any, schema: dict[str, Any], path: str = "$") -> 
                 errors.extend(schema_shape_errors(item, item_schema, f"{path}[{index}]"))
     elif isinstance(value, str):
         minimum = schema.get("minLength")
-        maximum = schema.get("maxLength")
         pattern = schema.get("pattern")
         if isinstance(minimum, int) and len(value) < minimum:
             errors.append(f"{path} must contain at least {minimum} characters")
-        if isinstance(maximum, int) and len(value) > maximum:
-            errors.append(f"{path} must contain at most {maximum} characters")
         if isinstance(pattern, str):
             import re
 

@@ -105,6 +105,10 @@ class ThinFrontendDesignPass:
             candidate = {
                 "schema_version": FRONTEND_IR_SCHEMA_VERSION,
                 "visual_references": copy.deepcopy(visual_references),
+                # The partition pass owns this table and runs after the thin
+                # design is valid; the key exists from the start so every
+                # reader and writer sees the same table set.
+                "screen_components": [],
                 **decision,
             }
             issues = validate_thin_frontend_design(candidate, expected_requirement_ids=requirement_ids, backend_api_ids=api_ids)
@@ -198,37 +202,150 @@ def validate_thin_frontend_design(frontend_ir: dict[str, Any], *, expected_requi
         issues.extend(_unknown(rid, "visual", link["visual_reference_ids"], visuals, FrontendDesignErrorCode.REFERENCE_UNKNOWN))
         if link["ui_scope"] == "UI_REQUIRED" and not link["screen_ids"]:
             issues.append(_issue(FrontendDesignErrorCode.REQUIREMENT_UNCOVERED, f"UI_REQUIRED requirement {rid} has no screen."))
+    issues.extend(validate_screen_components(frontend_ir))
+    return issues
+
+
+def validate_screen_components(frontend_ir: dict[str, Any]) -> list[FrontendDesignIssue]:
+    """Check the screen -> component partition that owns every writable UI unit.
+
+    The table is optional: a thin design is valid before partitioning. Once any
+    component exists the partition must be total - every screen requirement,
+    API, and observable state belongs to exactly one component of that screen.
+    """
+
+    components = [row for row in frontend_ir.get("screen_components", []) if isinstance(row, dict)]
+    if not components:
+        return []
+    screens = {str(row["id"]): row for row in frontend_ir.get("screens", []) if isinstance(row, dict)}
+    stores = {str(row["id"]) for row in frontend_ir.get("shared_state_policies", []) if isinstance(row, dict)}
+    issues: list[FrontendDesignIssue] = []
+    component_ids = [str(row.get("id", "")) for row in components]
+    if len(component_ids) != len(set(component_ids)):
+        issues.append(_issue(FrontendDesignErrorCode.SYMBOL_DUPLICATE, "screen_components contains duplicate ids."))
+    by_screen: dict[str, list[dict[str, Any]]] = {}
+    for component in components:
+        component_id = str(component.get("id", ""))
+        screen_id = str(component.get("screen_id", ""))
+        screen = screens.get(screen_id)
+        if screen is None:
+            issues.append(_issue(FrontendDesignErrorCode.REFERENCE_UNKNOWN, f"Component {component_id} references unknown screen {screen_id}."))
+            continue
+        by_screen.setdefault(screen_id, []).append(component)
+        requirement_ids = [str(value) for value in component.get("requirement_ids", [])]
+        if not requirement_ids:
+            issues.append(_issue(FrontendDesignErrorCode.COMPONENT_DECISION_INVALID, f"Component {component_id} owns no requirement."))
+        outside = sorted(set(requirement_ids) - {str(value) for value in screen["requirement_ids"]})
+        if outside:
+            issues.append(_issue(FrontendDesignErrorCode.COMPONENT_DECISION_INVALID, f"Component {component_id} owns requirements that {screen_id} does not serve: {outside}."))
+        route_inputs = {str(row.get("semantic_id", "")) for row in screen["route_inputs"] if isinstance(row, dict)}
+        issues.extend(_unknown(component_id, "route input", [str(row.get("semantic_id", "")) for row in component.get("inputs", []) if isinstance(row, dict)], route_inputs, FrontendDesignErrorCode.REFERENCE_UNKNOWN))
+        issues.extend(_unknown(component_id, "API", component.get("required_api_ids", []), {str(value) for value in screen["required_api_ids"]}, FrontendDesignErrorCode.API_DEPENDENCY_INVALID))
+        issues.extend(_unknown(component_id, "shared state", component.get("shared_state_ids", []), stores, FrontendDesignErrorCode.REFERENCE_UNKNOWN))
+        issues.extend(_unknown(component_id, "visual", component.get("visual_reference_ids", []), {str(value) for value in screen["visual_reference_ids"]}, FrontendDesignErrorCode.REFERENCE_UNKNOWN))
+        issues.extend(_unknown(component_id, "observable state", component.get("observable_states", []), {str(value) for value in screen["observable_states"]}, FrontendDesignErrorCode.COMPONENT_DECISION_INVALID))
+    for screen_id, screen in sorted(screens.items()):
+        rows = by_screen.get(screen_id, [])
+        if not rows:
+            if screen["requirement_ids"]:
+                issues.append(_issue(FrontendDesignErrorCode.REQUIREMENT_UNCOVERED, f"Screen {screen_id} has no component; every screen is partitioned into components."))
+            continue
+        issues.extend(_partition_issues(screen_id, "requirement", [str(value) for value in screen["requirement_ids"]], rows, "requirement_ids"))
+        issues.extend(_partition_issues(screen_id, "API", [str(value) for value in screen["required_api_ids"]], rows, "required_api_ids"))
+        issues.extend(_partition_issues(screen_id, "observable state", [str(value) for value in screen["observable_states"]], rows, "observable_states"))
+    return issues
+
+
+def _partition_issues(screen_id: str, label: str, expected: list[str], components: list[dict[str, Any]], key: str) -> list[FrontendDesignIssue]:
+    """Require every screen-level value to be owned by exactly one component."""
+
+    allocated: list[str] = [str(value) for row in components for value in row.get(key, [])]
+    missing = sorted(set(expected) - set(allocated))
+    duplicated = sorted({value for value in allocated if allocated.count(value) > 1})
+    issues: list[FrontendDesignIssue] = []
+    if missing:
+        issues.append(_issue(FrontendDesignErrorCode.REQUIREMENT_UNCOVERED, f"Screen {screen_id} leaves {label} values unassigned to a component: {missing}."))
+    if duplicated:
+        issues.append(_issue(FrontendDesignErrorCode.COMPONENT_DECISION_INVALID, f"Screen {screen_id} assigns {label} values to more than one component: {duplicated}."))
     return issues
 
 
 def project_frontend_runtime_ir(frontend_ir: dict[str, Any]) -> dict[str, Any]:
-    """Adapt thin design facts to existing runtime seams without persisting component design."""
+    """Adapt thin design facts to existing runtime seams without persisting component design.
+
+    A screen that was partitioned into components keeps nothing writable of its
+    own: the components own the requirements, the APIs, the shared state, and
+    the observable states, and the page is left as pure composition.
+    """
     state_ids = [str(row["id"]) for row in frontend_ir.get("shared_state_policies", [])]
+    components_by_screen: dict[str, list[dict[str, Any]]] = {}
+    for row in frontend_ir.get("screen_components", []):
+        if isinstance(row, dict):
+            components_by_screen.setdefault(str(row.get("screen_id", "")), []).append(row)
+    component_owner: dict[str, str] = {}
+    components: list[dict[str, Any]] = []
     pages = []
     for screen in frontend_ir.get("screens", []):
+        owned = sorted(components_by_screen.get(str(screen["id"]), []), key=lambda row: str(row["id"]))
+        for component in owned:
+            for api_id in component.get("required_api_ids", []):
+                component_owner[f"{screen['id']}::{api_id}"] = str(component["id"])
+            components.append({
+                "id": component["id"], "spec": component["purpose"], "inputs": copy.deepcopy(component["inputs"]),
+                "scope": "PAGE", "owner_page_id": str(screen["id"]), "owner_layout_id": None,
+                "events": [], "requirement_ids": copy.deepcopy(component["requirement_ids"]), "layout_id": None,
+                "component_ids": [], "api_dependencies": copy.deepcopy(component["required_api_ids"]),
+                "store_dependencies": copy.deepcopy(component["shared_state_ids"]),
+                "render_obligations": _render_obligations(component["observable_states"]),
+                "visual_reference_ids": copy.deepcopy(component["visual_reference_ids"]),
+            })
         pages.append({
             "id": screen["id"], "spec": screen["purpose"], "route": screen["route"], "route_inputs": copy.deepcopy(screen["route_inputs"]),
-            "requirement_ids": copy.deepcopy(screen["requirement_ids"]), "layout_id": None, "component_ids": [],
-            "api_dependencies": copy.deepcopy(screen["required_api_ids"]),
-            "store_dependencies": [sid for sid in state_ids if _state_used(frontend_ir, sid, screen["requirement_ids"])],
-            "render_obligations": [{"id": f"state_{index}", "kind": "REGION", "label": value, "semantic_id": None, "required": True} for index, value in enumerate(screen["observable_states"][:12], 1)],
+            "requirement_ids": [] if owned else copy.deepcopy(screen["requirement_ids"]),
+            "layout_id": None, "component_ids": [str(row["id"]) for row in owned],
+            "api_dependencies": [] if owned else copy.deepcopy(screen["required_api_ids"]),
+            "store_dependencies": [] if owned else [sid for sid in state_ids if _state_used(frontend_ir, sid, screen["requirement_ids"])],
+            "render_obligations": [] if owned else _render_obligations(screen["observable_states"]),
             "navigation": [{"trigger": row["trigger"], "target": row["target_route"], "target_route": row["target_route"], "condition": row["condition"]} for row in screen["navigation_targets"]],
             "visual_reference_ids": copy.deepcopy(screen["visual_reference_ids"]),
         })
     stores = [{"id": row["id"], "spec": row["purpose"], "state": copy.deepcopy(row["state"]), "actions": copy.deepcopy(row["actions"]), "persistence": copy.deepcopy(row["persistence"]), "requirement_ids": copy.deepcopy(row["requirement_ids"])} for row in frontend_ir.get("shared_state_policies", [])]
-    dependencies = [{"consumer_id": row["screen_id"], "api_id": row["api_id"], "bindings": copy.deepcopy(row["request_bindings"] + row["response_bindings"])} for row in frontend_ir.get("api_usages", [])]
-    links = [{"requirement_id": row["requirement_id"], "ui_scope": row["ui_scope"], "symbol_ids": sorted(set(row["screen_ids"] + row["shared_state_ids"])), "visual_reference_ids": copy.deepcopy(row["visual_reference_ids"])} for row in frontend_ir.get("requirement_links", [])]
-    return {"schema_version": 2, "visual_references": copy.deepcopy(frontend_ir.get("visual_references", [])), "layouts": [], "pages": pages, "components": [], "stores": stores, "api_dependencies": dependencies, "requirement_links": links}
+    dependencies = [{"consumer_id": component_owner.get(f"{row['screen_id']}::{row['api_id']}", row["screen_id"]), "api_id": row["api_id"], "bindings": copy.deepcopy(row["request_bindings"] + row["response_bindings"])} for row in frontend_ir.get("api_usages", [])]
+    owned_components = _components_by_requirement(frontend_ir)
+    links = [{
+        "requirement_id": row["requirement_id"], "ui_scope": row["ui_scope"],
+        "symbol_ids": sorted(set(owned_components.get(str(row["requirement_id"]), []) or row["screen_ids"]) | set(row["shared_state_ids"])),
+        "visual_reference_ids": copy.deepcopy(row["visual_reference_ids"]),
+    } for row in frontend_ir.get("requirement_links", [])]
+    return {"schema_version": 2, "visual_references": copy.deepcopy(frontend_ir.get("visual_references", [])), "layouts": [], "pages": pages, "components": components, "stores": stores, "api_dependencies": dependencies, "requirement_links": links}
+
+
+def _render_obligations(observable_states: list[Any]) -> list[dict[str, Any]]:
+    return [{"id": f"state_{index}", "kind": "REGION", "label": str(value), "semantic_id": None, "required": True} for index, value in enumerate(list(observable_states)[:12], 1)]
+
+
+def _components_by_requirement(frontend_ir: dict[str, Any]) -> dict[str, list[str]]:
+    """Map each requirement to the components that own it, if any exist."""
+
+    owners: dict[str, list[str]] = {}
+    for row in frontend_ir.get("screen_components", []):
+        if not isinstance(row, dict):
+            continue
+        for requirement_id in row.get("requirement_ids", []):
+            owners.setdefault(str(requirement_id), []).append(str(row.get("id", "")))
+    return {key: sorted(set(value)) for key, value in owners.items()}
 
 
 def frontend_design_traceability(frontend_ir: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    return {str(row["requirement_id"]): {"ui_scope": row["ui_scope"], "layout_ids": [], "component_ids": [], "page_ids": copy.deepcopy(row["screen_ids"]), "store_ids": copy.deepcopy(row["shared_state_ids"]), "visual_reference_ids": copy.deepcopy(row["visual_reference_ids"])} for row in frontend_ir.get("requirement_links", [])}
+    owned_components = _components_by_requirement(frontend_ir)
+    return {str(row["requirement_id"]): {"ui_scope": row["ui_scope"], "layout_ids": [], "component_ids": owned_components.get(str(row["requirement_id"]), []), "page_ids": copy.deepcopy(row["screen_ids"]), "store_ids": copy.deepcopy(row["shared_state_ids"]), "visual_reference_ids": copy.deepcopy(row["visual_reference_ids"])} for row in frontend_ir.get("requirement_links", [])}
 
 
 def _canonicalize(value: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(value)
-    for table in ("screens", "journeys", "shared_state_policies"):
-        result[table] = sorted(result[table], key=lambda row: str(row["id"]))
+    for table in ("screens", "journeys", "shared_state_policies", "screen_components"):
+        if table in result:
+            result[table] = sorted(result[table], key=lambda row: str(row["id"]))
     result["api_usages"] = sorted(result["api_usages"], key=lambda row: (row["screen_id"], row["api_id"]))
     result["requirement_links"] = sorted(result["requirement_links"], key=lambda row: row["requirement_id"])
     return result

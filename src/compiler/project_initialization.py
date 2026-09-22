@@ -511,7 +511,7 @@ class ProjectInitializer:
         frontend_src = self.staged_project / "frontend" / "src"
         for relative in ("assets", "App.css"):
             self._remove_exact(frontend_src / relative)
-        for directory in ("api", "app", "components", "pages"):
+        for directory in ("api", "app", "components", "pages", "runtime"):
             (frontend_src / directory).mkdir(parents=True, exist_ok=True)
         (frontend_src / "app" / "stores").mkdir(parents=True, exist_ok=True)
         self._write_text(
@@ -802,6 +802,7 @@ class ProjectInitializer:
                     "frontend/src/api",
                     "frontend/src/components",
                     "frontend/src/pages",
+                    "frontend/src/runtime",
                 ],
                 "tests": [
                     "tests/unit",

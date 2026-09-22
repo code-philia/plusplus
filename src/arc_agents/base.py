@@ -7,6 +7,16 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 
+CONTEXT_SEGMENTS_KEY = "context_segments"
+"""Payload key holding ordered ``{"name", "payload"}`` context segments.
+
+A segmented payload is rendered as one user message per segment so a stable
+prefix can be reused by the provider cache across iterations. The constant is
+declared here rather than imported so bounded agents keep no dependency on a
+concrete model client.
+"""
+
+
 class JsonModel(Protocol):
     """Minimal model interface required by a bounded structured agent."""
 
@@ -68,9 +78,9 @@ class BaseStructuredAgent:
             payload = copy.deepcopy(input_payload)
             if feedback:
                 payload["agent_validation_feedback"] = feedback
-            requirement_id = str(payload.get("requirement_id", ""))
-            mode = str(payload.get("implementation_mode", ""))
-            iteration = str(payload.get("iteration", ""))
+            requirement_id = _payload_value(payload, "requirement_id")
+            mode = _payload_value(payload, "implementation_mode")
+            iteration = _payload_value(payload, "iteration")
             self._emit(
                 f"MODEL_REQUEST requirement={requirement_id} mode={mode} "
                 f"iteration={iteration} attempt={attempt}/{self._retries + 1}"
@@ -125,6 +135,43 @@ class BaseStructuredAgent:
             self._trace(message)
 
 
+def _payload_value(payload: dict[str, Any], key: str) -> str:
+    """Read one routing field from a flat or segmented context payload."""
+
+    if key in payload:
+        return str(payload[key])
+    for segment in payload.get(CONTEXT_SEGMENTS_KEY, []):
+        if not isinstance(segment, dict):
+            continue
+        body = segment.get("payload")
+        if isinstance(body, dict) and key in body:
+            return str(body[key])
+    return ""
+
+
+def _payload_sections(payload: dict[str, Any]) -> list[tuple[str, Any]]:
+    """Flatten a flat or segmented payload into audit-visible sections."""
+
+    sections: list[tuple[str, Any]] = []
+    for key, value in payload.items():
+        if key != CONTEXT_SEGMENTS_KEY:
+            sections.append((str(key), value))
+            continue
+        for index, segment in enumerate(value if isinstance(value, list) else []):
+            if not isinstance(segment, dict):
+                continue
+            name = str(segment.get("name", f"segment_{index}"))
+            body = segment.get("payload")
+            if not isinstance(body, dict):
+                sections.append((name, body))
+                continue
+            sections.extend(
+                (f"{name}.{str(inner_key)}", inner_value)
+                for inner_key, inner_value in body.items()
+            )
+    return sections
+
+
 def _describe_error(error: BaseException) -> str:
     parts: list[str] = []
     seen: set[int] = set()
@@ -160,7 +207,7 @@ def _context_audit(
         return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
 
     section_sizes = sorted(
-        ((str(key), size(value)) for key, value in input_payload.items()),
+        ((key, size(value)) for key, value in _payload_sections(input_payload)),
         key=lambda item: item[1],
         reverse=True,
     )

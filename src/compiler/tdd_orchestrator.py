@@ -175,6 +175,7 @@ class NodeTDDOrchestrator:
         self.node_states: dict[str, str] = {}
         self._state_history: dict[str, list[str]] = {}
         self._accepted_results: dict[str, NodeTDDResult] = {}
+        self._node_snapshots: dict[str, dict[str, str]] = {}
         self._tdd_root = self.output_root / ".arc" / "tdd"
         if resume and self.test_manifest is not None:
             self._restore_accepted_checkpoints()
@@ -220,6 +221,12 @@ class NodeTDDOrchestrator:
             self.test_manifest = generation.manifest
             self._transition(requirement_id, "TESTS_GENERATED")
             self._transition(requirement_id, "TESTS_FROZEN")
+            # Everything written from here on is provisional. A node that does not
+            # reach acceptance gives its files back exactly as the skeleton left them,
+            # so a later node never inherits a partially implemented region.
+            self._node_snapshots[requirement_id] = self.write_guard.snapshot(
+                self._writable_files(requirement_id)
+            )
 
             changed_files: set[str] = set()
             previous_patch_summary: dict[str, Any] | None = None
@@ -431,6 +438,12 @@ class NodeTDDOrchestrator:
             if not writable_targets:
                 self._transition(requirement_id, "NO_IMPLEMENTATION_REQUIRED")
                 return self._finish(result, "NODE_ACCEPTED", [])
+
+            # Same isolation contract as an atomic node: a rejected aggregate patch
+            # leaves nothing behind for the next requirement to inherit.
+            self._node_snapshots[requirement_id] = self.write_guard.snapshot(
+                self._writable_files(requirement_id)
+            )
 
             target_ids = sorted(str(row["module_id"]) for row in writable_targets)
             fingerprint = hashlib.sha256(
@@ -940,6 +953,11 @@ class NodeTDDOrchestrator:
             for row in self.frontend_ir.get("visual_references", [])
             if isinstance(row, dict) and str(row.get("id", "")) in visual_ids
         ]
+        screen_components = [
+            copy.deepcopy(row)
+            for row in self.frontend_ir.get("screen_components", [])
+            if isinstance(row, dict) and str(row.get("screen_id", "")) in screen_ids
+        ]
         backend_modules = [
             copy.deepcopy(row)
             for row in self.design_ir.get("modules", [])
@@ -956,6 +974,11 @@ class NodeTDDOrchestrator:
             "backend_modules": backend_modules,
             "frontend_scope": "REQUIREMENT_SCREEN_ONE_HOP",
             "primary_screen_ids": sorted(primary_screen_ids),
+            "owned_component_ids": sorted(
+                str(row.get("id", ""))
+                for row in screen_components
+                if requirement_id in {str(value) for value in row.get("requirement_ids", [])}
+            ),
             "active_requirement_link": {
                 **frontend_link,
                 "screen_ids": [
@@ -969,6 +992,7 @@ class NodeTDDOrchestrator:
             },
             "frontend": {
                 "screens": screens,
+                "screen_components": screen_components,
                 "journeys": journeys,
                 "api_usages": api_usages,
                 "shared_state_policies": shared_state_policies,
@@ -1050,8 +1074,73 @@ class NodeTDDOrchestrator:
         write_json_atomic(result_path, result.to_dict())
         result.artifacts["result"] = str(result_path)
         if status == "NODE_ACCEPTED":
+            self._node_snapshots.pop(result.requirement_id, None)
             self._accepted_results[result.requirement_id] = copy.deepcopy(result)
+            return result
+        self._roll_back_node(result)
         return result
+
+    def _roll_back_node(self, result: NodeTDDResult) -> None:
+        """Undo a rejected node's edits so the next node starts from the skeleton."""
+
+        snapshot = self._node_snapshots.pop(result.requirement_id, None)
+        if not snapshot:
+            return
+        restored, errors = self.write_guard.restore(snapshot)
+        if restored:
+            result.changed_files = []
+            self._log.info(
+                f"ARC4552 NODE_ROLLED_BACK requirement={result.requirement_id} "
+                f"status={result.status} restored_files={len(restored)}"
+            )
+            result.errors = list(
+                dict.fromkeys(
+                    [
+                        *result.errors,
+                        "ARC4552 NODE_ROLLED_BACK: reverted "
+                        f"{len(restored)} file(s) to the frozen skeleton after "
+                        f"{result.status}.",
+                    ]
+                )
+            )
+        if errors:
+            self._log.info(
+                f"ARC4552 NODE_ROLLBACK_INCOMPLETE requirement={result.requirement_id} "
+                f"failures={errors}"
+            )
+            result.errors = list(
+                dict.fromkeys(
+                    [
+                        *result.errors,
+                        f"ARC4552 NODE_ROLLED_BACK: incomplete rollback {errors}.",
+                    ]
+                )
+            )
+
+    def _writable_files(self, requirement_id: str) -> list[str]:
+        """List every source file this requirement is allowed to edit."""
+
+        targets = next(
+            (
+                row
+                for row in self.code_binding_registry.get("requirement_targets", [])
+                if isinstance(row, dict)
+                and str(row.get("requirement_id", "")) == requirement_id
+            ),
+            None,
+        )
+        if targets is None:
+            return []
+        writable_ids = {str(value) for value in targets.get("writable", []) if str(value)}
+        return sorted(
+            {
+                str(row.get("file", ""))
+                for row in self.code_binding_registry.get("code_bindings", [])
+                if isinstance(row, dict)
+                and str(row.get("module_id", "")) in writable_ids
+                and str(row.get("file", ""))
+            }
+        )
 
     def _node_root(self, requirement_id: str) -> Path:
         safe = re.sub(r"[^a-z0-9]+", "-", requirement_id.lower()).strip("-")
@@ -1077,7 +1166,16 @@ def _blocked_state(reports: list[TestFailureReport]) -> str | None:
         return "BLOCKED_TEST_MATERIALIZATION"
     if "TEST_OR_CONTRACT_INCONSISTENT" in classes:
         return "BLOCKED_CONTRACT"
-    if not classes or not classes.issubset(set(ACTIONABLE_FAILURE_CLASSES)):
+    # Every remaining failure ran through a module another requirement still owes.
+    # Blocking here keeps the node schedulable again later instead of spending its
+    # iteration budget compensating for code that does not exist yet.
+    if classes == {"DEFERRED_DEPENDENCY"}:
+        return "BLOCKED_DEPENDENCY"
+    # A deferred dependency alongside a real defect is not itself blocking: the
+    # actionable cluster is still worth one patch, and the stub hit is only noise.
+    if not classes or not (classes - {"DEFERRED_DEPENDENCY"}).issubset(
+        set(ACTIONABLE_FAILURE_CLASSES)
+    ):
         return "BLOCKED_CONTRACT"
     return None
 

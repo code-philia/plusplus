@@ -33,6 +33,7 @@ _SYSTEM_FILES = (
     ("frontend/src/app/index.ts", "APP_BARREL"),
     ("frontend/src/app/stores/index.ts", "STORE_BARREL"),
     ("frontend/src/api/http.ts", "HTTP_RUNTIME"),
+    ("frontend/src/runtime/store.ts", "STORE_RUNTIME"),
     ("frontend/src/api/index.ts", "API_BARREL"),
     ("frontend/src/components/index.ts", "COMPONENT_BARREL"),
     ("frontend/src/pages/index.ts", "PAGE_BARREL"),
@@ -137,6 +138,7 @@ class FrontendGlobalSymbolPlanner:
             "frontend/src/api",
             "frontend/src/components",
             "frontend/src/pages",
+            "frontend/src/runtime",
         }
         if not isinstance(allowed, list) or not required <= {str(value) for value in allowed}:
             self._errors.append(
@@ -625,6 +627,7 @@ class FrontendSkeletonLowerer:
                 exports_by_path,
             )
             self._lower_http_runtime(sources, imports_by_path, exports_by_path)
+            self._lower_store_runtime(sources, imports_by_path, exports_by_path)
             self._lower_api_clients(
                 api_locations,
                 api_contract_index,
@@ -781,14 +784,45 @@ class FrontendSkeletonLowerer:
         exports: dict[str, list[str]],
     ) -> None:
         path = "frontend/src/api/http.ts"
+        rows = [_import("ApiErrorBody", "@arc/shared", type_only=True)]
         sources[path] = (
-            "export class ApiClientError extends Error {\n"
-            "  readonly status: number;\n\n"
-            "  constructor(status: number, message: string) {\n"
+            "\n".join(_render_imports(rows))
+            + "\n\n"
+            + "export class ApiClientError extends Error {\n"
+            "  readonly status: number;\n"
+            "  readonly code: string;\n"
+            "  readonly details: unknown;\n\n"
+            "  constructor(status: number, code: string, message: string, details?: unknown) {\n"
             "    super(message);\n"
             "    this.status = status;\n"
+            "    this.code = code;\n"
+            "    this.details = details;\n"
             "    this.name = \"ApiClientError\";\n"
             "  }\n"
+            "}\n\n"
+            "function isApiErrorBody(value: unknown): value is ApiErrorBody {\n"
+            '  if (typeof value !== "object" || value === null) return false;\n'
+            "  const error = (value as { error?: unknown }).error;\n"
+            '  if (typeof error !== "object" || error === null) return false;\n'
+            "  const detail = error as { code?: unknown; message?: unknown };\n"
+            '  return typeof detail.code === "string" && typeof detail.message === "string";\n'
+            "}\n\n"
+            "/** Turn any failed response into one ApiClientError carrying the server code. */\n"
+            "function toClientError(status: number, body: string): ApiClientError {\n"
+            "  try {\n"
+            "    const parsed: unknown = body ? JSON.parse(body) : null;\n"
+            "    if (isApiErrorBody(parsed)) {\n"
+            "      return new ApiClientError(\n"
+            "        status,\n"
+            "        parsed.error.code,\n"
+            "        parsed.error.message,\n"
+            "        parsed.error.details,\n"
+            "      );\n"
+            "    }\n"
+            "  } catch {\n"
+            "    // Not JSON: fall through to the raw body below.\n"
+            "  }\n"
+            '  return new ApiClientError(status, "HTTP_ERROR", body || `Request failed with ${status}`);\n'
             "}\n\n"
             "export function toQueryString(value: unknown): string {\n"
             "  const params = new URLSearchParams();\n"
@@ -800,14 +834,122 @@ class FrontendSkeletonLowerer:
             "}\n\n"
             "export async function requestJson<T>(path: string, init: RequestInit): Promise<T> {\n"
             "  const response = await fetch(path, init);\n"
-            "  if (!response.ok) throw new ApiClientError(response.status, await response.text());\n"
+            "  if (!response.ok) throw toClientError(response.status, await response.text());\n"
             "  const text = await response.text();\n"
             "  if (!text) return undefined as T;\n"
             "  return JSON.parse(text) as T;\n"
             "}\n"
         )
-        imports[path] = []
+        imports[path] = rows
         exports[path] = ["ApiClientError", "requestJson", "toQueryString"]
+
+    @staticmethod
+    def _lower_store_runtime(
+        sources: dict[str, str],
+        imports: dict[str, list[dict[str, Any]]],
+        exports: dict[str, list[str]],
+    ) -> None:
+        """Own reactivity in the compiler so stores are not hand-rolled per app.
+
+        Every generated store is created through ``createStore`` and read through
+        ``useStore``/``useStoreState``; the implementation region only has to
+        describe how actions change state.
+        """
+
+        path = "frontend/src/runtime/store.ts"
+        rows = [
+            _import("useCallback", "react"),
+            _import("useSyncExternalStore", "react"),
+        ]
+        sources[path] = (
+            "\n".join(_render_imports(rows))
+            + "\n\n"
+            + "export type StoreUpdate<TState> = TState | ((current: TState) => TState);\n\n"
+            "export interface Store<TState, TActions> {\n"
+            "  readonly actions: TActions;\n"
+            "  getState(): TState;\n"
+            "  setState(update: StoreUpdate<TState>): void;\n"
+            "  subscribe(listener: () => void): () => void;\n"
+            "}\n\n"
+            "export interface StoreHelpers<TState> {\n"
+            "  getState(): TState;\n"
+            "  setState(update: StoreUpdate<TState>): void;\n"
+            "}\n\n"
+            "/** Build one observable store. Listeners run whenever state identity changes. */\n"
+            "export function createStore<TState, TActions>(\n"
+            "  initialState: TState,\n"
+            "  createActions: (helpers: StoreHelpers<TState>) => TActions,\n"
+            "): Store<TState, TActions> {\n"
+            "  let currentState = initialState;\n"
+            "  const listeners = new Set<() => void>();\n"
+            "  const getState = (): TState => currentState;\n"
+            "  const setState = (update: StoreUpdate<TState>): void => {\n"
+            "    const next =\n"
+            '      typeof update === "function"\n'
+            "        ? (update as (current: TState) => TState)(currentState)\n"
+            "        : update;\n"
+            "    if (Object.is(next, currentState)) return;\n"
+            "    currentState = next;\n"
+            "    for (const listener of [...listeners]) listener();\n"
+            "  };\n"
+            "  const subscribe = (listener: () => void): (() => void) => {\n"
+            "    listeners.add(listener);\n"
+            "    return () => {\n"
+            "      listeners.delete(listener);\n"
+            "    };\n"
+            "  };\n"
+            "  return {\n"
+            "    actions: createActions({ getState, setState }),\n"
+            "    getState,\n"
+            "    setState,\n"
+            "    subscribe,\n"
+            "  };\n"
+            "}\n\n"
+            "/** Read the whole store state and re-render when it changes. */\n"
+            "export function useStoreState<TState, TActions>(\n"
+            "  store: Store<TState, TActions>,\n"
+            "): TState {\n"
+            "  return useSyncExternalStore(store.subscribe, store.getState, store.getState);\n"
+            "}\n\n"
+            "/**\n"
+            " * Read one slice of a store. The selector must return a primitive or a value\n"
+            " * that keeps its identity between renders, otherwise React re-renders forever.\n"
+            " */\n"
+            "export function useStore<TState, TActions, TSelected>(\n"
+            "  store: Store<TState, TActions>,\n"
+            "  select: (state: TState) => TSelected,\n"
+            "): TSelected {\n"
+            "  const snapshot = useCallback(\n"
+            "    () => select(store.getState()),\n"
+            "    [store, select],\n"
+            "  );\n"
+            "  return useSyncExternalStore(store.subscribe, snapshot, snapshot);\n"
+            "}\n\n"
+            "/** Persist a store to localStorage under one key. Called by generated stores. */\n"
+            "export function persistStore<TState, TActions>(\n"
+            "  store: Store<TState, TActions>,\n"
+            "  storageKey: string | null,\n"
+            "): void {\n"
+            '  if (!storageKey || typeof window === "undefined") return;\n'
+            "  store.subscribe(() => {\n"
+            "    try {\n"
+            "      window.localStorage.setItem(storageKey, JSON.stringify(store.getState()));\n"
+            "    } catch {\n"
+            "      // Storage quota or private browsing: state stays in memory.\n"
+            "    }\n"
+            "  });\n"
+            "}\n"
+        )
+        imports[path] = rows
+        exports[path] = [
+            "Store",
+            "StoreHelpers",
+            "StoreUpdate",
+            "createStore",
+            "persistStore",
+            "useStore",
+            "useStoreState",
+        ]
 
     @staticmethod
     def _lower_api_clients(
@@ -914,56 +1056,60 @@ class FrontendSkeletonLowerer:
                 if persistence_kind == "LOCAL_STORAGE" and persistence.get("storage_key")
                 else None
             )
-            runtime_lines = [
-                f"  let currentState = load{state_symbol}();",
-                "  const persist = () => {",
-                "    if (storageKey && typeof window !== \"undefined\") {",
-                "      window.localStorage.setItem(storageKey, JSON.stringify(currentState));",
-                "    }",
-                "  };",
-                f"  const actions: {actions_symbol} = {{",
+            runtime_path = "frontend/src/runtime/store.ts"
+            specifier = _relative_specifier(path, runtime_path)
+            rows = [
+                _import("createStore", specifier, source=runtime_path),
+                _import("persistStore", specifier, source=runtime_path),
+                _import("Store", specifier, type_only=True, source=runtime_path),
             ]
+            # Default action bodies are plain state transitions expressed through
+            # setState, so the store stays reactive no matter what the agent writes.
+            action_lines_body: list[str] = []
             for action in store.get("actions", []):
                 if not isinstance(action, dict):
                     continue
                 name = _safe_property(str(action.get("name", "action")))
                 has_input = bool(action.get("input_type"))
                 if name.lower().startswith(("clear", "reset", "signout", "logout")):
-                    runtime_lines.extend([
-                        f"    {name}: () => {{",
-                        f"      currentState = {{ ...{initial_symbol} }};",
-                        "      persist();",
-                        "    },",
+                    action_lines_body.extend([
+                        f"      {name}: () => {{",
+                        f"        setState({{ ...{initial_symbol} }});",
+                        "      },",
                     ])
                 elif has_input:
-                    runtime_lines.extend([
-                        f"    {name}: (input) => {{",
-                        "      const patch = typeof input === \"object\" && input !== null ? input : {};",
-                        f"      currentState = {{ ...currentState, ...patch }} as {state_symbol};",
-                        "      persist();",
-                        "    },",
+                    action_lines_body.extend([
+                        f"      {name}: (input) => {{",
+                        '        const patch = typeof input === "object" && input !== null ? input : {};',
+                        "        setState((current) => "
+                        f"({{ ...current, ...patch }}) as {state_symbol});",
+                        "      },",
                     ])
                 else:
-                    runtime_lines.append(f"    {name}: () => undefined,")
-            runtime_lines.extend([
-                "  };",
-                "  return {",
-                "    get state() { return currentState; },",
-                "    actions,",
-                "  };",
-            ])
+                    action_lines_body.append(f"      {name}: () => undefined,")
+            runtime_lines = [
+                "    void getState;",
+                "    void setState;",
+                "    return {",
+                *(
+                    action_lines_body
+                    if action_lines_body
+                    else ["      // No global actions were designed."]
+                ),
+                "    };",
+            ]
             sources[path] = (
                 "/**\n"
                 + f" * @arc-module {store_id}\n"
                 + f" * @arc-requirements {','.join(owner_requirements.get(store_id, []))}\n"
                 + " */\n"
+                + "\n".join(_render_imports(rows))
+                + "\n\n"
                 + f"export interface {state_symbol} {{\n{state_fields}\n}}\n\n"
                 f"export interface {actions_symbol} {{\n"
                 + ("\n".join(action_lines) if action_lines else "  // No global actions were designed.")
                 + "\n}\n\n"
-                f"export interface {value_symbol} {{\n"
-                f"  state: {state_symbol};\n  actions: {actions_symbol};\n"
-                "}\n\n"
+                f"export interface {value_symbol} extends Store<{state_symbol}, {actions_symbol}> {{}}\n\n"
                 f"export const {initial_symbol}: {state_symbol} = {{\n"
                 + ("\n".join(initial_lines) if initial_lines else "  // No global state was designed.")
                 + "\n};\n\n"
@@ -977,13 +1123,18 @@ class FrontendSkeletonLowerer:
                 + "  } catch {\n"
                 + f"    return {{ ...{initial_symbol} }};\n"
                 + "  }\n}\n\n"
-                + f"export const {runtime_symbol}: {value_symbol} = (() => {{\n"
-                + f"  // ARC-IMPLEMENTATION-BEGIN:{store_id}\n"
+                + f"export const {runtime_symbol}: {value_symbol} = "
+                + f"createStore<{state_symbol}, {actions_symbol}>(\n"
+                + f"  load{state_symbol}(),\n"
+                + "  ({ getState, setState }) => {\n"
+                + f"    // ARC-IMPLEMENTATION-BEGIN:{store_id}\n"
                 + "\n".join(runtime_lines)
-                + f"\n  // ARC-IMPLEMENTATION-END:{store_id}\n"
-                + "})();\n"
+                + f"\n    // ARC-IMPLEMENTATION-END:{store_id}\n"
+                + "  },\n"
+                + ");\n\n"
+                + f"persistStore({runtime_symbol}, storageKey);\n"
             )
-            imports[path] = []
+            imports[path] = rows
             exports[path] = [
                 state_symbol,
                 actions_symbol,
@@ -1023,11 +1174,20 @@ class FrontendSkeletonLowerer:
                 rows.append(_import("ReactNode", "react", type_only=True))
                 props_lines.append("  children?: ReactNode;")
             else:
-                rows.extend([
-                    _import("useEffect", "react"),
-                    _import("useState", "react"),
-                ])
-                implementation_dependencies.extend(["useEffect", "useState"])
+                # The hooks a screen realistically needs. Importing them here means
+                # the implementation region never has to add a file-level import,
+                # which it is not allowed to do.
+                react_hooks = (
+                    "useCallback",
+                    "useEffect",
+                    "useMemo",
+                    "useRef",
+                    "useState",
+                )
+                rows.extend(_import(hook, "react") for hook in react_hooks)
+                implementation_dependencies.extend(react_hooks)
+                rows.append(_import("useNavigate", "react-router-dom"))
+                implementation_dependencies.append("useNavigate")
             fields = item.get("route_inputs", []) if kind == "PAGE" else item.get("inputs", [])
             props_lines.extend(_render_fields(fields).splitlines() if fields else [])
             if kind == "COMPONENT":
@@ -1043,7 +1203,7 @@ class FrontendSkeletonLowerer:
                     )
                     props_lines.append(f"  {event_name}?: {callback};")
 
-            if kind == "PAGE":
+            if kind in ("PAGE", "COMPONENT"):
                 for api_id in item.get("api_dependencies", []):
                     api_location = api_locations.get(str(api_id))
                     if api_location is not None:
@@ -1054,9 +1214,12 @@ class FrontendSkeletonLowerer:
                             source=str(api_location["path"]),
                         ))
                         implementation_dependencies.append(client_symbol)
+                store_runtime_path = "frontend/src/runtime/store.ts"
+                uses_stores = False
                 for store_id in item.get("store_dependencies", []):
                     store_location = store_locations.get(str(store_id))
                     if store_location is not None:
+                        uses_stores = True
                         runtime_symbol = str(store_location["runtime_symbol"])
                         rows.append(_import(
                             runtime_symbol,
@@ -1064,6 +1227,15 @@ class FrontendSkeletonLowerer:
                             source=str(store_location["path"]),
                         ))
                         implementation_dependencies.append(runtime_symbol)
+                if uses_stores:
+                    # Reading a store reactively is the compiler's job, not the agent's.
+                    for hook in ("useStore", "useStoreState"):
+                        rows.append(_import(
+                            hook,
+                            _relative_specifier(path, store_runtime_path),
+                            source=store_runtime_path,
+                        ))
+                        implementation_dependencies.append(hook)
 
             child_ids = [
                 str(value) for value in item.get("component_ids", [])
@@ -1086,7 +1258,18 @@ class FrontendSkeletonLowerer:
                     _import(child_props, specifier, type_only=True, source=str(child_location["path"])),
                 ])
                 variable = f"childProps{index + 1}"
-                declarations.append(f"  const {variable} = {{}} as {child_props};")
+                available = {
+                    str(row.get("semantic_id", "")): str(row.get("name", ""))
+                    for row in fields
+                    if isinstance(row, dict)
+                }
+                forwarded = [
+                    f"{str(row.get('name', ''))}: _props.{available[str(row.get('semantic_id', ''))]}"
+                    for row in components.get(child_id, {}).get("inputs", [])
+                    if isinstance(row, dict) and str(row.get("semantic_id", "")) in available
+                ]
+                literal = "{ " + ", ".join(forwarded) + " }" if forwarded else "{}"
+                declarations.append(f"  const {variable} = {literal} as {child_props};")
                 child_lines.append(f"      <{child_symbol} {{...{variable}}} />")
 
             obligations = [
@@ -1226,19 +1409,30 @@ class FrontendSkeletonLowerer:
             location = store_locations.get(auth_store_id)
             if location is not None:
                 runtime_symbol = str(location["runtime_symbol"])
-                rows.append(_import(
-                    runtime_symbol,
-                    _relative_specifier(path, str(location["path"])),
-                    source=str(location["path"]),
-                ))
+                store_runtime_path = "frontend/src/runtime/store.ts"
+                rows.extend([
+                    _import(
+                        runtime_symbol,
+                        _relative_specifier(path, str(location["path"])),
+                        source=str(location["path"]),
+                    ),
+                    _import(
+                        "useStoreState",
+                        _relative_specifier(path, store_runtime_path),
+                        source=store_runtime_path,
+                    ),
+                ])
 
-        username_expression = (
-            f"{runtime_symbol}.state[{json.dumps(username_field)}]"
-            if runtime_symbol and username_field
-            else "null"
-        )
+        state_lines: list[str] = []
+        if runtime_symbol and username_field:
+            state_lines.append(f"  const sessionState = useStoreState({runtime_symbol});")
+            username_expression = f"sessionState[{json.dumps(username_field)}]"
+        else:
+            username_expression = "null"
         sign_out = ""
         if runtime_symbol and clear_action:
+            rows.append(_import("useNavigate", "react-router-dom"))
+            state_lines.append("  const navigate = useNavigate();")
             sign_out = (
                 "\n        <button\n"
                 "          type=\"button\"\n"
@@ -1246,12 +1440,13 @@ class FrontendSkeletonLowerer:
                 "text-slate-700 shadow-sm transition hover:border-slate-400 hover:bg-slate-50 "
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500\"\n"
                 f"          onClick={{() => {{ {runtime_symbol}.actions.{_safe_property(clear_action)}(); "
-                "window.location.assign(\"/login\"); }}\n"
+                "navigate(\"/login\"); }}\n"
                 "        >\n          Sign out\n        </button>"
             )
         sources[path] = (
             ("\n".join(_render_imports(rows)) + "\n\n" if rows else "")
             + "export function SystemMainPage() {\n"
+            + ("\n".join(state_lines) + "\n" if state_lines else "")
             + f"  const username = {username_expression};\n"
             + "  return (\n"
             + "    <main className=\"min-h-screen bg-slate-950 px-6 py-16 text-slate-100\">\n"
@@ -1519,9 +1714,10 @@ def _index_backend_routes(
 def _frontend_api_ids(frontend_ir: dict[str, Any]) -> list[str]:
     result = {
         str(api_id)
-        for page in frontend_ir.get("pages", [])
-        if isinstance(page, dict)
-        for api_id in page.get("api_dependencies", [])
+        for table in ("pages", "components")
+        for item in frontend_ir.get(table, [])
+        if isinstance(item, dict)
+        for api_id in item.get("api_dependencies", [])
         if str(api_id)
     }
     result.update(

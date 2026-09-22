@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import posixpath
 import re
 from dataclasses import dataclass, field
@@ -24,6 +25,63 @@ BARREL_PATHS = {
     "API": "backend/src/api/index.ts",
 }
 ERROR_CODES = {"DB": "ARC350", "FUNC": "ARC360", "API": "ARC370"}
+
+RUNTIME_ERRORS_PATH = "backend/src/runtime/errors.ts"
+RUNTIME_IDS_PATH = "backend/src/runtime/ids.ts"
+RUNTIME_CLOCK_PATH = "backend/src/runtime/clock.ts"
+RUNTIME_STUBS_PATH = "backend/src/runtime/stubs.ts"
+RUNTIME_FILES = (
+    RUNTIME_ERRORS_PATH,
+    RUNTIME_IDS_PATH,
+    RUNTIME_CLOCK_PATH,
+    RUNTIME_STUBS_PATH,
+)
+
+# Zero value per design type.  A stub answers with the emptiest well-typed value
+# its contract allows, so a caller that only needs the shape keeps working while a
+# caller that needs real data still fails its assertion.
+ZERO_VALUES: dict[str, str] = {
+    "string": '""',
+    "date": '""',
+    "datetime": '""',
+    "uuid": '""',
+    "integer": "0",
+    "number": "0",
+    "boolean": "false",
+    "json": "[]",
+}
+
+# Every backend module receives the same cross-cutting runtime. Owning these here
+# keeps identity, time and failure reporting out of the implementation agent's
+# hands: it can use them, it cannot reinvent them.
+RUNTIME_IMPORTS: tuple[tuple[str, str], ...] = (
+    ("NotImplementedError", RUNTIME_ERRORS_PATH),
+    ("HttpError", RUNTIME_ERRORS_PATH),
+    ("newId", RUNTIME_IDS_PATH),
+    ("now", RUNTIME_CLOCK_PATH),
+    ("nowIso", RUNTIME_CLOCK_PATH),
+)
+
+# Drizzle predicate/ordering helpers a repository realistically needs. Importing
+# them unconditionally removes the single most common "I cannot express this
+# query inside my region" failure.
+DRIZZLE_OPERATORS: tuple[str, ...] = (
+    "and",
+    "asc",
+    "desc",
+    "eq",
+    "gt",
+    "gte",
+    "inArray",
+    "isNotNull",
+    "isNull",
+    "like",
+    "lt",
+    "lte",
+    "ne",
+    "or",
+    "sql",
+)
 
 
 @dataclass(slots=True)
@@ -82,9 +140,10 @@ class ModuleSkeletonLowerer:
             errors.append(
                 f"{prefix}2 FILE_REGISTRY_INVALID: missing planned barrel {required_barrel}."
             )
-        if kind == "DB" and "backend/src/runtime/errors.ts" not in planned_files:
+        missing_runtime = sorted(set(RUNTIME_FILES) - planned_files)
+        if missing_runtime:
             errors.append(
-                f"{prefix}2 FILE_REGISTRY_INVALID: missing planned runtime error file."
+                f"{prefix}2 FILE_REGISTRY_INVALID: missing planned runtime files {missing_runtime}."
             )
 
         for module_id, module in sorted(selected.items()):
@@ -476,15 +535,40 @@ def _render_module(
             }
             for symbol in ("Request", "Response")
         )
-    runtime_path = "backend/src/runtime/errors.ts"
-    imports.append(
+        imports.append(
+            {
+                "symbol": "ApiErrorBody",
+                "from": "shared/src/contracts/runtime.ts",
+                "specifier": "@arc/shared",
+                "type_only": True,
+            }
+        )
+        imports.append(
+            {
+                "symbol": "sendError",
+                "from": RUNTIME_ERRORS_PATH,
+                "specifier": _relative_specifier(current_path, RUNTIME_ERRORS_PATH),
+                "type_only": False,
+            }
+        )
+        imports.append(
+            {
+                "symbol": "recordStubHit",
+                "from": RUNTIME_STUBS_PATH,
+                "specifier": _relative_specifier(current_path, RUNTIME_STUBS_PATH),
+                "type_only": False,
+            }
+        )
+    runtime_symbols = [
         {
-            "symbol": "NotImplementedError",
-            "from": runtime_path,
-            "specifier": _relative_specifier(current_path, runtime_path),
+            "symbol": symbol,
+            "from": source_path,
+            "specifier": _relative_specifier(current_path, source_path),
             "type_only": False,
         }
-    )
+        for symbol, source_path in RUNTIME_IMPORTS
+    ]
+    imports.extend(runtime_symbols)
     # DB modules always use the single compiler-owned connection.  The table
     # imports below are schema descriptions only; keeping the connection as a
     # real import prevents the generated skeleton from accidentally treating a
@@ -499,7 +583,7 @@ def _render_module(
                 "type_only": False,
             }
         )
-        for operator in ("and", "eq", "or"):
+        for operator in DRIZZLE_OPERATORS:
             imports.append(
                 {
                     "symbol": operator,
@@ -536,7 +620,15 @@ def _render_module(
     )
 
     if kind in {"FUNC", "API"}:
-        dependency_symbols = ", ".join(row["symbol"] for row in dependencies)
+        dependency_symbols = ", ".join(
+            [
+                *(row["symbol"] for row in dependencies),
+                "HttpError",
+                "newId",
+                "now",
+                "nowIso",
+            ]
+        )
         dependency_object = f"{{ {dependency_symbols} }}" if dependency_symbols else "{}"
         lines.extend(
             [
@@ -553,9 +645,17 @@ def _render_module(
             ]
         )
 
+    module_id = str(module.get("id", ""))
     if kind == "API":
         request_body = input_name or "unknown"
-        response_body = output_name or "unknown"
+        response_body = f"{output_name} | ApiErrorBody" if output_name else "ApiErrorBody"
+        # The envelope is compiler-owned: whatever the region throws leaves the
+        # process as one ApiErrorBody, so the frontend never has to guess.
+        #
+        # An unimplemented route answers with the zero value of its own contract
+        # rather than a 501.  A node whose screens merely traverse a not-yet-built
+        # route then still renders, and the recorded stub hit lets the compiler tell
+        # "my code is wrong" apart from "my dependency does not exist yet".
         lines.extend(
             [
                 f"export async function {function_name}(",
@@ -564,28 +664,72 @@ def _render_module(
                 "): Promise<void> {",
                 "  void req;",
                 "  void res;",
+                "  try {",
+                f"    // ARC-IMPLEMENTATION-BEGIN:{module_id}",
+                f'    recordStubHit(res, "{module_id}");',
+                *_stub_response_lines(output_contract, output_name),
+                f"    // ARC-IMPLEMENTATION-END:{module_id}",
+                "  } catch (error) {",
+                "    sendError(res, error);",
+                "  }",
+                "}",
+                "",
             ]
         )
-    else:
-        parameter = f"input: {input_name}" if input_name else ""
-        return_type = output_name or "void"
-        lines.extend(
-            [
-                f"export async function {function_name}({parameter}): Promise<{return_type}> {{",
-            ]
-        )
-        if input_name:
-            lines.append("  void input;")
+        return "\n".join(lines), exports, imports
+
+    parameter = f"input: {input_name}" if input_name else ""
+    return_type = output_name or "void"
+    lines.append(
+        f"export async function {function_name}({parameter}): Promise<{return_type}> {{"
+    )
+    if input_name:
+        lines.append("  void input;")
     lines.extend(
         [
-            f"  // ARC-IMPLEMENTATION-BEGIN:{module.get('id')}",
-            f'  throw new NotImplementedError("{module.get("id")}");',
-            f"  // ARC-IMPLEMENTATION-END:{module.get('id')}",
+            f"  // ARC-IMPLEMENTATION-BEGIN:{module_id}",
+            f'  throw new NotImplementedError("{module_id}");',
+            f"  // ARC-IMPLEMENTATION-END:{module_id}",
             "}",
             "",
         ]
     )
     return "\n".join(lines), exports, imports
+
+
+def _stub_response_lines(
+    output_contract: dict[str, Any] | None,
+    output_name: str | None,
+) -> list[str]:
+    """Render the skeleton reply for a route nobody has implemented yet."""
+
+    fields = (output_contract or {}).get("fields")
+    if output_name is None or not isinstance(fields, list) or not fields:
+        return ["    res.status(204).end();", "    return;"]
+    seen: set[str] = set()
+    properties: list[str] = []
+    for field_item in fields:
+        if not isinstance(field_item, dict):
+            continue
+        name = str(field_item.get("name", "")).strip()
+        # An optional property stays absent: exactOptionalPropertyTypes rejects an
+        # explicit undefined, and a zero value would be indistinguishable from data.
+        if not name or name in seen or not bool(field_item.get("required", True)):
+            continue
+        seen.add(name)
+        zero = ZERO_VALUES.get(str(field_item.get("type", "")))
+        if zero is None:
+            return ["    res.status(204).end();", "    return;"]
+        properties.append(f"      {json.dumps(name)}: {zero},")
+    if not properties:
+        return ["    res.status(204).end();", "    return;"]
+    return [
+        f"    const stub: {output_name} = {{",
+        *properties,
+        "    };",
+        "    res.status(200).json(stub);",
+        "    return;",
+    ]
 
 
 def _group_imports(
@@ -617,14 +761,117 @@ def _render_module_barrel(
 
 
 def _render_runtime_errors() -> str:
-    return (
-        "// Generated by ARC. Do not edit.\n"
-        "export class NotImplementedError extends Error {\n"
-        "  constructor(moduleId: string) {\n"
-        '    super(`Module ${moduleId} is not implemented`);\n'
-        '    this.name = "NotImplementedError";\n'
-        "  }\n"
-        "}\n"
+    return "\n".join(
+        [
+            "// Generated by ARC. Do not edit.",
+            'import type { ApiErrorBody, JsonValue } from "@arc/shared";',
+            "",
+            "export class NotImplementedError extends Error {",
+            "  constructor(moduleId: string) {",
+            "    super(`Module ${moduleId} is not implemented`);",
+            '    this.name = "NotImplementedError";',
+            "  }",
+            "}",
+            "",
+            "/**",
+            " * The one way a module reports a domain failure. Throw it from any DB, FUNC or",
+            " * API implementation region; the generated API wrapper turns it into the shared",
+            " * ApiErrorBody envelope with the right status code.",
+            " */",
+            "export class HttpError extends Error {",
+            "  readonly status: number;",
+            "  readonly code: string;",
+            "  readonly details: JsonValue | undefined;",
+            "",
+            "  constructor(",
+            "    status: number,",
+            "    code: string,",
+            "    message: string,",
+            "    details?: JsonValue,",
+            "  ) {",
+            "    super(message);",
+            '    this.name = "HttpError";',
+            "    this.status = status;",
+            "    this.code = code;",
+            "    this.details = details;",
+            "  }",
+            "",
+            "  static badRequest(message: string, details?: JsonValue): HttpError {",
+            '    return new HttpError(400, "BAD_REQUEST", message, details);',
+            "  }",
+            "",
+            "  static unauthorized(message: string, details?: JsonValue): HttpError {",
+            '    return new HttpError(401, "UNAUTHORIZED", message, details);',
+            "  }",
+            "",
+            "  static forbidden(message: string, details?: JsonValue): HttpError {",
+            '    return new HttpError(403, "FORBIDDEN", message, details);',
+            "  }",
+            "",
+            "  static notFound(message: string, details?: JsonValue): HttpError {",
+            '    return new HttpError(404, "NOT_FOUND", message, details);',
+            "  }",
+            "",
+            "  static conflict(message: string, details?: JsonValue): HttpError {",
+            '    return new HttpError(409, "CONFLICT", message, details);',
+            "  }",
+            "",
+            "  static unprocessable(message: string, details?: JsonValue): HttpError {",
+            '    return new HttpError(422, "UNPROCESSABLE", message, details);',
+            "  }",
+            "}",
+            "",
+            "export function isHttpError(value: unknown): value is HttpError {",
+            "  return value instanceof HttpError;",
+            "}",
+            "",
+            "/** Normalize any thrown value into the shared failure envelope. */",
+            "export function toErrorBody(error: unknown): {",
+            "  status: number;",
+            "  body: ApiErrorBody;",
+            "} {",
+            "  if (isHttpError(error)) {",
+            "    return {",
+            "      status: error.status,",
+            "      body: {",
+            "        error: {",
+            "          code: error.code,",
+            "          message: error.message,",
+            "          ...(error.details === undefined ? {} : { details: error.details }),",
+            "        },",
+            "      },",
+            "    };",
+            "  }",
+            "  if (error instanceof NotImplementedError) {",
+            "    return {",
+            "      status: 501,",
+            '      body: { error: { code: "NOT_IMPLEMENTED", message: error.message } },',
+            "    };",
+            "  }",
+            "  const message = error instanceof Error ? error.message : String(error);",
+            "  return {",
+            "    status: 500,",
+            '    body: { error: { code: "INTERNAL_ERROR", message } },',
+            "  };",
+            "}",
+            "",
+            "/**",
+            " * Structural view of the response object: express Response satisfies it without",
+            " * this file importing express.",
+            " */",
+            "export interface ErrorResponseTarget {",
+            "  headersSent: boolean;",
+            "  status(code: number): { json(body: ApiErrorBody): unknown };",
+            "}",
+            "",
+            "/** Write one failure envelope. Safe to call with any thrown value. */",
+            "export function sendError(response: ErrorResponseTarget, error: unknown): void {",
+            "  if (response.headersSent) return;",
+            "  const { status, body } = toErrorBody(error);",
+            "  response.status(status).json(body);",
+            "}",
+            "",
+        ]
     )
 
 

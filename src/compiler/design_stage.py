@@ -29,6 +29,14 @@ OBLIGATION_KINDS = {
     "ERROR_MAPPING",
 }
 SELF_OBLIGATION_OWNER_KINDS = frozenset({"API", "FUNC", "DB"})
+API_REUSE_DECISIONS = {"REUSE", "EXTEND", "CREATE"}
+UI_VOCABULARY = frozenset({
+    "banner", "breadcrumb", "button", "buttons", "checkbox", "click", "clicked", "css",
+    "dialog", "div", "dropdown", "frontend", "highlight", "hover", "keypress", "modal",
+    "mouseover", "navbar", "onclick", "pixel", "placeholder", "popup", "render",
+    "rendered", "scroll", "sidebar", "span", "spinner", "stylesheet", "textbox",
+    "toast", "tooltip", "ui", "viewport", "widget",
+})
 REPAIR_CURRENT = "REPAIR_CURRENT"
 REOPEN_PARENT = "REOPEN_PARENT"
 UNRESOLVED = "UNRESOLVED"
@@ -43,10 +51,10 @@ FIELD_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["semantic_id", "name", "type", "description", "required"],
     "properties": {
-        "semantic_id": {"type": "string", "maxLength": 120, "pattern": r"^[a-z][a-z0-9_.]*$"},
-        "name": {"type": "string", "maxLength": 64, "pattern": r"^[a-z][a-z0-9_]*$"},
+        "semantic_id": {"type": "string", "pattern": r"^[a-z][a-z0-9_.]*$"},
+        "name": {"type": "string", "pattern": r"^[a-z][a-z0-9_]*$"},
         "type": {"type": "string", "enum": sorted(PRIMITIVE_TYPES)},
-        "description": {"type": "string", "maxLength": 300},
+        "description": {"type": "string"},
         "required": {"type": "boolean"},
     },
 }
@@ -56,10 +64,10 @@ EFFECT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["id", "operation", "target", "fields"],
     "properties": {
-        "id": {"type": "string", "maxLength": 64, "pattern": r"^[a-z][a-z0-9_]*$"},
+        "id": {"type": "string", "pattern": r"^[a-z][a-z0-9_]*$"},
         "operation": {"type": "string", "enum": sorted(EFFECT_OPERATIONS)},
-        "target": _nullable({"type": "string", "maxLength": 64}),
-        "fields": {"type": "array", "items": {"type": "string", "maxLength": 64}},
+        "target": _nullable({"type": "string"}),
+        "fields": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -68,10 +76,10 @@ OBLIGATION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["id", "kind", "description", "scenario_ids"],
     "properties": {
-        "id": {"type": "string", "maxLength": 64, "pattern": r"^[a-z][a-z0-9_]*$"},
+        "id": {"type": "string", "pattern": r"^[a-z][a-z0-9_]*$"},
         "kind": {"type": "string", "enum": sorted(OBLIGATION_KINDS)},
-        "description": {"type": "string", "maxLength": 300},
-        "scenario_ids": {"type": "array", "items": {"type": "string", "maxLength": 160}},
+        "description": {"type": "string"},
+        "scenario_ids": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -81,7 +89,7 @@ REQUIREMENT_CONTRACT_SCHEMA: dict[str, Any] = {
     "required": ["requirement_id", "spec", "server_state", "inputs", "outputs", "effects", "obligations"],
     "properties": {
         "requirement_id": {"type": "string"},
-        "spec": {"type": "string", "maxLength": 800},
+        "spec": {"type": "string"},
         "server_state": {"type": "boolean"},
         "inputs": {"type": "array", "items": FIELD_SCHEMA},
         "outputs": {"type": "array", "items": FIELD_SCHEMA},
@@ -95,8 +103,8 @@ MODULE_INTERFACE_FIELD_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["semantic_id", "name", "type", "required"],
     "properties": {
-        "semantic_id": {"type": "string", "maxLength": 120, "pattern": r"^[a-z][a-z0-9_.]*$"},
-        "name": {"type": "string", "maxLength": 64, "pattern": r"^[a-z][a-z0-9_]*$"},
+        "semantic_id": {"type": "string", "pattern": r"^[a-z][a-z0-9_.]*$"},
+        "name": {"type": "string", "pattern": r"^[a-z][a-z0-9_]*$"},
         "type": {"type": "string", "enum": sorted(PRIMITIVE_TYPES)},
         "required": {"type": "boolean"},
     },
@@ -107,13 +115,13 @@ MODULE_EFFECT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["id", "operation", "target", "fields"],
     "properties": {
-        "id": {"type": "string", "maxLength": 120, "pattern": r"^[a-z][a-z0-9_]*$"},
+        "id": {"type": "string", "pattern": r"^[a-z][a-z0-9_]*$"},
         "operation": {
             "type": "string",
             "enum": sorted(EFFECT_OPERATIONS),
         },
-        "target": _nullable({"type": "string", "maxLength": 64}),
-        "fields": {"type": "array", "items": {"type": "string", "maxLength": 64}},
+        "target": _nullable({"type": "string"}),
+        "fields": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -123,12 +131,12 @@ DECOMPOSED_MODULE_SCHEMA: dict[str, Any] = {
     "required": ["kind", "name", "spec", "inputs", "outputs", "effects", "obligation_ids"],
     "properties": {
         "kind": {"type": "string", "enum": ["FUNC", "DB"]},
-        "name": {"type": "string", "maxLength": 64, "pattern": r"^[A-Za-z][A-Za-z0-9]*$"},
+        "name": {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9]*$"},
         "spec": {"type": "string"},
         "inputs": {"type": "array", "items": MODULE_INTERFACE_FIELD_SCHEMA},
         "outputs": {"type": "array", "items": MODULE_INTERFACE_FIELD_SCHEMA},
         "effects": {"type": "array", "items": MODULE_EFFECT_SCHEMA},
-        "obligation_ids": {"type": "array", "items": {"type": "string", "maxLength": 64}},
+        "obligation_ids": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -137,20 +145,32 @@ MODULE_DECOMPOSITION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["self_obligation_ids", "modules"],
     "properties": {
-        "self_obligation_ids": {"type": "array", "items": {"type": "string", "maxLength": 64}},
+        "self_obligation_ids": {"type": "array", "items": {"type": "string"}},
         "modules": {"type": "array", "minItems": 0, "maxItems": 8, "items": DECOMPOSED_MODULE_SCHEMA},
     },
 }
 
 API_MODULE_SCHEMA = copy.deepcopy(DECOMPOSED_MODULE_SCHEMA)
 API_MODULE_SCHEMA["properties"]["kind"]["enum"] = ["API"]
+API_MODULE_SCHEMA["properties"]["reuse_decision"] = {
+    "type": "string",
+    "enum": sorted(API_REUSE_DECISIONS),
+}
+API_MODULE_SCHEMA["properties"]["reuse_target_module_id"] = _nullable(
+    {"type": "string"}
+)
+API_MODULE_SCHEMA["required"] = [
+    *API_MODULE_SCHEMA["required"],
+    "reuse_decision",
+    "reuse_target_module_id",
+]
 
 API_DECOMPOSITION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["self_obligation_ids", "modules"],
     "properties": {
-        "self_obligation_ids": {"type": "array", "items": {"type": "string", "maxLength": 64}},
+        "self_obligation_ids": {"type": "array", "items": {"type": "string"}},
         "modules": {"type": "array", "minItems": 0, "maxItems": 4, "items": API_MODULE_SCHEMA},
     },
 }
@@ -179,6 +199,13 @@ not hide required effects inside the prose spec.
 Database access is implemented through one compiler-owned client injected into DB modules. Treat schema table symbols
 as Drizzle table definitions, never as repositories or in-memory data containers; do not model table rows through
 properties such as rows, data, or items.
+Reuse the established vocabulary. The context lists every API contract already frozen by earlier requirements as
+existing_api_contracts. When this requirement exposes or consumes a value that one of them already carries, copy that
+semantic_id character for character instead of minting a synonym; a new semantic_id must describe genuinely new data.
+Interface fields carry domain data only. Never put presentation vocabulary such as button, click, modal, dialog, toast,
+placeholder, sidebar, spinner, or any other rendering concept into a semantic_id or a field name; describe what the
+value is, not how a screen shows it. When the contract declares a database effect and returns anything, at least one
+output semantic_id must be prefixed with the entity it belongs to, for example book.id rather than id or result.
 Do not design modules, calls, steps, bindings, outcomes, guards, or algorithms. Keep every id concise (64 characters
 or fewer). Return only the structured object.
 
@@ -258,6 +285,24 @@ API_DECOMPOSITION_INSTRUCTIONS = API_DECOMPOSITION_INSTRUCTIONS.replace(
     "Return only `{\"modules\": [...]}`.",
     "Return only `{\"self_obligation_ids\": [...], \"modules\": [...]}`.",
 )
+API_DECOMPOSITION_INSTRUCTIONS += """
+Reuse before create. The context lists every API contract frozen by earlier requirements as existing_api_contracts,
+each with its module id, spec, effect signatures, and input/output semantic ids. Judge every API you return against
+that list and report the judgement on the module itself:
+- REUSE: an existing API already performs this operation. Set reuse_target_module_id to its module id and copy its
+  input semantic ids, output semantic ids, and effects exactly. Prefer REUSE whenever the frozen contract already
+  carries the data this requirement needs.
+- EXTEND: the existing operation is the right one but this requirement genuinely adds data. Set
+  reuse_target_module_id to its module id, keep every semantic id it already declares, and add only fields with
+  required=false. Never drop a field, never change a type, and never add a required field.
+- CREATE: no existing API performs this operation. Set reuse_target_module_id to null. Do not choose CREATE for an
+  operation whose inputs, outputs, and effects already match a frozen contract.
+Reuse is decided by semantic identifiers and effects, not by wording: two APIs that read the same entity fields are
+the same operation even when their specs are phrased differently.
+Interface fields carry domain data only. Never introduce presentation vocabulary such as button, click, modal, dialog,
+toast, placeholder, sidebar, or any other rendering concept into a semantic_id or a field name.
+"""
+
 MODULE_DECOMPOSITION_INSTRUCTIONS = MODULE_DECOMPOSITION_INSTRUCTIONS.replace(
     "Every child contains exactly seven top-level fields: kind, name, spec, inputs, outputs, effects, and obligation_ids.",
     "Every child contains exactly seven top-level fields: kind, name, spec, inputs, outputs, effects, and obligation_ids. "
@@ -426,6 +471,7 @@ class DesignPass:
             requirement = _requirement_context(nodes, requirement_id)
             design_context = project_design_context(database_schema, requirement_id, dependencies)
             model_design_context = _model_design_context(design_context)
+            frozen_api_contracts = _existing_api_contracts(state)
             contract_result = self._decision(
                 phase="requirement_contract",
                 unit_id=requirement_id,
@@ -435,6 +481,7 @@ class DesignPass:
                 context={
                     "requirement": requirement,
                     "design_context": model_design_context,
+                    "existing_api_contracts": frozen_api_contracts,
                     "fixed_template": _requirement_contract_template(requirement_id),
                 },
                 validator=lambda value: _requirement_contract_issues(
@@ -538,10 +585,12 @@ class DesignPass:
         upstream_feedback: list[str] = []
         seen_failures: set[str] = set()
         last_issues: list[DesignIssue] = []
+        existing_apis = _existing_api_contracts(base)
         for reopen_attempt in range(self._reopen_budget + 1):
             context = {
                 "requirement": requirement,
                 "fixed_requirement_contract": contract,
+                "existing_api_contracts": existing_apis,
                 "fixed_template": _api_template(),
             }
             if upstream_feedback:
@@ -556,10 +605,19 @@ class DesignPass:
                     contract.get("obligations", []),
                 ),
                 context=context,
-                validator=lambda value: _api_plan_issues(value, requirement_id, contract),
+                validator=lambda value: _api_plan_issues(
+                    value, requirement_id, contract, existing_apis
+                ),
             )
             if result.value is None:
                 return None, result.issues
+            for decided in result.value.get("modules", []):
+                self._trace(
+                    "API_REUSE_DECISION "
+                    f"requirement={requirement_id} api={decided.get('name', '')} "
+                    f"decision={decided.get('reuse_decision', '')} "
+                    f"target={decided.get('reuse_target_module_id') or '-'}"
+                )
             trial = base.clone()
             api_ids, issues = _materialize_apis(trial, requirement_id, contract, result.value)
             if issues:
@@ -857,6 +915,215 @@ def _model_design_context(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _existing_api_contracts(state: DesignState, limit: int = 40) -> list[dict[str, Any]]:
+    """Summarize every frozen API contract so a later requirement can reuse one.
+
+    The summary carries identity only - module id, spec, effect signatures, and
+    the semantic ids on each side of the interface - because reuse is decided by
+    semantic identity rather than by prose.
+    """
+
+    summaries: list[dict[str, Any]] = []
+    for module_id in sorted(state.modules):
+        module = state.modules[module_id]
+        if str(module.get("kind", "")) != "API":
+            continue
+        summaries.append({
+            "module_id": module_id,
+            "owner_requirement": str(module.get("owner_requirement", "")),
+            "spec": str(module.get("spec", "")),
+            "inputs": sorted(_semantic_id_set(module.get("inputs", []))),
+            "outputs": sorted(_semantic_id_set(module.get("outputs", []))),
+            "effects": sorted(_effect_signature_set(module.get("effects", []))),
+        })
+    return summaries[-limit:]
+
+
+def _semantic_id_set(fields: Iterable[dict[str, Any]]) -> set[str]:
+    return {
+        str(item.get("semantic_id", ""))
+        for item in fields
+        if isinstance(item, dict) and str(item.get("semantic_id", ""))
+    }
+
+
+def _effect_signature_set(effects: Iterable[dict[str, Any]]) -> set[str]:
+    signatures: set[str] = set()
+    for effect in effects:
+        if not isinstance(effect, dict):
+            continue
+        operation, target, fields = _effect_signature(effect)
+        signatures.add(f"{operation}:{target or '-'}({','.join(fields)})")
+    return signatures
+
+
+def _api_signature(api: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
+    return (
+        _semantic_id_set(api.get("inputs", [])),
+        _semantic_id_set(api.get("outputs", [])),
+        _effect_signature_set(api.get("effects", [])),
+    )
+
+
+def _summary_signature(summary: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
+    return (
+        {str(item) for item in summary.get("inputs", [])},
+        {str(item) for item in summary.get("outputs", [])},
+        {str(item) for item in summary.get("effects", [])},
+    )
+
+
+def _vocabulary_tokens(value: str) -> set[str]:
+    return {token for token in re.split(r"[^a-z0-9]+", value.lower()) if token}
+
+
+def _ui_vocabulary_issues(
+    fields: Iterable[dict[str, Any]],
+    label: str,
+    phase: str,
+    blame: str,
+) -> list[DesignIssue]:
+    """Reject presentation vocabulary on a data contract field."""
+
+    issues: list[DesignIssue] = []
+    for field_item in fields:
+        if not isinstance(field_item, dict):
+            continue
+        semantic_id = str(field_item.get("semantic_id", ""))
+        tokens = _vocabulary_tokens(semantic_id) | _vocabulary_tokens(
+            str(field_item.get("name", ""))
+        )
+        offending = sorted(tokens & UI_VOCABULARY)
+        if offending:
+            issues.append(_issue(
+                "FIELD_UI_VOCABULARY",
+                f"{label} field {semantic_id or '(unnamed)'} uses presentation vocabulary "
+                f"{offending}; contract fields name domain data, not rendering",
+                phase,
+                blame,
+            ))
+    return issues
+
+
+def _entity_prefixed(semantic_id: str, allowed_entities: set[str]) -> bool:
+    """Tell whether a semantic id is namespaced by one available entity."""
+
+    head = re.split(r"[._]", semantic_id.lower(), maxsplit=1)[0]
+    if not head:
+        return False
+    for entity in allowed_entities:
+        normalized = str(entity).lower().strip()
+        if not normalized:
+            continue
+        parts = set(normalized.split("_")) | {normalized}
+        candidates = parts | {part.rstrip("s") for part in parts}
+        if head in candidates or head.rstrip("s") in candidates:
+            return True
+    return False
+
+
+def _api_reuse_issues(
+    api: dict[str, Any],
+    label: str,
+    existing_by_id: dict[str, dict[str, Any]],
+) -> list[DesignIssue]:
+    """Validate one declared REUSE/EXTEND/CREATE judgement against frozen APIs."""
+
+    decision = str(api.get("reuse_decision", "") or "").upper()
+    target_id = str(api.get("reuse_target_module_id") or "").strip()
+    if decision not in API_REUSE_DECISIONS:
+        return [_issue(
+            "API_REUSE_DECISION_INVALID",
+            f"API.{label} must declare reuse_decision as one of {sorted(API_REUSE_DECISIONS)}",
+            "REQUIREMENT_API",
+            label,
+        )]
+    signature = _api_signature(api)
+    inputs, outputs, effects = signature
+    issues: list[DesignIssue] = []
+    if decision == "CREATE":
+        if target_id:
+            issues.append(_issue(
+                "API_REUSE_DECISION_INVALID",
+                f"API.{label} declares CREATE and must set reuse_target_module_id to null",
+                "REQUIREMENT_API",
+                label,
+            ))
+        duplicate = next(
+            (
+                module_id
+                for module_id in sorted(existing_by_id)
+                if _summary_signature(existing_by_id[module_id]) == signature
+            ),
+            "",
+        )
+        if duplicate:
+            issues.append(_issue(
+                "API_REUSE_MISSED",
+                f"API.{label} repeats the frozen contract of {duplicate}; declare "
+                f"reuse_decision=REUSE with reuse_target_module_id={duplicate}",
+                "REQUIREMENT_API",
+                label,
+            ))
+        return issues
+    target = existing_by_id.get(target_id)
+    if target is None:
+        known = sorted(existing_by_id)
+        return [_issue(
+            "API_REUSE_TARGET_UNKNOWN",
+            f"API.{label} declares {decision} against unknown module id "
+            f"{target_id or '(empty)'}; choose one of {known[:12]} or declare CREATE",
+            "REQUIREMENT_API",
+            label,
+        )]
+    target_inputs, target_outputs, target_effects = _summary_signature(target)
+    if decision == "REUSE":
+        if signature != (target_inputs, target_outputs, target_effects):
+            issues.append(_issue(
+                "API_REUSE_SIGNATURE_MISMATCH",
+                f"API.{label} declares REUSE of {target_id} but differs on inputs "
+                f"{sorted(inputs ^ target_inputs)}, outputs {sorted(outputs ^ target_outputs)}, "
+                f"effects {sorted(effects ^ target_effects)}; copy the frozen contract exactly "
+                "or declare EXTEND",
+                "REQUIREMENT_API",
+                label,
+            ))
+        return issues
+    dropped = sorted((target_inputs - inputs) | (target_outputs - outputs))
+    if dropped:
+        issues.append(_issue(
+            "API_EXTEND_DROPS_FIELD",
+            f"API.{label} declares EXTEND of {target_id} but drops {dropped}; "
+            "EXTEND keeps every frozen field",
+            "REQUIREMENT_API",
+            label,
+        ))
+    added = (inputs - target_inputs) | (outputs - target_outputs)
+    required_added = sorted(
+        str(field_item.get("semantic_id", ""))
+        for field_item in [*api.get("inputs", []), *api.get("outputs", [])]
+        if isinstance(field_item, dict)
+        and str(field_item.get("semantic_id", "")) in added
+        and bool(field_item.get("required"))
+    )
+    if required_added:
+        issues.append(_issue(
+            "API_EXTEND_REQUIRED_FIELD",
+            f"API.{label} declares EXTEND of {target_id} and adds required fields "
+            f"{required_added}; appended fields must be optional",
+            "REQUIREMENT_API",
+            label,
+        ))
+    if not added and not dropped:
+        issues.append(_issue(
+            "API_REUSE_DECISION_INVALID",
+            f"API.{label} declares EXTEND of {target_id} but adds no field; declare REUSE",
+            "REQUIREMENT_API",
+            label,
+        ))
+    return issues
+
+
 def _requirement_contract_issues(
     value: dict[str, Any],
     requirement_id: str,
@@ -873,6 +1140,12 @@ def _requirement_contract_issues(
         issues.append(_issue("CONTRACT_SERVER_STATE_INVALID", "server_state must be a boolean", "REQUIREMENT_CONTRACT", requirement_id))
     issues.extend(_field_issues(value.get("inputs", []), "requirement inputs", requirement_id))
     issues.extend(_field_issues(value.get("outputs", []), "requirement outputs", requirement_id))
+    issues.extend(_ui_vocabulary_issues(
+        value.get("inputs", []), "Requirement input", "REQUIREMENT_CONTRACT", requirement_id
+    ))
+    issues.extend(_ui_vocabulary_issues(
+        value.get("outputs", []), "Requirement output", "REQUIREMENT_CONTRACT", requirement_id
+    ))
     input_fields = _simple_field_catalog(value.get("inputs", []))
     output_fields = _simple_field_catalog(value.get("outputs", []))
     for semantic_id in set(input_fields) & set(output_fields):
@@ -944,6 +1217,19 @@ def _requirement_contract_issues(
             issues.append(_issue("FRONTEND_ONLY_SERVER_EFFECT", f"server_state=false cannot declare server effects: {sorted(set(server_effects))}", "REQUIREMENT_CONTRACT", requirement_id))
         if server_obligations:
             issues.append(_issue("FRONTEND_ONLY_SERVER_OBLIGATION", f"server_state=false cannot declare server obligations: {sorted(set(server_obligations))}", "REQUIREMENT_CONTRACT", requirement_id))
+    outputs = [item for item in value.get("outputs", []) if isinstance(item, dict)]
+    if has_database_effect and outputs and not any(
+        _entity_prefixed(str(item.get("semantic_id", "")), allowed_entities)
+        for item in outputs
+    ):
+        issues.append(_issue(
+            "CONTRACT_OUTPUT_ENTITY_PREFIX",
+            "A database-backed contract must expose at least one output whose semantic_id is "
+            f"prefixed with the entity it belongs to, for example {sorted(allowed_entities)[:3]}; "
+            f"got {sorted(str(item.get('semantic_id', '')) for item in outputs)}",
+            "REQUIREMENT_CONTRACT",
+            requirement_id,
+        ))
     if has_database_effect and not any(
         obligation.get("kind") == "PERSISTENCE"
         for obligation in value.get("obligations", [])
@@ -957,8 +1243,18 @@ def _requirement_contract_issues(
     return issues
 
 
-def _api_plan_issues(value: dict[str, Any], requirement_id: str, contract: dict[str, Any]) -> list[DesignIssue]:
+def _api_plan_issues(
+    value: dict[str, Any],
+    requirement_id: str,
+    contract: dict[str, Any],
+    existing_apis: list[dict[str, Any]] | None = None,
+) -> list[DesignIssue]:
     issues: list[DesignIssue] = []
+    existing_by_id = {
+        str(row.get("module_id", "")): row
+        for row in (existing_apis or [])
+        if isinstance(row, dict) and str(row.get("module_id", ""))
+    }
     apis = value.get("modules", [])
     names = [str(item.get("name", "")) for item in apis]
     if len(names) != len(set(names)):
@@ -984,6 +1280,13 @@ def _api_plan_issues(value: dict[str, Any], requirement_id: str, contract: dict[
         issues.extend(_simple_interface_field_issues(api.get("outputs", []), f"API.{name} outputs", requirement_id))
         if not str(api.get("spec", "")).strip():
             issues.append(_issue("API_SPEC_EMPTY", f"API.{name} spec must not be empty", "REQUIREMENT_API", name))
+        issues.extend(_ui_vocabulary_issues(
+            [*api.get("inputs", []), *api.get("outputs", [])],
+            f"API.{name}",
+            "REQUIREMENT_API",
+            name,
+        ))
+        issues.extend(_api_reuse_issues(api, name, existing_by_id))
         for field_item in api.get("inputs", []):
             semantic_id = str(field_item.get("semantic_id", ""))
             expected = contract_inputs.get(semantic_id)
@@ -1674,9 +1977,10 @@ def _shape_issues(value: Any, schema: dict[str, Any], phase: str, unit_id: str) 
 def _provider_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return the strict-schema subset supported by OpenAI-compatible providers.
 
-    Length and uniqueness constraints remain in the authoritative local schema and
-    are checked after every response. Several compatible endpoints reject those
-    JSON Schema annotation keywords before invoking the model.
+    Several compatible endpoints reject these JSON Schema annotation keywords
+    before invoking the model. No schema declares them any more: bounded text
+    length is not a compiler constraint, because a provider that never sees the
+    bound cannot satisfy it and a response is not wrong for being verbose.
     """
 
     unsupported = {"maxLength", "uniqueItems"}
@@ -1773,8 +2077,6 @@ def _shape_errors(value: Any, schema: dict[str, Any], path: str) -> list[str]:
         for index, item in enumerate(value):
             errors.extend(_shape_errors(item, schema.get("items", {}), f"{path}[{index}]"))
     if isinstance(value, str):
-        if "maxLength" in schema and len(value) > schema["maxLength"]:
-            errors.append(f"{path} exceeds maximum length {schema['maxLength']}")
         if "enum" in schema and value not in schema["enum"]:
             errors.append(f"{path} must be one of {schema['enum']}")
         if "pattern" in schema and re.fullmatch(schema["pattern"], value) is None:
@@ -2043,6 +2345,8 @@ def _api_template() -> dict[str, Any]:
             "outputs": [],
             "effects": [],
             "obligation_ids": [],
+            "reuse_decision": "CREATE",
+            "reuse_target_module_id": None,
         }],
     }
 

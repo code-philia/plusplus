@@ -17,6 +17,7 @@ from .frontend_thin_design import validate_thin_frontend_design
 from .frontend_thin_ir import (
     FRONTEND_DESIGN_TABLE_SCHEMAS,
     FRONTEND_IR_SCHEMA_VERSION,
+    OPTIONAL_FRONTEND_DESIGN_TABLES,
     schema_shape_errors,
 )
 
@@ -399,7 +400,11 @@ class CompilerArtifactStore:
         tables = {
             table_name: (
                 self.frontend_design_root / f"{table_name}.json",
-                copy.deepcopy(frontend_ir[table_name]),
+                copy.deepcopy(
+                    frontend_ir.get(table_name, [])
+                    if table_name in OPTIONAL_FRONTEND_DESIGN_TABLES
+                    else frontend_ir[table_name]
+                ),
             )
             for table_name in FRONTEND_DESIGN_TABLE_SCHEMAS
         }
@@ -423,12 +428,17 @@ class CompilerArtifactStore:
             table_name: self.frontend_design_root / f"{table_name}.json"
             for table_name in FRONTEND_DESIGN_TABLE_SCHEMAS
         }
-        for path in table_paths.values():
-            if not path.is_file():
+        for table_name, path in table_paths.items():
+            if not path.is_file() and table_name not in OPTIONAL_FRONTEND_DESIGN_TABLES:
                 return None, f"Frontend Design artifact does not exist: {path}"
 
         tables: dict[str, list[Any]] = {}
         for table_name, path in table_paths.items():
+            if not path.is_file():
+                # An optional table predates this compiler version; the owning
+                # pass regenerates it before the design is frozen again.
+                tables[table_name] = []
+                continue
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
