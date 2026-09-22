@@ -99,6 +99,8 @@ Ownership boundary:
 - Do not invent source paths, routes, symbols, module ids, scenario ids, or test layers.
 - Generate exactly one file for every key in layers.
 - Use only the output_file, imports, seams, target_modules, and flow supplied by each layer.
+- `target_modules` is the authoritative module list for a layer. Each entry in the top-level
+  `target_modules` catalog explains how to import and invoke that module; use the exact module_id.
 - For each layer, target at least one exact module listed in that layer's target_modules.
 
 Testing rules:
@@ -1017,6 +1019,7 @@ def _build_context_pack(
         frontend_subgraph=relevant_frontend_subgraph,
         test_obligations=test_obligations,
     )
+    target_module_catalog = _build_target_module_catalog(model_layers)
     seed = {"required": bool(requirement.get("seed_fixtures")), "requirement_id": requirement_id}
     model_context = {
         "requirement_id": requirement_id,
@@ -1024,6 +1027,7 @@ def _build_context_pack(
         "requirement_contract": copy.deepcopy(requirement_contract),
         "database_tables": database_tables,
         "layers": model_layers,
+        "target_modules": target_module_catalog,
         "seed": seed,
     }
     validation_context = {
@@ -1255,6 +1259,44 @@ def _build_model_layers(
     return layers
 
 
+def _build_target_module_catalog(
+    layers: dict[str, dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Expose an explicit invocation catalog for the single-call test generator."""
+
+    catalog: dict[str, list[dict[str, Any]]] = {}
+    for layer, layer_context in layers.items():
+        entries: list[dict[str, Any]] = []
+        required_ids = {
+            str(value)
+            for value in layer_context.get("target_modules", [])
+            if str(value)
+        }
+        for seam in layer_context.get("seams", []):
+            if not isinstance(seam, dict):
+                continue
+            entry = {
+                key: copy.deepcopy(seam[key])
+                for key in (
+                    "module_id",
+                    "kind",
+                    "source_file",
+                    "source",
+                    "import_specifier",
+                    "symbol",
+                    "public_signature",
+                    "route",
+                    "types",
+                )
+                if key in seam and seam[key] not in (None, "", {}, [])
+            }
+            if entry.get("module_id"):
+                entry["required"] = entry["module_id"] in required_ids
+                entries.append(entry)
+        catalog[layer] = entries
+    return catalog
+
+
 def _target_relevant_to_layers(
     target: dict[str, Any], required_layers: list[str]
 ) -> bool:
@@ -1471,6 +1513,7 @@ def _context_audit(
         "requirement_contract_chars": size(payload.get("requirement_contract", {})),
         "database_tables_chars": size(payload.get("database_tables", [])),
         "layers_chars": size(payload.get("layers", {})),
+        "target_modules_chars": size(payload.get("target_modules", {})),
         "seed_chars": size(payload.get("seed", {})),
     }
     return (
