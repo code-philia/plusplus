@@ -123,7 +123,7 @@ class _CompilableCheckpoint:
 class NodeTDDOrchestrator:
     """Own the deterministic RED-to-GREEN lifecycle for exactly one node.
 
-    The implementation model can only propose marker-scoped edits. This class
+    The implementation model can only propose exact file edits. This class
     owns test execution, failure routing, write authorization, budgets, state,
     regression checks, and artifacts. Failed nodes retain their latest
     workspace-typecheck-passing source checkpoint rather than reverting to the
@@ -563,7 +563,7 @@ class NodeTDDOrchestrator:
             writable_targets = [
                 copy.deepcopy(row)
                 for row in resolved.get("owned_targets", [])
-                if isinstance(row, dict) and bool(row.get("editable"))
+                if isinstance(row, dict)
             ]
             if not writable_targets:
                 self._transition(requirement_id, "NO_IMPLEMENTATION_REQUIRED")
@@ -625,7 +625,7 @@ class NodeTDDOrchestrator:
                 phase="AGGREGATE_IMPLEMENTATION",
                 failure_class="IMPLEMENTATION_BEHAVIOR",
                 message=(
-                    "Implement the connected frontend and any other editable modules owned "
+                    "Implement the connected frontend and any other source modules owned "
                     "by this non-leaf requirement."
                 ),
                 stack_frames=[],
@@ -733,7 +733,6 @@ class NodeTDDOrchestrator:
                 row
                 for row in resolved.get("owned_targets", [])
                 if isinstance(row, dict)
-                and bool(row.get("editable"))
                 and str(row.get("kind", "")).upper()
                 in {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
                 and str(row.get("module_id", "")) in remaining
@@ -945,7 +944,6 @@ class NodeTDDOrchestrator:
             row
             for row in resolved.get("owned_targets", [])
             if isinstance(row, dict)
-            and bool(row.get("editable"))
             and str(row.get("kind", "")) in {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
         ]
         if not frontend_targets:
@@ -974,7 +972,6 @@ class NodeTDDOrchestrator:
                 row
                 for row in resolved.get("owned_targets", [])
                 if isinstance(row, dict)
-                and bool(row.get("editable"))
                 and str(row.get("kind", ""))
                 in {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
                 and str(row.get("module_id", "")) in remaining_ids

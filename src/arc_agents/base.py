@@ -59,6 +59,7 @@ class BaseStructuredAgent:
         retries: int = 2,
         trace: Callable[[str], None] | None = None,
         model_log: Callable[[dict[str, Any]], None] | None = None,
+        agent_name: str = "StructuredAgent",
     ) -> None:
         self._model = model
         self._schema_name = schema_name
@@ -67,6 +68,7 @@ class BaseStructuredAgent:
         self._retries = max(0, min(int(retries), 5))
         self._trace = trace
         self._model_log = model_log
+        self._agent_name = str(agent_name or "StructuredAgent")
 
     def invoke(
         self,
@@ -110,6 +112,7 @@ class BaseStructuredAgent:
                 if self._model_log is not None:
                     try:
                         self._model_log({
+                        "agent_name": self._agent_name,
                         "schema_name": self._schema_name,
                         "instructions": self._instructions,
                         "input_payload": payload,
@@ -127,6 +130,7 @@ class BaseStructuredAgent:
                 if self._model_log is not None:
                     try:
                         self._model_log({
+                        "agent_name": self._agent_name,
                         "schema_name": self._schema_name,
                         "instructions": self._instructions,
                         "input_payload": payload,
@@ -180,7 +184,7 @@ class BaseStructuredAgent:
 
     def _emit(self, message: str) -> None:
         if self._trace is not None:
-            self._trace(message)
+            self._trace(f"[{self._agent_name}] {message}")
 
 
 def _payload_value(payload: dict[str, Any], key: str) -> str:

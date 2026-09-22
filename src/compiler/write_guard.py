@@ -81,14 +81,6 @@ class WriteGuard:
             rejected.append("ARC4520 PATCH_INVALID: Code Binding Registry is not ready.")
         if not patch.edits:
             rejected.append("ARC4520 PATCH_INVALID: at least one edit is required.")
-        module_ids = [str(edit.module_id).strip() for edit in patch.edits]
-        duplicate_ids = sorted(
-            module_id for module_id in set(module_ids) if module_ids.count(module_id) > 1
-        )
-        if duplicate_ids:
-            rejected.append(
-                f"ARC4520 PATCH_INVALID: duplicate module edits {duplicate_ids}."
-            )
         if rejected:
             return self._rejected(requirement_id, rejected)
 
@@ -108,44 +100,19 @@ class WriteGuard:
             if isinstance(row, dict) and str(row.get("module_id", ""))
         }
 
-        edits_by_file: dict[str, list[tuple[ProposedEdit, dict[str, Any]]]] = {}
+        edits_by_file: dict[str, list[ProposedEdit]] = {}
         for edit in patch.edits:
-            module_id = str(edit.module_id).strip()
-            binding = bindings.get(module_id)
-            if binding is None:
-                rejected.append(f"ARC4522 PATCH_TARGET_UNKNOWN: {module_id}.")
-                continue
-            if module_id not in writable_ids:
-                rejected.append(
-                    f"ARC4523 PATCH_TARGET_READ_ONLY: {module_id} is not writable for "
-                    f"{requirement_id}."
-                )
-                continue
-            region = binding.get("implementation_region")
-            if not bool(binding.get("editable")) or not isinstance(region, dict):
-                rejected.append(
-                    f"ARC4523 PATCH_TARGET_READ_ONLY: {module_id} has no editable region."
-                )
-                continue
-            relative = _safe_relative_source(str(binding.get("file", "")))
+            relative = _safe_relative_source(str(edit.file))
             if relative is None:
                 rejected.append(
-                    f"ARC4524 PATCH_PATH_INVALID: unsafe source path for {module_id}."
+                    f"ARC4524 PATCH_PATH_INVALID: unsafe source path for {edit.file}."
                 )
                 continue
             replacement_error = _replacement_error(edit.replacement)
             if replacement_error:
-                rejected.append(f"ARC4525 PATCH_CONTENT_INVALID: {module_id}: {replacement_error}")
+                rejected.append(f"ARC4525 PATCH_CONTENT_INVALID: {relative}: {replacement_error}")
                 continue
-            seed_error = self._seed_data_error(
-                requirement_id=requirement_id,
-                binding=binding,
-                replacement=edit.replacement,
-            )
-            if seed_error:
-                rejected.append(f"ARC4553 SEED_DATA_IN_REPOSITORY: {module_id}: {seed_error}")
-                continue
-            edits_by_file.setdefault(relative, []).append((edit, binding))
+            edits_by_file.setdefault(relative, []).append(edit)
         if rejected:
             return self._rejected(requirement_id, rejected)
 
@@ -166,7 +133,7 @@ class WriteGuard:
                 rejected.append(f"ARC4524 PATCH_PATH_INVALID: cannot read {relative}: {exc}")
                 continue
             before_sha256 = hashlib.sha256(original_bytes).hexdigest()
-            expected_hashes = {str(edit.expected_sha256).lower() for edit, _ in file_edits}
+            expected_hashes = {str(edit.expected_sha256).lower() for edit in file_edits}
             if len(expected_hashes) != 1 or not all(
                 re.fullmatch(r"[0-9a-f]{64}", value) for value in expected_hashes
             ):
@@ -182,26 +149,37 @@ class WriteGuard:
 
             updated = original
             file_applied: list[AppliedEdit] = []
-            for edit, binding in file_edits:
-                module_id = str(edit.module_id).strip()
-                region = binding["implementation_region"]
-                start_marker = str(region.get("start_marker", ""))
-                end_marker = str(region.get("end_marker", ""))
-                module_marker = str(binding.get("module_marker", ""))
-                marker_error = _marker_error(
-                    updated,
-                    module_id=module_id,
-                    module_marker=module_marker,
-                    start_marker=start_marker,
-                    end_marker=end_marker,
+            file_bindings = [
+                (module_id, binding)
+                for module_id, binding in bindings.items()
+                if module_id in writable_ids
+                and bool(binding.get("editable"))
+                and _safe_relative_source(str(binding.get("file", ""))) == relative
+            ]
+            if not file_bindings:
+                rejected.append(
+                    f"ARC4523 PATCH_TARGET_READ_ONLY: {relative} is not writable for "
+                    f"{requirement_id}."
                 )
-                if marker_error:
-                    rejected.append(marker_error)
+                continue
+            file_module_ids = [module_id for module_id, _ in file_bindings]
+            for edit in file_edits:
+                module_id = file_module_ids[0]
+                for candidate_module_id, binding in file_bindings:
+                    seed_error = self._seed_data_error(
+                        requirement_id=requirement_id,
+                        binding=binding,
+                        replacement=edit.replacement,
+                    )
+                    if seed_error:
+                        rejected.append(
+                            f"ARC4553 SEED_DATA_IN_REPOSITORY: {candidate_module_id}: {seed_error}"
+                        )
+                        break
+                if rejected:
                     break
                 candidate, exact_error = _replace_exact(
                     updated,
-                    start_marker=start_marker,
-                    end_marker=end_marker,
                     search=edit.search,
                     replacement=edit.replacement,
                 )
@@ -240,7 +218,7 @@ class WriteGuard:
                     updated=updated,
                     before_sha256=before_sha256,
                     after_sha256=after_sha256,
-                    module_ids=[row.module_id for row in file_applied],
+                    module_ids=file_module_ids,
                 )
             )
 
@@ -407,90 +385,32 @@ def _replacement_error(value: str) -> str | None:
         return "replacement contains a null byte."
     if len(value.encode("utf-8")) > 200_000:
         return "replacement exceeds 200000 UTF-8 bytes."
-    if "ARC-IMPLEMENTATION-BEGIN:" in value or "ARC-IMPLEMENTATION-END:" in value:
-        return "replacement must not contain implementation markers."
-    if "@arc-module" in value:
-        return "replacement must not contain a module marker."
     if re.search(r"(?m)^\s*(?:import|export)\s", value):
         return "replacement must not contain a file-level import or export."
     return None
 
 
-def _marker_error(
-    source: str,
-    *,
-    module_id: str,
-    module_marker: str,
-    start_marker: str,
-    end_marker: str,
-) -> str | None:
-    if not start_marker or not end_marker:
-        return f"ARC4527 PATCH_REGION_INVALID: {module_id} has incomplete markers."
-    if module_marker and source.count(module_marker) != 1:
-        return f"ARC4527 PATCH_REGION_INVALID: {module_id} module marker is missing or ambiguous."
-    if source.count(start_marker) != 1 or source.count(end_marker) != 1:
-        return (
-            f"ARC4527 PATCH_REGION_INVALID: {module_id} implementation markers are "
-            "missing or ambiguous."
-        )
-    start = source.index(start_marker)
-    end = source.index(end_marker)
-    start_line_end = source.find("\n", start + len(start_marker))
-    end_line_start = source.rfind("\n", 0, end)
-    if start >= end or start_line_end < 0 or end_line_start < start_line_end:
-        return f"ARC4527 PATCH_REGION_INVALID: {module_id} marker order is invalid."
-    return None
-
-
-def _replace_region(
-    source: str,
-    *,
-    start_marker: str,
-    end_marker: str,
-    replacement: str,
-) -> str:
-    start = source.index(start_marker)
-    end = source.index(end_marker)
-    region_start = source.find("\n", start + len(start_marker)) + 1
-    region_end = source.rfind("\n", 0, end) + 1
-    newline = "\r\n" if "\r\n" in source else "\n"
-    normalized = replacement.replace("\r\n", "\n").replace("\r", "\n")
-    normalized = normalized.strip("\n")
-    body = normalized.replace("\n", newline)
-    if body:
-        body += newline
-    return source[:region_start] + body + source[region_end:]
-
-
 def _replace_exact(
     source: str,
     *,
-    start_marker: str,
-    end_marker: str,
     search: str,
     replacement: str,
 ) -> tuple[str, str | None]:
-    """Replace one exact fragment, constrained to a module implementation region."""
+    """Replace one exact fragment anywhere in an authorized source file."""
 
-    start = source.index(start_marker)
-    end = source.index(end_marker)
-    region_start = source.find("\n", start + len(start_marker)) + 1
-    region_end = source.rfind("\n", 0, end) + 1
-    region = source[region_start:region_end]
     if not isinstance(search, str) or not search.strip():
         return source, "search fragment must be non-empty."
     normalized_search = search.replace("\r\n", "\n").replace("\r", "\n")
-    normalized_region = region.replace("\r\n", "\n").replace("\r", "\n")
-    count = normalized_region.count(normalized_search)
+    normalized_source = source.replace("\r\n", "\n").replace("\r", "\n")
+    count = normalized_source.count(normalized_search)
     if count == 0:
-        return source, "search fragment was not found inside the implementation region."
+        return source, "search fragment was not found in the source file."
     if count != 1:
-        return source, f"search fragment is ambiguous inside the implementation region ({count} matches)."
+        return source, f"search fragment is ambiguous in the source file ({count} matches)."
     normalized_replacement = replacement.replace("\r\n", "\n").replace("\r", "\n")
-    updated_region = normalized_region.replace(normalized_search, normalized_replacement, 1)
+    updated = normalized_source.replace(normalized_search, normalized_replacement, 1)
     newline = "\r\n" if "\r\n" in source else "\n"
-    updated_region = updated_region.replace("\n", newline)
-    return source[:region_start] + updated_region + source[region_end:], None
+    return updated.replace("\n", newline), None
 
 
 def _read_source(path: Path) -> str:

@@ -133,8 +133,6 @@ class CodeBindingLowerer:
             output_type = _type_reference(lowered.get("output_contract_id"), type_by_id)
             symbol = str(lowered.get("function_symbol", "")).strip()
             route = copy.deepcopy(backend_routes.get(module_id)) if kind == "API" else None
-            begin_marker = f"// ARC-IMPLEMENTATION-BEGIN:{module_id}"
-            end_marker = f"// ARC-IMPLEMENTATION-END:{module_id}"
             binding = {
                 "module_id": module_id,
                 "source_ir_id": module_id,
@@ -152,12 +150,6 @@ class CodeBindingLowerer:
                 "public_signature": _backend_signature(kind, symbol, input_type, output_type),
                 "route": _compact_backend_route(route),
                 "callees": _strings(module.get("callees")),
-                "editable": True,
-                "module_marker": f"@arc-module {module_id}",
-                "implementation_region": {
-                    "start_marker": begin_marker,
-                    "end_marker": end_marker,
-                },
             }
             bindings.append(binding)
 
@@ -182,8 +174,6 @@ class CodeBindingLowerer:
                 )
                 symbol = str(location.get("function_symbol", "")).strip()
                 owners = sorted(owner_map.get(ui_id, set()))
-                begin_marker = f"ARC-IMPLEMENTATION-BEGIN:{ui_id}"
-                end_marker = f"ARC-IMPLEMENTATION-END:{ui_id}"
                 relationships = _frontend_relationships(item)
                 bindings.append(
                     {
@@ -210,12 +200,6 @@ class CodeBindingLowerer:
                         ),
                         "route": _compact_frontend_route(frontend_routes.get(ui_id)),
                         "callees": relationships,
-                        "editable": True,
-                        "module_marker": f"@arc-module {ui_id}",
-                        "implementation_region": {
-                            "start_marker": begin_marker,
-                            "end_marker": end_marker,
-                        },
                     }
                 )
 
@@ -268,12 +252,6 @@ class CodeBindingLowerer:
                     ),
                     "route": None,
                     "callees": [],
-                    "editable": True,
-                    "module_marker": f"@arc-module {store_id}",
-                    "implementation_region": {
-                        "start_marker": f"// ARC-IMPLEMENTATION-BEGIN:{store_id}",
-                        "end_marker": f"// ARC-IMPLEMENTATION-END:{store_id}",
-                    },
                     "store_types": store_types,
                     "state_fields": copy.deepcopy(store.get("state", [])),
                     "actions": copy.deepcopy(store.get("actions", [])),
@@ -313,9 +291,6 @@ class CodeBindingLowerer:
                     "public_signature": _client_signature(symbol, input_type, output_type),
                     "route": _compact_backend_route(backend_routes.get(api_id)),
                     "callees": [api_id],
-                    "editable": False,
-                    "module_marker": f"@arc-module {client_id}",
-                    "implementation_region": None,
                 }
             )
 
@@ -828,17 +803,8 @@ def _requirement_targets(
                 "requirement_id": requirement_id,
                 "owned": sorted(owned),
                 "dependencies": sorted(reachable),
-                "writable": sorted(
-                    module_id for module_id in owned if bool(by_id[module_id].get("editable"))
-                ),
-                "read_only": sorted(
-                    set(reachable)
-                    | {
-                        module_id
-                        for module_id in owned
-                        if not bool(by_id[module_id].get("editable"))
-                    }
-                ),
+                "writable": sorted(owned),
+                "read_only": sorted(reachable),
             }
         )
     return rows
@@ -916,20 +882,6 @@ def _validate_sources(
             errors.append(
                 f"ARC4305 CODE_BINDING_SYMBOL_INVALID: {module_id} export {symbol!r} is missing."
             )
-        marker = str(binding.get("module_marker", ""))
-        if marker and marker not in content:
-            errors.append(
-                f"ARC4306 CODE_BINDING_MARKER_INVALID: {module_id} module marker is missing."
-            )
-        region = binding.get("implementation_region")
-        if bool(binding.get("editable")) and isinstance(region, dict):
-            for key in ("start_marker", "end_marker"):
-                value = str(region.get(key, ""))
-                if not value or content.count(value) != 1:
-                    errors.append(
-                        f"ARC4306 CODE_BINDING_MARKER_INVALID: {module_id} {key} must occur once."
-                    )
-
     for binding in type_bindings:
         type_id = str(binding.get("type_id", ""))
         content = source(str(binding.get("file", "")))

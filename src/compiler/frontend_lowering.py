@@ -1004,7 +1004,6 @@ class FrontendSkeletonLowerer:
                 init = f'{{ method: "{method}" }}'
             sources[path] = (
                 "/**\n"
-                + f" * @arc-module API_CLIENT::{api_id}\n"
                 + f" * @arc-requirements {','.join(owner_requirements.get(api_id, []))}\n"
                 + " */\n"
                 + "\n".join(_render_imports(rows))
@@ -1100,7 +1099,6 @@ class FrontendSkeletonLowerer:
             ]
             sources[path] = (
                 "/**\n"
-                + f" * @arc-module {store_id}\n"
                 + f" * @arc-requirements {','.join(owner_requirements.get(store_id, []))}\n"
                 + " */\n"
                 + "\n".join(_render_imports(rows))
@@ -1127,9 +1125,7 @@ class FrontendSkeletonLowerer:
                 + f"createStore<{state_symbol}, {actions_symbol}>(\n"
                 + f"  load{state_symbol}(),\n"
                 + "  ({ getState, setState }) => {\n"
-                + f"    // ARC-IMPLEMENTATION-BEGIN:{store_id}\n"
                 + "\n".join(runtime_lines)
-                + f"\n    // ARC-IMPLEMENTATION-END:{store_id}\n"
                 + "  },\n"
                 + ");\n\n"
                 + f"persistStore({runtime_symbol}, storageKey);\n"
@@ -1307,7 +1303,6 @@ class FrontendSkeletonLowerer:
             module_prefix = (
                 ("\n".join(_render_imports(rows)) + "\n\n" if rows else "")
                 + "/**\n"
-                + f" * @arc-module {ui_id}\n"
                 + f" * @arc-requirements {','.join(owner_requirements.get(ui_id, []))}\n"
                 + " */\n"
                 + f"export interface {props_symbol} {{\n"
@@ -1337,18 +1332,14 @@ class FrontendSkeletonLowerer:
                     + f"  props: {props_symbol};\n"
                     + f"  dependencies: typeof {dependency_symbol};\n"
                     + "}) {\n"
-                    + f"  // ARC-IMPLEMENTATION-BEGIN:{ui_id}\n"
                     + default_body
-                    + f"\n  // ARC-IMPLEMENTATION-END:{ui_id}\n"
                     + "}\n"
                 )
             else:
                 sources[path] = (
                     module_prefix
                     + f"\nexport function {function_symbol}(_props: {props_symbol}) {{\n"
-                    + f"  // ARC-IMPLEMENTATION-BEGIN:{ui_id}\n"
                     + default_body
-                    + f"\n  // ARC-IMPLEMENTATION-END:{ui_id}\n"
                     + "}\n"
                 )
             imports[path] = rows

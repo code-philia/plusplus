@@ -1328,7 +1328,6 @@ def _project_test_target(row: dict[str, Any]) -> dict[str, Any]:
             "route",
             "callees",
             "store_types",
-            "editable",
         )
         if key in row
     }
@@ -1951,7 +1950,6 @@ def _layer_source_cards(
                 "props_type",
                 "route",
                 "callees",
-                "editable",
             )
         }
         source_file = str(target.get("file", ""))

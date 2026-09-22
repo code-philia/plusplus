@@ -106,17 +106,17 @@ Authority and evidence:
 - Failure localization comes from the compiler's failure cluster; the readable
   failure_analysis text contains the model-oriented diagnosis and failed-test
   JSON/pw:api logs when the failing layer is Playwright.
-- Real files, symbols, call edges, editable regions, and complete source text come from
+- Real files, symbols, call edges, and complete source text come from
   `writable_targets` (the module cards). Each card contains `module_id`, `file`, and `source`.
 - Read-only dependency interfaces are included only when needed by design evidence; they must never be edited.
 - Scope warnings are authoritative routing signals. If a warning identifies a
   compiler-owned, frozen-test, contract, infrastructure, or dependency issue,
-  do not guess around it or edit outside the allowed implementation regions.
+  do not guess around it or edit outside the allowed writable files.
 - Each writable_targets entry contains its complete source, so use that field as the source of truth.
   To construct an edit, first select a writable target module card, copy its `file` value exactly
   as the relative output path, then copy an exact old fragment from that card's `source` into
   `search`. Do not infer paths from module_id and do not look for a separate source-file section.
-- The writable surface contains every editable module owned by this requirement. Failure localization never limits
+- The writable surface contains every source module owned by this requirement. Failure localization never limits
   the available source to one hop or one test layer. Diagnose across callers, callees, and sibling modules before
   choosing the smallest coherent patch.
 - For TYPECHECK/TYPE_CONTRACT failures, inspect every source file and line/column
@@ -126,9 +126,8 @@ Authority and evidence:
 Hard scope rules:
 - Return replacements only for files represented by the supplied writable target module cards.
 - Each edit must include a short, exact `search` fragment copied from the supplied source and a
-  `replacement` containing only its replacement text. The search fragment must be unique inside
-  that module's implementation region. Exact matching is the authority; do not add or depend on
-  a module marker in the patch payload.
+  `replacement` containing only its replacement text. The search fragment must be unique in the
+  selected writable source file. Exact file-level matching is the authority.
 - The `edits` list is file-based. A relative file path may appear more than once, and this is
   intentional: use one row per exact search/replacement pair. Never merge unrelated edits merely
   because they share a file. Do not return module_id in the output.
@@ -171,8 +170,9 @@ Implementation rules:
 - The frontend styling system is Tailwind CSS v4 through @tailwindcss/vite. Use static Tailwind utility className
   strings inside the editable function-body region. Do not invent undefined semantic class names, add style tags, or use inline
   style objects when a Tailwind utility can express the design.
-- Page, Layout, and Component markers contain the complete editable function body, so declare local state, effects,
-  handlers, and the JSX return inside that region. Do not emit another function declaration.
+- Preserve the existing function signature and place local state, effects, handlers, and JSX inside
+  the supplied function body. Do not emit another function declaration unless the exact searched
+  fragment already includes that declaration.
 - Page and Component implementation bodies receive compiler-wired references through `_dependencies`. Destructure and
   use its hooks, API clients, and runtime Stores; their business call parameters are intentionally left for this
   implementation step. Do not bypass an available client with ad-hoc fetch calls or create a second persistence store.
@@ -180,7 +180,7 @@ Implementation rules:
   main-interface transition targets the compiler-owned system route `/`; after a successful action, navigate there.
 - Store reload behavior is defined by design_context.frontend.shared_state_policies[].persistence. Keep transient state in MEMORY and
   implement reload-surviving state through the supplied LOCAL_STORAGE runtime Store and storage_key.
-- For a Store target, replace only its runtime implementation region: return the Actions object built from the supplied
+- For a Store target, replace only its runtime implementation body: return the Actions object built from the supplied
   `setState`/`getState` helpers. Preserve its State, Actions, and Value interfaces, the createStore call, and the
   compiler-owned persistence boundary around that region.
 - Translate design_context into an internally coherent visual direction: content hierarchy, page composition,
@@ -227,8 +227,7 @@ Patch scope:
 - For every edit, obtain `file` and the old text from the same `writable_targets` card; never
   invent a path, use a module_id as a path, or rely on a separate `target_modules` list for source.
 - Return an exact `search` fragment copied from the current source and its replacement. The search
-  fragment must be unique inside the module implementation region. Exact matching is sufficient;
-  do not add a module marker solely for routing or patch identity.
+  fragment must be unique in the selected writable source file.
 - Do not change imports, exports, signatures, routes, generated types, tests, or compiler glue.
 - Return exact file-based edits. The same relative file may appear multiple times when it needs
   multiple non-overlapping replacements. Do not emit module_id in the output.
@@ -301,15 +300,21 @@ class ImplementationAgent:
             retries=retries,
             trace=trace,
             model_log=self._write_model_log,
+            agent_name="ImplementationAgent",
         )
 
     def _write_model_log(self, payload: dict[str, Any]) -> None:
         log_root = self.output_root / ".arc" / "model_logs" / "implementation_agent"
         log_root.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        agent_slug = re.sub(
+            r"[^A-Za-z0-9_.-]+",
+            "_",
+            str(payload.get("agent_name", "ImplementationAgent")),
+        )
         requirement_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(payload.get("requirement_id", "unknown")))
         attempt = int(payload.get("attempt", 0) or 0)
-        path = log_root / f"{stamp}-{requirement_id}-attempt-{attempt}.log"
+        path = log_root / f"{agent_slug}-{stamp}-{requirement_id}-attempt-{attempt}.log"
         path.write_text(_format_model_log(payload), encoding="utf-8")
 
 
@@ -529,7 +534,7 @@ class ImplementationAgent:
         writable_cards: list[dict[str, Any]] = []
         for module_id in sorted(relevant_writable):
             binding = bindings.get(module_id)
-            if binding is None or not bool(binding.get("editable")):
+            if binding is None:
                 errors.append(
                     f"ARC4530 IMPLEMENTATION_CONTEXT_INVALID: writable binding unavailable: {module_id}."
                 )
@@ -768,12 +773,14 @@ class FrontendImplementationAgent(ImplementationAgent):
             retries=retries,
             trace=trace,
             model_log=self._write_model_log,
+            agent_name="FrontendImplementationAgent",
         )
 
 
 def _format_model_log(payload: dict[str, Any]) -> str:
     sections = [
         "ARC MODEL INVOCATION",
+        f"agent_name: {payload.get('agent_name', 'StructuredAgent')}",
         f"schema_name: {payload.get('schema_name', '')}",
         f"requirement_id: {payload.get('requirement_id', '')}",
         f"implementation_phase: {_model_log_phase(payload)}",
@@ -855,23 +862,11 @@ def _validate_decision(
             errors.append(
                 f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} search fragment is too large."
             )
-        elif len(replacement.encode("utf-8")) > 200_000:
+        elif isinstance(replacement, str) and len(replacement.encode("utf-8")) > 200_000:
             errors.append(
                 f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} replacement is too large."
             )
-        elif any(
-            token in replacement
-            for token in (
-                "ARC-IMPLEMENTATION-BEGIN:",
-                "ARC-IMPLEMENTATION-END:",
-                "@arc-module",
-                "```",
-            )
-        ):
-            errors.append(
-                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} contains forbidden framing."
-            )
-        elif re.search(r"(?m)^\s*(?:import|export)\s", replacement):
+        if isinstance(replacement, str) and re.search(r"(?m)^\s*(?:import|export)\s", replacement):
             errors.append(
                 f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} attempts to change "
                 "a file-level import or export."
@@ -1175,7 +1170,7 @@ def _scope_warnings(
     *,
     read_only_ids: set[str],
 ) -> list[str]:
-    """Make non-editable failure causes explicit in the agent's task message."""
+    """Make non-writable failure causes explicit in the agent's task message."""
 
     warnings: list[str] = []
     classes = {str(report.get("failure_class", "")) for report in reports}
@@ -1203,17 +1198,16 @@ def _scope_warnings(
         "generated glue",
         "compiler-owned",
         "import/export",
-        "marker",
         "route is compiler-owned",
     )
     if any(token in diagnostic_text for token in compiler_tokens):
         warnings.append(
             "COMPILER_OWNED_WARNING: the diagnostic references compiler-owned structure "
-            "(tests, imports/exports, routes, generated glue, config, or markers); keep it read-only."
+            "(tests, imports/exports, routes, generated glue, or config); keep it read-only."
         )
     warnings.append(
         "EDIT_SCOPE_WARNING: every supplied writable source file is available for diagnosis, "
-        "but edits must use exact fragments inside writable marker-scoped implementation regions."
+        "and edits must use exact unique fragments from those files."
     )
     return list(dict.fromkeys(warnings))
 
@@ -1233,7 +1227,6 @@ def _source_card(binding: dict[str, Any], *, digest: str | None) -> dict[str, An
             "route",
             "callees",
             "editable",
-            "implementation_region",
         )
     }
     if digest is not None:

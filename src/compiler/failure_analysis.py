@@ -982,8 +982,6 @@ def _target_card(binding: dict[str, Any]) -> dict[str, Any]:
             "kind",
             "file",
             "symbol",
-            "editable",
-            "implementation_region",
         )
     }
 
