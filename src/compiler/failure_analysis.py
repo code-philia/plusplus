@@ -9,6 +9,7 @@ from typing import Any
 
 from .code_binding import CODE_BINDING_READY, CodeTargetResolver
 from .test_generation import TESTS_FROZEN
+from .model_client import StructuredModel, describe_model_error
 from .test_runner import TestCommandResult, TestRunResult
 
 
@@ -22,6 +23,30 @@ FAILURE_CLASSES = (
     "TEST_OR_CONTRACT_INCONSISTENT",
     "DEFERRED_DEPENDENCY",
 )
+
+
+FAILURE_SYNTHESIS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["analysis"],
+    "properties": {
+        "analysis": {
+            "type": "string",
+            "minLength": 1,
+        }
+    },
+}
+
+
+FAILURE_SYNTHESIS_INSTRUCTIONS = """You are ARC's test-failure analyst.
+Read the failed-test sections extracted from Playwright's JSON reporter and pw:api output. Produce a concise but
+information-preserving plain-text analysis for an implementation agent. For every FAILED TEST section, identify it by
+test_file and title, then state the exact URL/route, locator or assertion,
+expected value, received value, browser/runtime error, and the most relevant source location whenever those facts are
+present. Separate observed facts from hypotheses. Do not invent missing facts, do not propose code, and do not omit a
+useful error detail merely because it is repetitive. The failed-test sections remain attached after your analysis.
+Return exactly one JSON object with one non-empty `analysis` string and no prose outside the JSON object.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +86,7 @@ class FailureAnalysisResult:
     requirement_id: str
     reports: list[TestFailureReport]
     errors: list[str] = field(default_factory=list)
+    agent_context: str = ""
     schema_version: int = FAILURE_ANALYSIS_SCHEMA_VERSION
 
     @property
@@ -74,8 +100,9 @@ class FailureAnalysisResult:
 class FailureAnalyzer:
     """Convert runner output into requirement- and binding-aware failure reports."""
 
-    def __init__(self, output_root: Path) -> None:
+    def __init__(self, output_root: Path, model: StructuredModel | None = None) -> None:
         self.output_root = output_root.expanduser().resolve()
+        self._model = model
 
     def classify(
         self,
@@ -158,7 +185,218 @@ class FailureAnalyzer:
                     changed_files=changed_files or [],
                 )
             )
-        return FailureAnalysisResult(requirement_id=requirement_id, reports=reports)
+        return FailureAnalysisResult(
+            requirement_id=requirement_id,
+            reports=reports,
+            agent_context=self._agent_context(
+                test_run,
+                reports,
+                test_rows=test_rows,
+                binding_by_id=binding_by_id,
+            ),
+        )
+
+    def _agent_context(
+        self,
+        test_run: TestRunResult,
+        reports: list[TestFailureReport],
+        *,
+        test_rows: list[dict[str, Any]],
+        binding_by_id: dict[str, dict[str, Any]],
+    ) -> str:
+        """Turn failed Playwright tests into one readable repair context.
+
+        Routing still uses the deterministic reports above. The implementation
+        model receives only failed-test sections instead of nested report objects.
+        """
+
+        e2e_commands = [
+            command
+            for command in test_run.commands
+            if str(command.layer or "").upper() == "E2E"
+            and command.status != "PASSED"
+        ]
+        if not e2e_commands:
+            return "\n\n".join(
+                "FAILURE ANALYSIS\n"
+                f"failure_class={report.failure_class}\n"
+                f"phase={report.phase}\n"
+                f"message={report.message}\n"
+                f"target_modules={', '.join(report.target_modules) or '(not localized)'}\n"
+                f"details={report.diagnostic_output or '(none)'}"
+                for report in reports
+            )
+        raw_parts: list[str] = []
+        pw_api_parts: list[str] = []
+        for command in e2e_commands:
+            raw_stdout = command.raw_stdout or command.stdout
+            raw_stderr = command.raw_stderr or command.stderr
+            if raw_stdout:
+                raw_parts.append(raw_stdout)
+            if raw_stderr:
+                raw_parts.append(raw_stderr)
+                pw_api_parts.extend(
+                    line for line in raw_stderr.splitlines() if "pw:api" in line
+                )
+        raw_report = "\n".join(raw_parts).strip()
+        failed_tests = _playwright_failed_tests(raw_report)
+        failed_sections = self._failed_test_sections(
+            failed_tests=failed_tests,
+            reports=reports,
+            test_rows=test_rows,
+            binding_by_id=binding_by_id,
+            pw_api_lines=pw_api_parts,
+        )
+        failure_log = "\n\n".join(failed_sections).strip()
+        if not failure_log:
+            failure_log = _fallback_e2e_failure_log(
+                reports=reports,
+                commands=e2e_commands,
+                raw_report=raw_report,
+            )
+        routing = "\n".join(
+            " | ".join(
+                [
+                    f"failure_class={report.failure_class}",
+                    f"phase={report.phase}",
+                    f"target_modules={', '.join(report.target_modules) or '(not localized)'}",
+                    f"test_ids={', '.join(report.test_ids) or '(not matched)'}",
+                ]
+            )
+            for report in reports
+        )
+        synthesis = ""
+        if self._model is not None:
+            try:
+                decision = self._model.generate_json(
+                    schema_name="arc_playwright_failure_analysis",
+                    instructions=FAILURE_SYNTHESIS_INSTRUCTIONS,
+                    input_payload={
+                        "requirement_id": test_run.requirement_id,
+                        "compiler_routing": routing,
+                        "failed_playwright_tests": failure_log,
+                    },
+                    output_schema=FAILURE_SYNTHESIS_SCHEMA,
+                )
+                synthesis = str(decision.get("analysis", "")).strip()
+            except Exception as exc:
+                synthesis = (
+                    "The failure-analysis model was unavailable; use the failed-test logs below. "
+                    f"Model error: {describe_model_error(exc)}"
+                )
+        else:
+            synthesis = "No failure-analysis model was configured; use the failed-test logs below."
+        annotated_failure_log = failure_log
+        if failed_sections and synthesis:
+            annotated_failure_log = "\n\n".join(
+                f"{section}\n"
+                "failure_analysis:\n"
+                f"{synthesis}"
+                for section in failed_sections
+            )
+        return (
+            "PLAYWRIGHT FAILURE ANALYSIS\n"
+            f"Requirement: {test_run.requirement_id}\n\n"
+            "Model analysis:\n"
+            f"{synthesis}\n\n"
+            "Compiler routing hints (not additional test output):\n"
+            f"{routing}\n\n"
+            "Failed Playwright test logs (JSON reporter + pw:api):\n"
+            f"{annotated_failure_log}"
+        )
+
+    def _failed_test_sections(
+        self,
+        *,
+        failed_tests: list[dict[str, Any]],
+        reports: list[TestFailureReport],
+        test_rows: list[dict[str, Any]],
+        binding_by_id: dict[str, dict[str, Any]],
+        pw_api_lines: list[str],
+    ) -> list[str]:
+        sections: list[str] = []
+        for failed in failed_tests:
+            raw_test_file = str(failed.get("file", ""))
+            test_file = self._workspace_file(raw_test_file) or _normalize_relative(
+                raw_test_file
+            )
+            title = str(failed.get("title", "")).strip() or "(untitled test)"
+            matching_rows = [
+                row
+                for row in test_rows
+                if _normalize_relative(str(row.get("test_file", ""))) == test_file
+                and str(row.get("title", "")).strip() == title
+            ]
+            if not matching_rows:
+                matching_rows = [
+                    row
+                    for row in test_rows
+                    if _normalize_relative(str(row.get("test_file", ""))) == test_file
+                    and str(row.get("title", "")).strip()
+                    and str(row.get("title", "")).strip() in title
+                ]
+            module_ids = sorted(
+                {
+                    str(module)
+                    for row in matching_rows
+                    for module in row.get("target_modules", [])
+                    if str(module)
+                }
+            )
+            source_files = sorted(
+                {
+                    str(binding_by_id[module].get("file", ""))
+                    for module in module_ids
+                    if module in binding_by_id and str(binding_by_id[module].get("file", ""))
+                }
+            )
+            test_id = ", ".join(
+                sorted({str(row.get("test_id", "")) for row in matching_rows if row.get("test_id")})
+            ) or "(unmatched manifest test)"
+            error_text = str(failed.get("error", "")).strip() or "(no structured error)"
+            call_log = str(failed.get("call_log", "")).strip() or "(no Playwright call log)"
+            stack = str(failed.get("stack", "")).strip() or "(no stack)"
+            source_context = self._source_context(
+                source_files=source_files,
+                reports=reports,
+                module_ids=set(module_ids),
+            )
+            sections.append(
+                f"FAILED TEST: {title}\n"
+                f"test_id: {test_id}\n"
+                f"test_file: {test_file or '(unknown)'}\n"
+                f"test_module: {', '.join(module_ids) or '(not localized)'}\n"
+                f"implementation_source_files: {', '.join(source_files) or '(not localized)'}\n"
+                f"failure_analysis_input_error: {error_text}\n"
+                f"key_failure_log:\n{call_log}\n"
+                f"pw:api_stop_trace:\n{chr(10).join(pw_api_lines) or '(no pw:api lines captured)'}\n"
+                f"stack:\n{stack}\n"
+                f"relevant_source:\n{source_context}"
+            )
+        return sections
+
+    def _source_context(
+        self,
+        *,
+        source_files: list[str],
+        reports: list[TestFailureReport],
+        module_ids: set[str],
+    ) -> str:
+        frames = [
+            frame
+            for report in reports
+            if module_ids.intersection(report.target_modules)
+            for frame in report.stack_frames
+        ]
+        for relative in source_files:
+            line = next(
+                (frame.line for frame in frames if _normalize_relative(frame.file) == _normalize_relative(relative)),
+                None,
+            )
+            excerpt = _read_source_excerpt(self.output_root, relative, line=line)
+            if excerpt:
+                return f"// {relative}\n{excerpt}"
+        return "(source excerpt unavailable; consult writable_source_files in stable context)"
 
     def _report_for_command(
         self,
@@ -401,6 +639,148 @@ def _matching_tests(
         and str(row.get("title", "")).strip() in output
     ]
     return title_matches or candidates
+
+
+def _playwright_failed_tests(raw_report: str) -> list[dict[str, Any]]:
+    """Extract failed specs from Playwright's JSON reporter output."""
+
+    payload = _decode_playwright_json(raw_report)
+    if not payload:
+        return []
+    failed: list[dict[str, Any]] = []
+
+    def walk_suite(suite: dict[str, Any], inherited_file: str = "") -> None:
+        suite_file = str(suite.get("file") or inherited_file)
+        for spec in suite.get("specs", []):
+            if not isinstance(spec, dict):
+                continue
+            location = spec.get("location")
+            location_file = location.get("file", "") if isinstance(location, dict) else ""
+            spec_file = str(spec.get("file") or location_file or suite_file)
+            results: list[dict[str, Any]] = []
+            for test in spec.get("tests", []):
+                if not isinstance(test, dict):
+                    continue
+                for result in test.get("results", []):
+                    if isinstance(result, dict):
+                        results.append(result)
+            failed_results = [
+                result
+                for result in results
+                if str(result.get("status", "")).lower()
+                not in {"passed", "skipped", "pending"}
+            ]
+            if not failed_results and spec.get("ok") is not False:
+                continue
+            result = failed_results[-1] if failed_results else (results[-1] if results else {})
+            error = _playwright_error(result.get("error"))
+            errors = [
+                _playwright_error(value)
+                for value in result.get("errors", [])
+                if _playwright_error(value)
+            ]
+            if errors and error:
+                error = "\n".join([error, *errors])
+            elif errors:
+                error = "\n".join(errors)
+            failed.append(
+                {
+                    "file": spec_file,
+                    "title": str(spec.get("title", "")),
+                    "error": error,
+                    "call_log": _extract_call_log(error),
+                    "stack": _extract_stack(error),
+                    "status": str(result.get("status", "failed")),
+                }
+            )
+        for child in suite.get("suites", []):
+            if isinstance(child, dict):
+                walk_suite(child, suite_file)
+
+    for suite in payload.get("suites", []):
+        if isinstance(suite, dict):
+            walk_suite(suite)
+    return failed
+
+
+def _decode_playwright_json(raw_report: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(raw_report):
+        if char != "{":
+            continue
+        try:
+            candidate, _ = decoder.raw_decode(raw_report[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and isinstance(candidate.get("suites"), list):
+            return candidate
+    return None
+
+
+def _playwright_error(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return str(value).strip() if value is not None else ""
+    message = str(value.get("message", "")).strip()
+    stack = str(value.get("stack", "")).strip()
+    if stack and stack != message:
+        return "\n".join(value for value in (message, stack) if value)
+    return message or stack
+
+
+def _extract_call_log(error: str) -> str:
+    marker = "Call log:"
+    if marker in error:
+        return error[error.index(marker) :].strip()
+    return error
+
+
+def _extract_stack(error: str) -> str:
+    marker = "Call log:"
+    if marker in error:
+        return error[: error.index(marker)].strip()
+    return error
+
+
+def _fallback_e2e_failure_log(
+    *,
+    reports: list[TestFailureReport],
+    commands: list[TestCommandResult],
+    raw_report: str,
+) -> str:
+    command_text = "\n".join(
+        " ".join(command.command) for command in commands if command.command
+    )
+    return (
+        "FAILED TEST: (Playwright JSON could not be decoded)\n"
+        f"command: {command_text or '(unknown)'}\n"
+        f"failure_class: {', '.join(sorted({report.failure_class for report in reports}))}\n"
+        "key_failure_log:\n"
+        f"{raw_report or '(Playwright produced no report text.)'}"
+    )
+
+
+def _read_source_excerpt(root: Path, relative: str, *, line: int | None) -> str:
+    normalized = _normalize_relative(relative)
+    if not normalized:
+        return ""
+    path = (root / normalized).resolve()
+    try:
+        path.relative_to(root.resolve())
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return ""
+    if not lines:
+        return ""
+    if line is None or line < 1:
+        start, end = 0, min(len(lines), 40)
+    else:
+        start = max(0, line - 8)
+        end = min(len(lines), line + 8)
+    return "\n".join(
+        f"{index + 1:04d}: {lines[index]}" for index in range(start, end)
+    )
 
 
 def _failure_phase(command: TestCommandResult, output: str) -> str:

@@ -251,7 +251,6 @@ def test_workspace_spec(
                 "  expect: { timeout: 10_000 },\n"
                 "  use: {\n"
                 f'    baseURL: process.env.ARC_TEST_BASE_URL ?? "http://127.0.0.1:{port}",\n'
-                '    trace: "retain-on-failure",\n'
                 "  },\n"
                 '  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],\n'
                 "  webServer: {\n"

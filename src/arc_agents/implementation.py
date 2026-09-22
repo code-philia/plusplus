@@ -93,7 +93,9 @@ Context layout:
 Authority and evidence:
 - Required behavior comes from requirement, scenarios, requirement_contract, and frozen_tests when present.
 - Module behavior and reference-derived frontend layout/style evidence may come from design_context.
-- Failure localization comes from failure_reports.
+- Failure localization comes from the compiler's failure cluster; the readable
+  failure_analysis text contains the model-oriented diagnosis and complete raw
+  E2E report when the failing layer is Playwright.
 - Real files, symbols, call edges, and editable regions come from writable_targets.
 - Read-only dependencies are context only and must never be edited.
 - Source files are supplied in full so you can understand existing imports and public surfaces.
@@ -185,6 +187,7 @@ class ImplementationRequest:
     mode: str = "TDD"
     design_context: dict[str, Any] | None = None
     previous_patch_metadata: dict[str, Any] | None = None
+    failure_analysis_text: str = ""
 
 
 @dataclass(slots=True)
@@ -529,10 +532,6 @@ class ImplementationAgent:
             target_ids=relevant_writable | relevant_read_only,
             full_visual_analysis=bootstrap_failure,
         )
-        projected_reports = _project_failure_reports(
-            reports,
-            target_ids=relevant_writable | relevant_read_only,
-        )
         # Stable segment: everything that stays byte-identical across the iterations
         # of one node, ordered cheapest-to-largest so the provider prefix cache keeps
         # as long a common prefix as possible. Source files come last because they are
@@ -570,7 +569,8 @@ class ImplementationAgent:
             "iteration": request.iteration,
             "requirement": request.requirement,
             "requirement_contract": request.requirement_contract,
-            "failure_reports": projected_reports,
+            "failure_analysis": request.failure_analysis_text
+            or _fallback_failure_analysis(reports),
             "frozen_tests": frozen_tests,
             "previous_patch_metadata": request.previous_patch_metadata,
             "allowed_writable_module_ids": sorted(source_hashes),
@@ -988,44 +988,23 @@ def _frontend_api_dependency_ids(
     return candidates & allowed_ids
 
 
-def _project_failure_reports(
-    reports: list[dict[str, Any]],
-    *,
-    target_ids: set[str],
-) -> list[dict[str, Any]]:
-    """Remove duplicated target cards after they have been used for localization."""
+def _fallback_failure_analysis(reports: list[dict[str, Any]]) -> str:
+    """Keep a plain-text repair brief when no synthesized analysis is present."""
 
-    projected: list[dict[str, Any]] = []
+    entries: list[str] = []
     for report in reports:
-        row = {
-            key: copy.deepcopy(value)
-            for key, value in report.items()
-            if key not in {"writable_targets", "read_only_dependencies"}
-        }
-        if isinstance(row.get("target_modules"), list):
-            row["target_modules"] = [
-                str(value)
-                for value in row["target_modules"]
-                if str(value) in target_ids
-            ]
-        row["writable_target_ids"] = sorted(
-            {
-                str(target.get("module_id", ""))
-                for target in report.get("writable_targets", [])
-                if isinstance(target, dict)
-                and str(target.get("module_id", "")) in target_ids
-            }
+        target_modules = report.get("target_modules", [])
+        if not isinstance(target_modules, list):
+            target_modules = []
+        entries.append(
+            "FAILURE ANALYSIS\n"
+            f"failure_class={report.get('failure_class', '')}\n"
+            f"phase={report.get('phase', '')}\n"
+            f"message={report.get('message', '')}\n"
+            f"target_modules={', '.join(str(value) for value in target_modules) or '(not localized)'}\n"
+            f"details={report.get('diagnostic_output') or '(none)'}"
         )
-        row["read_only_dependency_ids"] = sorted(
-            {
-                str(target.get("module_id", ""))
-                for target in report.get("read_only_dependencies", [])
-                if isinstance(target, dict)
-                and str(target.get("module_id", "")) in target_ids
-            }
-        )
-        projected.append(row)
-    return projected
+    return "\n\n".join(entries)
 
 
 def _source_card(binding: dict[str, Any], *, digest: str | None) -> dict[str, Any]:

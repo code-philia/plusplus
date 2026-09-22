@@ -168,7 +168,10 @@ class NodeTDDOrchestrator:
             self.artifact_store,
         )
         self.test_runner = test_runner or TestRunner(self.output_root)
-        self.failure_analyzer = failure_analyzer or FailureAnalyzer(self.output_root)
+        self.failure_analyzer = failure_analyzer or FailureAnalyzer(
+            self.output_root,
+            model=model,
+        )
         self.implementation_agent = implementation_agent or ImplementationAgent(
             model,
             self.output_root,
@@ -264,6 +267,7 @@ class NodeTDDOrchestrator:
                 changed_files,
             )
             result.infrastructure_retries += baseline.infrastructure_retries
+            failure_analysis_text = baseline.analysis.agent_context
             if baseline.analysis.errors:
                 return self._finish(result, "INTERNAL_ERROR", baseline.analysis.errors)
             if baseline.test_run.ok:
@@ -317,6 +321,7 @@ class NodeTDDOrchestrator:
                         test_manifest=self.test_manifest or {},
                         code_binding_registry=self.code_binding_registry,
                         failure_reports=tuple(cluster),
+                        failure_analysis_text=failure_analysis_text,
                         iteration=patch_iteration,
                         design_context=self._design_context(requirement_id),
                         previous_patch_metadata=previous_patch_metadata,
@@ -393,6 +398,7 @@ class NodeTDDOrchestrator:
                         changed_files=changed_files,
                     )
                 reports = verification.analysis.reports
+                failure_analysis_text = verification.analysis.agent_context
                 fingerprint = _selected_cluster(reports)[0].failure_fingerprint
                 if previous_patch_metadata is not None:
                     previous_patch_metadata["failure_fingerprint_after"] = fingerprint

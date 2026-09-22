@@ -46,6 +46,10 @@ class TestCommandResult:
     error: str | None = None
     timed_out: bool = False
     stub_hits: list[str] = field(default_factory=list)
+    # Keep the complete process streams for the E2E report synthesizer. The
+    # bounded stdout/stderr fields remain suitable for ordinary diagnostics.
+    raw_stdout: str = ""
+    raw_stderr: str = ""
 
 
 @dataclass(slots=True)
@@ -377,11 +381,21 @@ class TestRunner:
             )
         actual_command = [executable, *command[1:]]
         self._reset_stub_log()
+        process_environment = dict(self.environment)
+        if str(layer or "").upper() == "E2E":
+            debug_channels = [
+                value.strip()
+                for value in str(process_environment.get("DEBUG", "")).split(",")
+                if value.strip()
+            ]
+            if "pw:api" not in debug_channels:
+                debug_channels.append("pw:api")
+            process_environment["DEBUG"] = ",".join(debug_channels)
         try:
             process = subprocess.Popen(
                 actual_command,
                 cwd=str(self.output_root),
-                env=self.environment,
+                env=process_environment,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -452,6 +466,8 @@ class TestRunner:
                 ),
                 timed_out=True,
                 stub_hits=self._collect_stub_hits(),
+                raw_stdout=(stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else stdout or ""),
+                raw_stderr=(stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else stderr or ""),
             )
         except OSError as exc:
             terminate_process_tree(process)
@@ -489,6 +505,8 @@ class TestRunner:
             stdout=_bounded_output(stdout),
             stderr=_bounded_output(stderr),
             stub_hits=stub_hits,
+            raw_stdout=stdout or "",
+            raw_stderr=stderr or "",
         )
 
     def _reset_stub_log(self) -> None:
@@ -582,6 +600,7 @@ def _execution_command(layer: str, test_files: list[str]) -> list[str]:
         "--config",
         "playwright.config.ts",
         "--project=chromium",
+        "--reporter=json",
         *workspace_files,
     ]
 
