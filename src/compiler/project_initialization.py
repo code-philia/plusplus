@@ -247,7 +247,7 @@ def test_workspace_spec(
                 '  testDir: "./e2e",\n'
                 "  fullyParallel: false,\n"
                 "  workers: 1,\n"
-                "  timeout: 30_000,\n"
+                "  timeout: 10_000,\n"
                 "  expect: { timeout: 10_000 },\n"
                 "  use: {\n"
                 f'    baseURL: process.env.ARC_TEST_BASE_URL ?? "http://127.0.0.1:{port}",\n'
