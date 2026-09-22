@@ -9,7 +9,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from arc_agents import ImplementationAgent, ImplementationRequest, JsonModel
+from arc_agents import (
+    FrontendImplementationAgent,
+    ImplementationAgent,
+    ImplementationRequest,
+    JsonModel,
+)
 from arcbench_agent_runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 
@@ -144,6 +149,7 @@ class NodeTDDOrchestrator:
         test_runner: TestRunner | None = None,
         failure_analyzer: FailureAnalyzer | None = None,
         implementation_agent: ImplementationAgent | None = None,
+        frontend_implementation_agent: FrontendImplementationAgent | None = None,
         write_guard: WriteGuard | None = None,
         resume: bool = False,
     ) -> None:
@@ -177,6 +183,14 @@ class NodeTDDOrchestrator:
             self.output_root,
             trace=self._trace_implementation,
         )
+        self.frontend_implementation_agent = (
+            frontend_implementation_agent
+            or FrontendImplementationAgent(
+                model,
+                self.output_root,
+                trace=self._trace_implementation,
+            )
+        )
         self.write_guard = write_guard or WriteGuard(
             self.output_root,
             requirement_ir=self.requirement_ir,
@@ -192,6 +206,22 @@ class NodeTDDOrchestrator:
 
     def _trace_implementation(self, message: str) -> None:
         self._log.info(message)
+
+    def _implementation_agent_for_reports(
+        self,
+        reports: list[TestFailureReport],
+    ) -> ImplementationAgent:
+        frontend_ids = {
+            str(row.get("module_id", ""))
+            for report in reports
+            for row in report.writable_targets
+            if isinstance(row, dict)
+            and str(row.get("kind", "")).upper()
+            in {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
+        }
+        if frontend_ids:
+            return self.frontend_implementation_agent
+        return self.implementation_agent
 
     def run_node(self, requirement_id: str) -> NodeTDDResult:
         """Generate this node's tests and drive only this node to acceptance."""
@@ -255,6 +285,10 @@ class NodeTDDOrchestrator:
                 previous_patch_metadata = frontend_patch_metadata
                 self._transition(requirement_id, "FRONTEND_IMPLEMENTED")
 
+            self._log.info(
+                f"IMPLEMENTATION_PHASE requirement={requirement_id} phase=BASELINE_TEST"
+            )
+
             baseline = self._run_and_analyze(
                 requirement_id,
                 iteration=0,
@@ -312,8 +346,13 @@ class NodeTDDOrchestrator:
                 result.iterations = functional_iterations
                 result.visual_iterations = visual_iterations
                 self._transition(requirement_id, "IMPLEMENTING")
+                self._log.info(
+                    f"IMPLEMENTATION_PHASE requirement={requirement_id} phase=TDD_REPAIR "
+                    f"iteration={patch_iteration}"
+                )
 
-                implementation = self.implementation_agent.implement(
+                implementation_agent = self._implementation_agent_for_reports(cluster)
+                implementation = implementation_agent.implement(
                     ImplementationRequest(
                         requirement_id=requirement_id,
                         requirement=self.requirement_ir["nodes"][requirement_id],
@@ -712,7 +751,10 @@ class NodeTDDOrchestrator:
             ),
         )
         self._transition(requirement_id, "FRONTEND_IMPLEMENTING")
-        implementation = self.implementation_agent.implement(
+        self._log.info(
+            f"IMPLEMENTATION_PHASE requirement={requirement_id} phase=FRONTEND_BOOTSTRAP"
+        )
+        implementation = self.frontend_implementation_agent.implement(
             ImplementationRequest(
                 requirement_id=requirement_id,
                 requirement=self.requirement_ir["nodes"][requirement_id],
@@ -757,7 +799,10 @@ class NodeTDDOrchestrator:
                 TestSelection(
                     requirement_id=requirement_id,
                     include_typecheck=include_typecheck,
-                    stop_on_failure=True,
+                    # Collect every test layer in one run so FailureAnalyzer can
+                    # compare all observed failures and form a fingerprint cluster.
+                    # TestRunner still stops immediately on a failed typecheck.
+                    stop_on_failure=False,
                 ),
                 test_manifest=self.test_manifest,
                 environment_manifest=self.environment_manifest,

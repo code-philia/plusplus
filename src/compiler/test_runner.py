@@ -74,7 +74,11 @@ class TestRunResult:
 
 
 class TestRunner:
-    """Run an exact, integrity-checked test selection from the frozen manifest."""
+    """Run an exact, integrity-checked test selection from the frozen manifest.
+
+    Business-test failures may be collected across layers; typecheck failures
+    still stop execution because later diagnostics would be misleading.
+    """
 
     def __init__(
         self,
@@ -288,7 +292,9 @@ class TestRunner:
                 timeout=self._timeouts["TYPECHECK"],
             )
             result.commands.append(typecheck)
-            if typecheck.status != "PASSED" and selection.stop_on_failure:
+            # A failed typecheck invalidates subsequent test results; do not
+            # execute them merely because business-test collection is enabled.
+            if typecheck.status != "PASSED":
                 return self._finish(result, started)
 
         for layer in TEST_LAYERS:
