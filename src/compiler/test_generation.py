@@ -89,11 +89,13 @@ TEST_GENERATION_INSTRUCTIONS = """You are the Stage 4 Test Generator for one ato
 Generate a small set of executable RED tests from the supplied Requirement Context Pack.
 
 Ownership boundary:
-- Expected behavior and assertions come only from behavior.scenarios, behavior.inputs, behavior.outputs,
-  behavior.validation_rules, behavior.observable_effects, and behavior.examples.
+- Expected behavior and assertions come only from requirement and requirement_contract.
+- requirement contains the original requirement name, description, scenarios, examples, and setup flags.
+- requirement_contract contains the contract spec, inputs, outputs, effects, and obligations.
 - Invocation mechanisms, imports, symbols, routes, and types come only from the layer entry in layers.
-- Database shape comes from database_tables.source; semantic business rules still come from behavior.
-- Never infer behavior from an implementation body. No implementation body is supplied.
+- Database shape comes from database_tables.source; semantic business rules still come from requirement_contract.
+- Source text is supplied for each relevant seam because this is a single LLM call with no filesystem access.
+  Use it to verify exports, imports, and callable shapes, but do not copy implementation behavior into assertions.
 - Do not invent source paths, routes, symbols, module ids, scenario ids, or test layers.
 - Generate exactly one file for every key in layers.
 - Use only the output_file, imports, seams, target_modules, and flow supplied by each layer.
@@ -884,7 +886,9 @@ def _build_context_pack(
     test_obligations: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     contracts = {
-        str(item.get("id", "")): copy.deepcopy(item.get("contract", {}))
+        str(item.get("id", item.get("requirement_id", ""))): copy.deepcopy(
+            item.get("contract", item)
+        )
         for item in design_ir.get("requirements", [])
         if isinstance(item, dict)
     }
@@ -928,7 +932,7 @@ def _build_context_pack(
     allowed_imports: dict[str, list[dict[str, Any]]] = {}
     for layer in required_layers:
         test_file = output_files[layer]
-        cards = _layer_source_cards(layer, target_rows, test_file)
+        cards = _layer_source_cards(layer, target_rows, test_file, output_root)
         public_seams[layer] = cards
         imports = [
             {
@@ -985,7 +989,19 @@ def _build_context_pack(
         allowed_imports[layer] = imports
 
     requirement_contract = contracts.get(requirement_id, {})
-    behavior = _project_test_behavior(requirement, requirement_contract)
+    model_requirement = {
+        key: copy.deepcopy(requirement.get(key))
+        for key in (
+            "id",
+            "name",
+            "description",
+            "scenarios",
+            "examples",
+            "dependencies",
+            "seed_fixtures",
+        )
+        if key in requirement
+    }
     database_tables = _database_source_cards(
         output_root=output_root,
         database_schema=database_schema,
@@ -1004,7 +1020,8 @@ def _build_context_pack(
     seed = {"required": bool(requirement.get("seed_fixtures")), "requirement_id": requirement_id}
     model_context = {
         "requirement_id": requirement_id,
-        "behavior": behavior,
+        "requirement": model_requirement,
+        "requirement_contract": copy.deepcopy(requirement_contract),
         "database_tables": database_tables,
         "layers": model_layers,
         "seed": seed,
@@ -1030,45 +1047,6 @@ def _build_context_pack(
         "target_modules": sorted({str(row.get("module_id", "")) for row in target_rows if str(row.get("module_id", ""))}),
     }
     return model_context, validation_context
-
-
-def _project_test_behavior(
-    requirement: dict[str, Any], contract: dict[str, Any]
-) -> dict[str, Any]:
-    def compact_rows(value: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        rows: list[dict[str, Any]] = []
-        for row in value:
-            if isinstance(row, dict):
-                compact = {key: copy.deepcopy(row[key]) for key in keys if key in row}
-                if compact:
-                    rows.append(compact)
-        return rows
-
-    return {
-        "scenarios": copy.deepcopy(requirement.get("scenarios", [])),
-        "inputs": compact_rows(
-            contract.get("inputs", []),
-            ("name", "type", "required", "description", "fields", "properties"),
-        ),
-        "outputs": compact_rows(
-            contract.get("outputs", []),
-            ("name", "type", "required", "description", "fields", "properties"),
-        ),
-        "validation_rules": compact_rows(
-            contract.get(
-                "validation_rules",
-                contract.get("constraints", contract.get("obligations", [])),
-            ),
-            ("name", "kind", "description", "fields", "scenario_ids"),
-        ),
-        "observable_effects": compact_rows(
-            contract.get("effects", contract.get("observable_effects", [])),
-            ("operation", "target", "fields", "kind", "description"),
-        ),
-        "examples": copy.deepcopy(requirement.get("examples", [])),
-    }
 
 
 def _compact_schema_fields(entity: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1179,6 +1157,23 @@ def _compact_test_type(value: Any) -> dict[str, Any] | None:
     return result or None
 
 
+def _expand_test_type(
+    reference: Any, type_index: dict[str, dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Resolve a binding's type reference to the compact field shape the model needs."""
+
+    if not isinstance(reference, dict):
+        return None
+    type_id = str(reference.get("type_id", ""))
+    resolved = type_index.get(type_id, reference)
+    compact = _compact_test_type(resolved)
+    if compact is None:
+        compact = _compact_test_type(reference)
+    if compact is not None and reference.get("symbol") and not compact.get("symbol"):
+        compact["symbol"] = copy.deepcopy(reference["symbol"])
+    return compact
+
+
 def _build_model_layers(
     *,
     required_layers: list[str],
@@ -1189,6 +1184,11 @@ def _build_model_layers(
     frontend_subgraph: dict[str, list[dict[str, Any]]],
     test_obligations: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
+    type_index = {
+        str(row.get("type_id", "")): row
+        for row in relevant_types
+        if isinstance(row, dict) and str(row.get("type_id", ""))
+    }
     layers: dict[str, dict[str, Any]] = {}
     for layer in required_layers:
         seams: list[dict[str, Any]] = []
@@ -1199,15 +1199,26 @@ def _build_model_layers(
             item = {
                 key: copy.deepcopy(seam[key])
                 for key in (
-                    "module_id", "kind", "symbol", "public_signature", "route", "import_specifier"
+                    "module_id",
+                    "kind",
+                    "symbol",
+                    "public_signature",
+                    "route",
+                    "import_specifier",
+                    "source_file",
+                    "source",
                 )
                 if key in seam and seam[key] not in (None, "")
             }
-            types: list[dict[str, Any]] = []
-            for key in ("input_type", "output_type", "props_type"):
-                compact = _compact_test_type(seam.get(key))
+            types: dict[str, dict[str, Any]] = {}
+            for role, key in (
+                ("input", "input_type"),
+                ("output", "output_type"),
+                ("props", "props_type"),
+            ):
+                compact = _expand_test_type(seam.get(key), type_index)
                 if compact:
-                    types.append(compact)
+                    types[role] = compact
             if types:
                 item["types"] = types
             if item:
@@ -1456,7 +1467,8 @@ def _context_audit(
         "instructions_chars": size(TEST_GENERATION_INSTRUCTIONS),
         "input_payload_chars": size(payload),
         "output_schema_chars": size(TEST_GENERATION_SCHEMA),
-        "behavior_chars": size(payload.get("behavior", {})),
+        "requirement_chars": size(payload.get("requirement", {})),
+        "requirement_contract_chars": size(payload.get("requirement_contract", {})),
         "database_tables_chars": size(payload.get("database_tables", [])),
         "layers_chars": size(payload.get("layers", {})),
         "seed_chars": size(payload.get("seed", {})),
@@ -1870,6 +1882,7 @@ def _layer_source_cards(
     layer: str,
     targets: list[dict[str, Any]],
     test_file: str,
+    output_root: Path,
 ) -> list[dict[str, Any]]:
     allowed_kinds = {
         "UNIT": {"FUNC"},
@@ -1897,6 +1910,12 @@ def _layer_source_cards(
                 "editable",
             )
         }
+        source_file = str(target.get("file", ""))
+        row["source_file"] = source_file
+        try:
+            row["source"] = (output_root / source_file).read_text(encoding="utf-8")
+        except OSError:
+            row["source"] = ""
         row["import_specifier"] = _relative_import(test_file, str(target.get("file", "")))
         rows.append(row)
     return sorted(rows, key=lambda row: str(row.get("module_id", "")))
