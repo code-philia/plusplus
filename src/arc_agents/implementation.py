@@ -103,9 +103,12 @@ Authority and evidence:
 - Required behavior comes from requirement, scenarios, requirement_contract, and the failed-test
   source/analysis sections when present.
 - Module behavior and reference-derived frontend layout/style evidence may come from design_context.
-- Failure localization comes from the compiler's failure cluster; the readable
-  failure_analysis text contains the model-oriented diagnosis and failed-test
-  JSON/pw:api logs when the failing layer is Playwright.
+- Failure localization comes from the compiler's failure cluster; for Playwright
+  the readable failure_analysis text is an evidence-first execution record. It
+  contains the exact failed error, completed test status, ordered pw:api steps,
+  the last observable action before a timeout, and the relevant frozen test
+  source. Do not expect a second natural-language diagnosis or infer an
+  assertion failure when the record says RUN_TIMEOUT or TEST_RUN_TIMEOUT.
 - Real files, symbols, call edges, and complete source text come from
   `writable_targets` (the module cards). Each card contains `module_id`, `file`, and `source`.
 - Read-only dependency interfaces are included only when needed by design evidence; they must never be edited.
@@ -1109,6 +1112,12 @@ def _failure_analysis_with_failed_tests(
         if str(test_id)
     }
     analysis_text = str(analysis or "")
+    # E2E already carries the exact selected test source in its direct evidence
+    # record.  Re-attaching manifest rows here both duplicates the source and,
+    # for an interrupted browser run, can incorrectly attach unit tests that
+    # share the same requirement id.
+    if "E2E EXECUTION FEEDBACK" in analysis_text:
+        return analysis_text
     mentioned_files = set(re.findall(r"(?m)^test_file:\s*(\S+)", analysis_text))
     selected: list[dict[str, Any]] = []
     for test in frozen_tests:
