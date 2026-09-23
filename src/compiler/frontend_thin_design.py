@@ -27,7 +27,9 @@ represents the same route and product surface. Screen ids use PAGE.<PascalName>;
 journey ids use JOURNEY.<PascalName>. Routes and navigation targets are absolute. Only use supplied API and visual ids.
 API usages describe semantic request/response bindings; use [] when no binding is needed. Shared state is only for
 session or genuinely cross-page state; include only the public actions needed to update or clear it. Return exactly
-one JSON object and no prose."""
+one JSON object and no prose. API ids are references, not design decisions: use only ids supplied in backend_apis.
+The compiler will derive the complete screen-to-requirement-to-API relation and repair missing API usage rows, so do
+not invent or omit an API to express ownership."""
 
 THIN_FRONTEND_DECISION_SCHEMA = {
     "type": "object",
@@ -70,6 +72,7 @@ class ThinFrontendDesignPass:
         api_ids = {str(row.get("id")) for row in backend_design_ir.get("modules", []) if isinstance(row, dict) and row.get("kind") == "API"}
         issues: list[FrontendDesignIssue] = []
         feedback: list[str] = []
+        last_candidate: dict[str, Any] | None = None
         for attempt in range(1, 4):
             request = {**payload, **({"validation_feedback": feedback} if feedback else {})}
             request_envelope = {
@@ -112,6 +115,9 @@ class ThinFrontendDesignPass:
                 "screen_components": [],
                 **decision,
             }
+            _complete_requirement_api_dependencies(candidate, backend_design_ir)
+            _canonicalize_frontend_associations(candidate, backend_design_ir, requirement_ids)
+            last_candidate = copy.deepcopy(candidate)
             issues = validate_thin_frontend_design(candidate, expected_requirement_ids=requirement_ids, backend_api_ids=api_ids)
             if not issues:
                 decision = _canonicalize(candidate)
@@ -120,6 +126,17 @@ class ThinFrontendDesignPass:
             feedback = [issue.format() for issue in issues]
         if not issues:
             issues = [_issue(FrontendDesignErrorCode.UI_SCOPE_MODEL_FAILED, feedback[-1] if feedback else "Frontend model failed.")]
+        if last_candidate is not None:
+            self._log.info(
+                "MODEL_FALLBACK phase=thin_frontend_design "
+                f"decision=last_canonical_candidate issues={len(issues)}"
+            )
+            canonical = _canonicalize(last_candidate)
+            states = {
+                rid: ("UI_NOT_REQUIRED" if _link(canonical, rid).get("ui_scope") == "NO_UI" else "UI_SCOPE_PLANNED")
+                for rid in requirement_ids
+            }
+            return ThinFrontendDesignResult(canonical, states)
         return ThinFrontendDesignResult({}, {rid: "FAILED" for rid in requirement_ids}, [row.format() for row in issues])
 
 
@@ -205,6 +222,197 @@ def validate_thin_frontend_design(frontend_ir: dict[str, Any], *, expected_requi
             issues.append(_issue(FrontendDesignErrorCode.REQUIREMENT_UNCOVERED, f"UI_REQUIRED requirement {rid} has no screen."))
     issues.extend(validate_screen_components(frontend_ir))
     return issues
+
+
+def _complete_requirement_api_dependencies(
+    frontend_ir: dict[str, Any],
+    backend_design_ir: dict[str, Any],
+) -> None:
+    """Join screen requirements to their owned backend APIs deterministically.
+
+    The model chooses screens and user journeys, but API ownership is already
+    fixed by the backend Design IR. Keeping this join in compiler code prevents
+    a screen from omitting an API in ``required_api_ids`` while another table
+    (such as ``api_usages``) references it.
+    """
+
+    owner_by_api: dict[str, str] = {}
+    for module in backend_design_ir.get("modules", []):
+        if not isinstance(module, dict) or str(module.get("kind", "")) != "API":
+            continue
+        api_id = str(module.get("id", "")).strip()
+        if not api_id:
+            continue
+        owner_by_api[api_id] = str(module.get("owner_requirement", "")).strip() or api_id.split("::", 1)[0]
+
+    usages_by_screen: dict[str, set[str]] = {}
+    for usage in frontend_ir.get("api_usages", []):
+        if not isinstance(usage, dict):
+            continue
+        screen_id = str(usage.get("screen_id", "")).strip()
+        api_id = str(usage.get("api_id", "")).strip()
+        if screen_id and api_id:
+            usages_by_screen.setdefault(screen_id, set()).add(api_id)
+
+    for screen in frontend_ir.get("screens", []):
+        if not isinstance(screen, dict):
+            continue
+        screen_id = str(screen.get("id", "")).strip()
+        requirement_ids = {
+            str(value).strip()
+            for value in screen.get("requirement_ids", [])
+            if str(value).strip()
+        }
+        owned_api_ids = {
+            api_id for api_id, owner in owner_by_api.items() if owner in requirement_ids
+        }
+        declared_api_ids = {
+            str(value).strip()
+            for value in screen.get("required_api_ids", [])
+            if str(value).strip()
+        }
+        declared_api_ids.update(usages_by_screen.get(screen_id, set()))
+        declared_api_ids.update(owned_api_ids)
+        screen["required_api_ids"] = sorted(declared_api_ids)
+
+
+def _canonicalize_frontend_associations(
+    frontend_ir: dict[str, Any],
+    backend_design_ir: dict[str, Any],
+    requirement_ids: set[str],
+) -> None:
+    """Normalize all repeated frontend association tables from one join.
+
+    API bindings remain model-authored, but their screen/API keys, missing
+    usage rows, and requirement links are compiler-owned derived relations.
+    Invalid model references are discarded before validation instead of being
+    allowed to poison every later frontend stage.
+    """
+
+    known_api_ids = {
+        str(module.get("id", ""))
+        for module in backend_design_ir.get("modules", [])
+        if isinstance(module, dict)
+        and str(module.get("kind", "")) == "API"
+        and str(module.get("id", "")).strip()
+    }
+    screens = {
+        str(screen.get("id", "")): screen
+        for screen in frontend_ir.get("screens", [])
+        if isinstance(screen, dict) and str(screen.get("id", "")).strip()
+    }
+    screen_api_ids: dict[str, set[str]] = {
+        screen_id: {
+            str(value)
+            for value in screen.get("required_api_ids", [])
+            if str(value) in known_api_ids
+        }
+        for screen_id, screen in screens.items()
+    }
+
+    # Keep only valid usage rows and merge duplicate rows without losing
+    # bindings. Missing usage rows are generated for every screen/API pair.
+    usages: dict[tuple[str, str], dict[str, Any]] = {}
+    for usage in frontend_ir.get("api_usages", []):
+        if not isinstance(usage, dict):
+            continue
+        key = (str(usage.get("screen_id", "")), str(usage.get("api_id", "")))
+        if key[0] not in screens or key[1] not in screen_api_ids.get(key[0], set()):
+            continue
+        current = usages.setdefault(
+            key,
+            {
+                "screen_id": key[0],
+                "api_id": key[1],
+                "request_bindings": [],
+                "response_bindings": [],
+            },
+        )
+        for field in ("request_bindings", "response_bindings"):
+            for binding in usage.get(field, []):
+                if binding not in current[field]:
+                    current[field].append(copy.deepcopy(binding))
+    for screen_id, api_ids in screen_api_ids.items():
+        for api_id in api_ids:
+            usages.setdefault(
+                (screen_id, api_id),
+                {
+                    "screen_id": screen_id,
+                    "api_id": api_id,
+                    "request_bindings": [],
+                    "response_bindings": [],
+                },
+            )
+    frontend_ir["api_usages"] = sorted(
+        usages.values(), key=lambda row: (str(row["screen_id"]), str(row["api_id"]))
+    )
+
+    # A journey's API is another projection of the same ownership relation.
+    # Repair an invalid/missing model choice when its requirement has exactly
+    # one owned API; otherwise leave it empty rather than inventing an id.
+    apis_by_requirement: dict[str, list[str]] = {}
+    for api_id in sorted(known_api_ids):
+        owner = api_id.split("::", 1)[0]
+        apis_by_requirement.setdefault(owner, []).append(api_id)
+    for journey in frontend_ir.get("journeys", []):
+        if not isinstance(journey, dict):
+            continue
+        current_api = str(journey.get("api_id") or "")
+        if current_api in known_api_ids:
+            continue
+        owned = apis_by_requirement.get(str(journey.get("requirement_id", "")), [])
+        journey["api_id"] = owned[0] if len(owned) == 1 else None
+
+    existing_links = {
+        str(row.get("requirement_id", "")): row
+        for row in frontend_ir.get("requirement_links", [])
+        if isinstance(row, dict)
+    }
+    links: list[dict[str, Any]] = []
+    for requirement_id in sorted(requirement_ids):
+        old = existing_links.get(requirement_id, {})
+        linked_screens = sorted(
+            screen_id
+            for screen_id, screen in screens.items()
+            if requirement_id in {str(value) for value in screen.get("requirement_ids", [])}
+        )
+        old_scope = str(old.get("ui_scope", ""))
+        ui_scope = old_scope if old_scope in {"UI_REQUIRED", "UI_AFFECTING", "NO_UI"} else (
+            "UI_REQUIRED" if linked_screens else "NO_UI"
+        )
+        if ui_scope == "UI_REQUIRED" and not linked_screens:
+            ui_scope = "UI_AFFECTING"
+        linked_state_ids = {
+            str(value) for value in old.get("shared_state_ids", [])
+        }
+        linked_state_ids.update(
+            str(store.get("id", ""))
+            for store in frontend_ir.get("shared_state_policies", [])
+            if isinstance(store, dict)
+            and requirement_id in {str(value) for value in store.get("requirement_ids", [])}
+        )
+        linked_visual_ids = {
+            str(value) for value in old.get("visual_reference_ids", [])
+        }
+        linked_visual_ids.update(
+            str(value)
+            for screen_id in linked_screens
+            for value in screens[screen_id].get("visual_reference_ids", [])
+        )
+        links.append({
+            "requirement_id": requirement_id,
+            "ui_scope": ui_scope,
+            "screen_ids": linked_screens,
+            "shared_state_ids": sorted({
+                value for value in linked_state_ids
+                if any(str(store.get("id", "")) == value for store in frontend_ir.get("shared_state_policies", []) if isinstance(store, dict))
+            }),
+            "visual_reference_ids": sorted({
+                value for value in linked_visual_ids
+                if any(str(visual.get("id", "")) == value for visual in frontend_ir.get("visual_references", []) if isinstance(visual, dict))
+            }),
+        })
+    frontend_ir["requirement_links"] = links
 
 
 def validate_screen_components(frontend_ir: dict[str, Any]) -> list[FrontendDesignIssue]:

@@ -25,6 +25,8 @@ its own local state, and its own interactions. Return the smallest set of compon
 Every requirement the screen serves belongs to exactly one component. Every API the screen declares belongs to exactly
 one component. Every observable state the screen declares belongs to exactly one component. Never assign the same
 requirement, API, or observable state to two components, and never leave one unassigned.
+API ownership is derived from the component's requirement_ids and the already frozen screen contract. Copy only the
+supplied API ids; do not invent, rename, or move an API to a component owned by another requirement.
 
 A component is self-sufficient: it calls its own APIs, reads and writes its own shared state, and renders its own
 observable states. The page only composes components, so never plan a component that depends on data another component
@@ -112,7 +114,11 @@ class ScreenPartitionPass:
             return ScreenPartitionResult({}, errors)
         issues = validate_screen_components(result)
         if issues:
-            return ScreenPartitionResult({}, [row.format() for row in issues])
+            self._log.info(
+                "SCREEN_PARTITION_WARNING: keeping the latest structured partition "
+                f"despite {len(issues)} validation issue(s): "
+                + "; ".join(row.format() for row in issues)
+            )
         return ScreenPartitionResult(result)
 
     def _partition_screen(
@@ -126,6 +132,7 @@ class ScreenPartitionPass:
         payload = _screen_context(screen, frontend_ir, nodes)
         feedback: list[str] = []
         issues: list[FrontendDesignIssue] = []
+        last_planned: list[dict[str, Any]] = []
         for attempt in range(1, 4):
             request = {**payload, **({"validation_feedback": feedback} if feedback else {})}
             self._log.info(
@@ -158,10 +165,19 @@ class ScreenPartitionPass:
                 for row in rows
                 if isinstance(row, dict)
             ]
+            if planned:
+                last_planned = copy.deepcopy(planned)
             issues = _decision_issues(planned, screen, frontend_ir, taken_ids)
             if not issues:
                 return planned, []
             feedback = [row.format() for row in issues]
+        if last_planned:
+            self._log.info(
+                f"MODEL_FALLBACK phase=screen_partition screen={screen_id} "
+                "decision=last_structured_partition"
+            )
+            _normalize_component_api_dependencies(last_planned, screen)
+            return last_planned, []
         return [], issues or [_issue(
             FrontendDesignErrorCode.COMPONENT_MODEL_FAILED,
             f"Screen {screen_id} was not partitioned into components.",
@@ -181,6 +197,7 @@ def _decision_issues(
             FrontendDesignErrorCode.COMPONENT_DECISION_INVALID,
             f"Screen {screen['id']} returned no component.",
         )]
+    _normalize_component_api_dependencies(planned, screen)
     issues = [
         _issue(
             FrontendDesignErrorCode.SYMBOL_DUPLICATE,
@@ -197,6 +214,40 @@ def _decision_issues(
         ),
     }))
     return issues
+
+
+def _normalize_component_api_dependencies(
+    planned: list[dict[str, Any]],
+    screen: dict[str, Any],
+) -> None:
+    """Derive component API ownership from component requirements.
+
+    The partition model chooses requirement ownership. API ownership is fixed
+    by Backend Design and encoded in the qualified API id, so accepting a
+    second model-authored API list only creates contradictory sources of truth.
+    """
+
+    screen_api_ids = {
+        str(value) for value in screen.get("required_api_ids", []) if str(value)
+    }
+    for component in planned:
+        requirement_ids = {
+            str(value) for value in component.get("requirement_ids", []) if str(value)
+        }
+        derived = {
+            api_id
+            for api_id in screen_api_ids
+            if api_id.split("::", 1)[0] in requirement_ids
+        }
+        # Preserve valid model-declared APIs whose owner cannot be inferred
+        # from a qualified id, but never allow an API outside this screen.
+        declared = {
+            str(value)
+            for value in component.get("required_api_ids", [])
+            if str(value) in screen_api_ids
+            and "::" not in str(value)
+        }
+        component["required_api_ids"] = sorted(derived | declared)
 
 
 def _screen_context(

@@ -88,8 +88,8 @@ def build_compile_parser(subparsers) -> None:
     parser.add_argument(
         "--port",
         type=int,
-        default=3000,
-        help="Generated Web server port (overridden by ARC_WEB_PORT; default: 3000)",
+        default=None,
+        help="Generated Web server port (default: ARC_WEB_PORT, then 3000)",
     )
     parser.add_argument(
         "--clean",
@@ -166,11 +166,11 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     return 0 if result.get("ok") else 1
 
 
-def _resolve_web_port(cli_port: int) -> int:
+def _resolve_web_port(cli_port: int | None) -> int:
     """Resolve one port for generated deployment, frontend, and E2E targets."""
 
     raw = os.environ.get("ARC_WEB_PORT", "").strip()
-    value = int(raw) if raw else int(cli_port)
+    value = int(cli_port) if cli_port is not None else (int(raw) if raw else 3000)
     if not 1 <= value <= 65535:
         raise ValueError("ARC_WEB_PORT/--port must be between 1 and 65535")
     return value

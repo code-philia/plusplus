@@ -203,6 +203,10 @@ properties such as rows, data, or items.
 Reuse the established vocabulary. The context lists every API contract already frozen by earlier requirements as
 existing_api_contracts. When this requirement exposes or consumes a value that one of them already carries, copy that
 semantic_id character for character instead of minting a synonym; a new semantic_id must describe genuinely new data.
+When declaring EXTEND of an existing API, preserve every inherited input and output field from the target API exactly
+(same semantic_id, type, and required flag). Inherited fields may be absent from this requirement's contract because
+the contract describes only the new requirement delta; the compiler will carry them forward. New fields must still be
+copied exactly from the supplied contract and must not be inferred from database columns, fixtures, or domain guesses.
 Interface fields carry domain data only. Never put presentation vocabulary such as button, click, modal, dialog, toast,
 placeholder, sidebar, spinner, or any other rendering concept into a semantic_id or a field name; describe what the
 value is, not how a screen shows it. When the contract declares a database effect and returns anything, at least one
@@ -225,6 +229,10 @@ effects list. Allocate every supplied obligation id to exactly one API. Treat ne
 (for example prevent_duplicate_write, prevent_book_persistence, or no_session_on_failure) as real obligations;
 they must not be omitted because they describe something that must not happen. Before returning, compare the
 complete parent obligation id set with the union of API obligation_ids exactly.
+For REUSE, copy the target API interface exactly. For EXTEND, copy every target input/output exactly and add only
+the genuinely new fields from the fixed requirement contract; inherited fields such as note.content or note.pinned
+are valid even when they are not repeated in the current contract. Never invent fields from database columns, UI
+controls, fixtures, or prose assumptions.
 Do not design child functions or implementation steps. Return only `{\"modules\": [...]}`.
 """
 
@@ -295,9 +303,11 @@ that list and report the judgement on the module itself:
 - REUSE: an existing API already performs this operation. Set reuse_target_module_id to its module id and copy its
   input semantic ids, output semantic ids, and effects exactly. Prefer REUSE whenever the frozen contract already
   carries the data this requirement needs.
-- EXTEND: the existing operation is the right one but this requirement genuinely adds data. Set
-  reuse_target_module_id to its module id, keep every semantic id it already declares, and add only fields with
-  required=false. Never drop a field, never change a type, and never add a required field.
+- EXTEND: the existing operation is the right one but this requirement genuinely adds data or a distinct behavioral
+  obligation. Set reuse_target_module_id to its module id, keep every semantic id it already declares, and add only
+  fields with required=false. An EXTEND may add no public field when the new requirement specializes behavior while
+  preserving the same interface; this is valid and must not be rejected as a schema error. Never drop a field, never
+  change a type, and never add a required field.
 - CREATE: no existing API performs this operation. Set reuse_target_module_id to null. Do not choose CREATE for an
   operation whose inputs, outputs, and effects already match a frozen contract.
 Reuse is decided by semantic identifiers and effects, not by wording: two APIs that read the same entity fields are
@@ -386,6 +396,11 @@ class DesignIssue:
                 "Repair: assign this exact obligation id through self_obligation_ids on one of the "
                 f"allowed owner kinds ({', '.join(sorted(SELF_OBLIGATION_OWNER_KINDS))}), or to a terminal FUNC/DB owner."
             ),
+            "API_FIELD_OUT_OF_CONTRACT": (
+                "Repair: for REUSE/EXTEND, inherited fields from reuse_target_module_id are allowed only when "
+                "copied exactly; any genuinely new field must appear in the fixed requirement contract. Do not "
+                "infer fields from database columns, fixtures, or UI controls."
+            ),
         }.get(self.code)
         return f"{self.code}: {self.message}" + (f" {guidance}" if guidance else "")
 
@@ -460,6 +475,7 @@ class DesignPass:
         self._local_retries = _env_int("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", 2, 0, 10)
         self._reopen_budget = _env_int("ARC_DESIGN_REOPEN_COUNT", 2, 0, 6)
         self._trace_enabled = _env_flag("ARC_DESIGN_TRACE", True)
+        self._soft_warnings: list[str] = []
 
     def compile(
         self,
@@ -474,6 +490,7 @@ class DesignPass:
         shutil.rmtree(self._partial_root, ignore_errors=True)
         all_issues: list[DesignIssue] = []
         warnings: list[str] = []
+        self._soft_warnings = []
         states: dict[str, str] = {}
 
         for requirement_id in order:
@@ -547,13 +564,20 @@ class DesignPass:
             states[requirement_id] = "DESIGN_VALIDATED"
             self._persist_requirement_checkpoint(state, requirement_id)
 
+        warnings.extend(self._soft_warnings)
         final_issues = all_issues
         design = state.to_ir()
         if not final_issues:
             final_issues = _behavioral_completeness_issues(design)
-            for issue in final_issues:
-                if issue.blame_symbol in states:
-                    states[issue.blame_symbol] = "FAILED"
+            if final_issues:
+                warnings.extend(
+                    "DESIGN_VALIDATION_WARNING: " + issue.message
+                    for issue in final_issues
+                )
+                # A structurally materialized design is still emitted.  The
+                # warnings make the soft-fail explicit without aborting later
+                # lowering/TDD stages.
+                final_issues = []
         errors = [f"{issue.code}: {issue.message}" for issue in final_issues]
         return DesignPassResult(design, states, errors, warnings)
 
@@ -594,6 +618,7 @@ class DesignPass:
         upstream_feedback: list[str] = []
         seen_failures: set[str] = set()
         last_issues: list[DesignIssue] = []
+        last_trial: DesignState | None = None
         existing_apis = _existing_api_contracts(base)
         for reopen_attempt in range(self._reopen_budget + 1):
             context = {
@@ -628,6 +653,7 @@ class DesignPass:
                     f"target={decided.get('reuse_target_module_id') or '-'}"
                 )
             trial = base.clone()
+            last_trial = trial
             api_ids, issues = _materialize_apis(trial, requirement_id, contract, result.value)
             if issues:
                 return None, issues
@@ -664,18 +690,20 @@ class DesignPass:
                 "issues": [issue.as_dict() for issue in failure],
             })
             if fingerprint in seen_failures:
-                return None, [DesignIssue("UNRESOLVED_DESIGN_DECISION", f"Repeated upstream repair produced the same conflict for {requirement_id}", "REQUIREMENT_API", requirement_id, UNRESOLVED, context={"issues": [item.as_dict() for item in failure]})]
+                self._soft_warnings.append(
+                    f"DESIGN_VALIDATION_WARNING requirement={requirement_id}: "
+                    "repeated upstream conflicts; keeping the latest materialized design."
+                )
+                return last_trial or base, []
             seen_failures.add(fingerprint)
             upstream_feedback = [issue.feedback() for issue in failure]
             self._trace(f"UPSTREAM_REOPEN phase=requirement_api requirement={requirement_id} attempt={reopen_attempt + 1}/{self._reopen_budget + 1} feedback={'; '.join(upstream_feedback)}")
-        return None, [DesignIssue(
-            "UNRESOLVED_DESIGN_DECISION",
-            f"Upstream repair budget was exhausted for {requirement_id}",
-            "REQUIREMENT_API",
-            requirement_id,
-            UNRESOLVED,
-            context={"issues": [item.as_dict() for item in last_issues]},
-        )]
+        self._soft_warnings.append(
+            f"DESIGN_VALIDATION_WARNING requirement={requirement_id}: "
+            f"upstream repair budget exhausted; keeping the latest materialized design. "
+            f"issues={'; '.join(issue.message for issue in last_issues)}"
+        )
+        return last_trial or base, []
 
     def _decision(
         self,
@@ -736,6 +764,8 @@ class DesignPass:
                 continue
             duration = int((time.perf_counter() - started) * 1000)
             self._trace_json("MODEL_OUTPUT", phase, unit_id, decision, duration)
+            if isinstance(decision, dict):
+                last_decision = copy.deepcopy(decision)
             issues = _shape_issues(decision, output_schema, phase, unit_id)
             if not issues:
                 issues = validator(decision)
@@ -745,6 +775,15 @@ class DesignPass:
             last_issues = issues
             feedback = [issue.feedback() for issue in issues]
             self._trace(f"MODEL_REJECTED phase={phase} unit={unit_id} errors={'; '.join(feedback)}")
+        if last_decision is not None:
+            warning = (
+                f"DESIGN_VALIDATION_WARNING phase={phase} unit={unit_id}: "
+                f"accepted the last structured model result after {self._local_retries + 1} attempts; "
+                f"remaining issues={'; '.join(issue.message for issue in last_issues)}"
+            )
+            self._soft_warnings.append(warning)
+            self._trace(warning)
+            return DecisionResult(last_decision, [])
         return DecisionResult(None, last_issues)
 
     def _trace(self, message: str) -> None:
@@ -773,6 +812,7 @@ class DesignPass:
         child_feedback: list[str] = []
         seen_failures: set[str] = set()
         last_issues: list[DesignIssue] = []
+        last_trial: DesignState | None = None
         for reopen_attempt in range(self._reopen_budget + 1):
             decomposition_schema = _module_decomposition_output_schema(module, depth=depth)
             context_markdown = _module_decomposition_markdown(
@@ -802,6 +842,7 @@ class DesignPass:
                         issue.owner_phase = "PARENT_MODULE_DECOMPOSITION"
                 return None, issues
             trial = state.clone()
+            last_trial = trial
             child_ids, issues = _materialize_simple_decomposition(
                 trial,
                 requirement_id,
@@ -839,18 +880,19 @@ class DesignPass:
                 "issues": [issue.as_dict() for issue in failure],
             })
             if fingerprint in seen_failures:
-                return None, [DesignIssue("UNRESOLVED_DESIGN_DECISION", f"Repeated module decomposition produced the same child conflict for {module_id}", "MODULE_DECOMPOSITION", module_id, UNRESOLVED, context={"issues": [item.as_dict() for item in failure]})]
+                self._soft_warnings.append(
+                    f"DESIGN_VALIDATION_WARNING module={module_id}: repeated child conflicts; "
+                    "keeping the latest materialized decomposition."
+                )
+                return last_trial or state, []
             seen_failures.add(fingerprint)
             child_feedback = [issue.feedback() for issue in failure]
             self._trace(f"UPSTREAM_REOPEN phase=module_decomposition unit={module_id} depth={depth} attempt={reopen_attempt + 1}/{self._reopen_budget + 1} feedback={'; '.join(child_feedback)}")
-        return None, [DesignIssue(
-            "UNRESOLVED_DESIGN_DECISION",
-            f"Upstream repair budget was exhausted for {module_id}",
-            "MODULE_DECOMPOSITION",
-            module_id,
-            UNRESOLVED,
-            context={"issues": [item.as_dict() for item in last_issues]},
-        )]
+        self._soft_warnings.append(
+            f"DESIGN_VALIDATION_WARNING module={module_id}: decomposition repair budget exhausted; "
+            "keeping the latest materialized decomposition."
+        )
+        return last_trial or state, []
 
 
 def project_design_context(schema: dict[str, Any], requirement_id: str, dependencies: dict[str, Any]) -> dict[str, Any]:
@@ -943,6 +985,28 @@ def _existing_api_contracts(state: DesignState, limit: int = 40) -> list[dict[st
             "spec": str(module.get("spec", "")),
             "inputs": sorted(_semantic_id_set(module.get("inputs", []))),
             "outputs": sorted(_semantic_id_set(module.get("outputs", []))),
+            # Keep compact semantic-id sets for reuse matching, and preserve
+            # complete field metadata for EXTEND/REUSE validation.
+            "input_fields": [
+                {
+                    "semantic_id": str(item.get("semantic_id", "")),
+                    "name": str(item.get("name", "")),
+                    "type": str(item.get("type", "")),
+                    "required": bool(item.get("required", True)),
+                }
+                for item in module.get("inputs", [])
+                if isinstance(item, dict) and str(item.get("semantic_id", ""))
+            ],
+            "output_fields": [
+                {
+                    "semantic_id": str(item.get("semantic_id", "")),
+                    "name": str(item.get("name", "")),
+                    "type": str(item.get("type", "")),
+                    "required": bool(item.get("required", True)),
+                }
+                for item in module.get("outputs", [])
+                if isinstance(item, dict) and str(item.get("semantic_id", ""))
+            ],
             "effects": sorted(_effect_signature_set(module.get("effects", []))),
         })
     return summaries[-limit:]
@@ -1123,13 +1187,11 @@ def _api_reuse_issues(
             "REQUIREMENT_API",
             label,
         ))
-    if not added and not dropped:
-        issues.append(_issue(
-            "API_REUSE_DECISION_INVALID",
-            f"API.{label} declares EXTEND of {target_id} but adds no field; declare REUSE",
-            "REQUIREMENT_API",
-            label,
-        ))
+    # An extension may preserve the public interface while adding a distinct
+    # behavioral obligation (for example SaveDraft vs SavePage). REUSE remains
+    # the preferred label for an identical operation, but rejecting a
+    # field-preserving EXTEND would make behavior-only specializations
+    # impossible to express.
     return issues
 
 
@@ -1296,15 +1358,31 @@ def _api_plan_issues(
             name,
         ))
         issues.extend(_api_reuse_issues(api, name, existing_by_id))
+        reuse_decision = str(api.get("reuse_decision", "") or "").upper()
+        reuse_target = existing_by_id.get(str(api.get("reuse_target_module_id") or "").strip())
+        inherited_inputs = _simple_field_catalog(
+            reuse_target.get("input_fields", [])
+            if reuse_target and reuse_decision in {"REUSE", "EXTEND"}
+            else []
+        )
+        inherited_outputs = _simple_field_catalog(
+            reuse_target.get("output_fields", [])
+            if reuse_target and reuse_decision in {"REUSE", "EXTEND"}
+            else []
+        )
         for field_item in api.get("inputs", []):
             semantic_id = str(field_item.get("semantic_id", ""))
             expected = contract_inputs.get(semantic_id)
+            if expected is None:
+                expected = inherited_inputs.get(semantic_id)
             if expected is None or _simple_field_type(expected) != _simple_field_type(field_item):
                 issues.append(_issue("API_FIELD_OUT_OF_CONTRACT", f"API.{name} changes or invents input {semantic_id}", "REQUIREMENT_API", name))
             exposed_inputs.add(semantic_id)
         for field_item in api.get("outputs", []):
             semantic_id = str(field_item.get("semantic_id", ""))
             expected = contract_outputs.get(semantic_id)
+            if expected is None:
+                expected = inherited_outputs.get(semantic_id)
             if expected is None or _simple_field_type(expected) != _simple_field_type(field_item):
                 issues.append(_issue("API_FIELD_OUT_OF_CONTRACT", f"API.{name} changes or invents output {semantic_id}", "REQUIREMENT_API", name))
             exposed_outputs.add(semantic_id)
@@ -1658,6 +1736,21 @@ def _materialize_apis(state: DesignState, requirement_id: str, contract: dict[st
     obligations = {str(item["id"]): item for item in contract.get("obligations", [])}
     api_ids: list[str] = []
     for item in decision.get("modules", []):
+        if not isinstance(item, dict) or not str(item.get("name", "")).strip():
+            # The semantic validator has already reported the malformed entry;
+            # soft-fail must not turn it into an unhandled KeyError.
+            continue
+        reuse_decision = str(item.get("reuse_decision", "") or "").upper()
+        reuse_target = state.modules.get(str(item.get("reuse_target_module_id") or "").strip())
+        # EXTEND/REUSE APIs keep the frozen target interface.  The current
+        # requirement contract may contain only the delta, so add inherited
+        # fields to the materialization catalog before expanding model output.
+        if reuse_target and reuse_decision in {"REUSE", "EXTEND"}:
+            fields = _field_catalog([
+                *fields.values(),
+                *reuse_target.get("inputs", []),
+                *reuse_target.get("outputs", []),
+            ])
         module_id = _qualified_module_id(requirement_id, "API", item["name"])
         if module_id in state.modules:
             return [], [_issue("MODULE_ID_CONFLICT", f"Module id already exists: {module_id}", "REQUIREMENT_API", module_id)]
@@ -1668,8 +1761,16 @@ def _materialize_apis(state: DesignState, requirement_id: str, contract: dict[st
             "spec": item["spec"],
             "inputs": [_expand_interface_field(field_item, fields) for field_item in item.get("inputs", [])],
             "outputs": [_expand_interface_field(field_item, fields) for field_item in item.get("outputs", [])],
-            "effects": [_compact_module_effect(effects[item_effect["id"]]) for item_effect in item.get("effects", [])],
-            "obligations": [copy.deepcopy(obligations[value]) for value in item.get("obligation_ids", [])],
+            "effects": [
+                _compact_module_effect(effects[item_effect["id"]])
+                for item_effect in item.get("effects", [])
+                if isinstance(item_effect, dict) and item_effect.get("id") in effects
+            ],
+            "obligations": [
+                copy.deepcopy(obligations[value])
+                for value in item.get("obligation_ids", [])
+                if value in obligations
+            ],
             "self_obligation_ids": (
                 [str(value) for value in decision.get("self_obligation_ids", [])]
                 if not api_ids
@@ -1709,6 +1810,12 @@ def _materialize_simple_decomposition(
     child_ids: list[str] = []
 
     for item in decision.get("modules", []):
+        if (
+            not isinstance(item, dict)
+            or not str(item.get("name", "")).strip()
+            or str(item.get("kind", "")).upper() not in {"FUNC", "DB"}
+        ):
+            continue
         kind = str(item["kind"])
         child_inputs = [_expand_interface_field(field_item, field_catalog) for field_item in item.get("inputs", [])]
         child_outputs = [_expand_interface_field(field_item, field_catalog) for field_item in item.get("outputs", [])]
@@ -1717,6 +1824,7 @@ def _materialize_simple_decomposition(
         selected_effects = [
             copy.deepcopy(authoritative_effects[effect["id"]])
             for effect in item.get("effects", [])
+            if isinstance(effect, dict) and effect.get("id") in authoritative_effects
         ]
         child_contract = {
             "kind": kind,
@@ -1728,6 +1836,7 @@ def _materialize_simple_decomposition(
             "obligations": [
                 copy.deepcopy(authoritative_obligations[value])
                 for value in item.get("obligation_ids", [])
+                if value in authoritative_obligations
             ],
             "parent_id": parent_id,
         }

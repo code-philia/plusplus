@@ -1478,29 +1478,29 @@ class NodeTDDOrchestrator:
         if restored:
             result.changed_files = list(checkpoint.changed_files)
             self._log.info(
-                f"ARC4554 NODE_RESTORED_COMPILE_CHECKPOINT requirement={result.requirement_id} "
-                f"status={result.status} restored_files={len(restored)}"
+                f"ARC4554 NODE_PRESERVED_COMPILE_CHECKPOINT requirement={result.requirement_id} "
+                f"status={result.status} checkpoint_files={len(restored)}"
             )
             result.errors = list(
                 dict.fromkeys(
                     [
                         *result.errors,
-                        "ARC4554 NODE_RESTORED_COMPILE_CHECKPOINT: reverted "
-                        f"{len(restored)} file(s) to the latest workspace-typecheck-passing "
-                        f"version after {result.status}.",
+                        "ARC4554 NODE_PRESERVED_COMPILE_CHECKPOINT: kept "
+                        f"{len(restored)} file(s) at the latest workspace-typecheck-passing "
+                        f"version after {result.status}; no older skeleton was restored.",
                     ]
                 )
             )
         if errors:
             self._log.info(
-                f"ARC4554 NODE_RESTORE_COMPILE_CHECKPOINT_INCOMPLETE requirement={result.requirement_id} "
+                f"ARC4554 NODE_PRESERVE_COMPILE_CHECKPOINT_INCOMPLETE requirement={result.requirement_id} "
                 f"failures={errors}"
             )
             result.errors = list(
                 dict.fromkeys(
                     [
                         *result.errors,
-                        f"ARC4554 NODE_RESTORE_COMPILE_CHECKPOINT_INCOMPLETE: {errors}.",
+                        f"ARC4554 NODE_PRESERVE_COMPILE_CHECKPOINT_INCOMPLETE: {errors}.",
                     ]
                 )
             )
