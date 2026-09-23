@@ -168,7 +168,7 @@ Implementation rules:
   placeholders and render real semantic controls/content. A page that only returns labels, spans, or an empty shell is
   incomplete and must not be proposed as a successful implementation.
 - The frontend styling system is Tailwind CSS v4 through @tailwindcss/vite. Use static Tailwind utility className
-  strings inside the editable function-body region. Do not invent undefined semantic class names, add style tags, or use inline
+  strings inside the target function body. Do not invent undefined semantic class names, add style tags, or use inline
   style objects when a Tailwind utility can express the design.
 - Preserve the existing function signature and place local state, effects, handlers, and JSX inside
   the supplied function body. Do not emit another function declaration unless the exact searched
@@ -1226,7 +1226,6 @@ def _source_card(binding: dict[str, Any], *, digest: str | None) -> dict[str, An
             "props_type",
             "route",
             "callees",
-            "editable",
         )
     }
     if digest is not None:

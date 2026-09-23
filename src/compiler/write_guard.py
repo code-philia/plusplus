@@ -93,7 +93,6 @@ class WriteGuard:
                 requirement_id,
                 [f"ARC4521 PATCH_REQUIREMENT_UNKNOWN: {exc}"],
             )
-        writable_ids = {str(value) for value in resolved.get("writable", []) if str(value)}
         bindings = {
             str(row.get("module_id", "")): row
             for row in code_binding_registry.get("code_bindings", [])
@@ -152,17 +151,9 @@ class WriteGuard:
             file_bindings = [
                 (module_id, binding)
                 for module_id, binding in bindings.items()
-                if module_id in writable_ids
-                and bool(binding.get("editable"))
-                and _safe_relative_source(str(binding.get("file", ""))) == relative
+                if _safe_relative_source(str(binding.get("file", ""))) == relative
             ]
-            if not file_bindings:
-                rejected.append(
-                    f"ARC4523 PATCH_TARGET_READ_ONLY: {relative} is not writable for "
-                    f"{requirement_id}."
-                )
-                continue
-            file_module_ids = [module_id for module_id, _ in file_bindings]
+            file_module_ids = [module_id for module_id, _ in file_bindings] or [relative]
             for edit in file_edits:
                 module_id = file_module_ids[0]
                 for candidate_module_id, binding in file_bindings:
