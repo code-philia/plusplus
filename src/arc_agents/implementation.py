@@ -92,6 +92,11 @@ IMPLEMENTATION_INSTRUCTIONS = """You are a senior software engineer specializing
 test-driven backend implementation and cross-layer defect repair.
 Implement the smallest coherent code change for the supplied requirement and implementation mode.
 
+When implementation_mode is INITIAL_IMPLEMENTATION, this is the first coverage pass before
+business tests run. Implement the one supplied target module from its requirement and contract;
+do not wait for a failure report and do not redesign unrelated modules. The compiler will typecheck
+the result before moving to the next target.
+
 Context layout:
 - Context arrives as two user messages. The first, "stable_project_context", holds policy, project conventions,
   design evidence, and writable_targets (each with its complete source). The second, "current_task",
@@ -208,6 +213,11 @@ Return exactly one JSON object and no prose:
 FRONTEND_IMPLEMENTATION_INSTRUCTIONS = """You are a senior frontend product engineer and UI implementation specialist.
 Implement the current requirement's frontend experience as a coherent, runnable UI.
 
+When implementation_phase is INITIAL_IMPLEMENTATION, implement the supplied frontend target as
+the requirement's first coverage pass before E2E tests run. Complete the target from the supplied
+requirement, placement/design context, and API client contract; do not wait for a Playwright failure
+and do not invent additional pages or files.
+
 Use the supplied requirement and requirement_contract for behavior, and use design_context
 and its visual references for layout, hierarchy, styling, responsive composition, and content
 direction. The frontend target modules and their complete source are in writable_targets.
@@ -261,6 +271,7 @@ class ImplementationRequest:
     previous_patch_metadata: dict[str, Any] | None = None
     failure_analysis_text: str = ""
     retry_feedback: tuple[str, ...] = ()
+    target_module_ids: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -397,9 +408,10 @@ class ImplementationAgent:
             errors.append(
                 "ARC4530 IMPLEMENTATION_CONTEXT_INVALID: requirement payload id does not match."
             )
-        if mode not in {"TDD", "AGGREGATE"}:
+        if mode not in {"TDD", "AGGREGATE", "INITIAL_IMPLEMENTATION"}:
             errors.append(
-                "ARC4530 IMPLEMENTATION_CONTEXT_INVALID: mode must be TDD or AGGREGATE."
+                "ARC4530 IMPLEMENTATION_CONTEXT_INVALID: mode must be TDD, "
+                "AGGREGATE, or INITIAL_IMPLEMENTATION."
             )
         if mode == "TDD" and request.test_manifest.get("status") != "TESTS_FROZEN":
             errors.append(
@@ -481,6 +493,20 @@ class ImplementationAgent:
                 if str(bindings.get(module_id, {}).get("kind", "")).upper()
                 in self._allowed_kinds
             }
+        requested_target_ids = {
+            str(value).strip()
+            for value in request.target_module_ids
+            if str(value).strip()
+        }
+        if requested_target_ids:
+            unknown_target_ids = sorted(requested_target_ids - writable_ids)
+            if unknown_target_ids:
+                errors.append(
+                    "ARC4530 IMPLEMENTATION_CONTEXT_INVALID: requested initial "
+                    f"target(s) are not writable for {requirement_id}: "
+                    f"{unknown_target_ids}."
+                )
+            writable_ids &= requested_target_ids
         read_only_ids = {
             str(value) for value in requirement_targets.get("read_only", []) if str(value)
         }
@@ -602,6 +628,7 @@ class ImplementationAgent:
             "policy": {
                 "one_failure_cluster": True,
                 "tests_are_frozen": mode == "TDD",
+                "initial_implementation_target_ids": sorted(requested_target_ids),
                 "tests_limited_to_failed_layers": False,
                 "writable_context_scope": "ALL_REQUIREMENT_OWNED_WRITABLE_MODULES",
                 "writable_layer_scope": layer_scope,
@@ -620,7 +647,9 @@ class ImplementationAgent:
             "requirement_id": requirement_id,
             "iteration": request.iteration,
             "implementation_phase": (
-                "FRONTEND_BOOTSTRAP" if bootstrap_failure else "TDD_REPAIR"
+                "INITIAL_IMPLEMENTATION"
+                if mode == "INITIAL_IMPLEMENTATION"
+                else ("FRONTEND_BOOTSTRAP" if bootstrap_failure else "TDD_REPAIR")
             ),
             "requirement": request.requirement,
             "requirement_contract": (
@@ -649,6 +678,7 @@ class ImplementationAgent:
             ),
             "previous_patch_metadata": request.previous_patch_metadata,
             "prior_retry_feedback": list(request.retry_feedback),
+            "initial_target_module_ids": sorted(requested_target_ids),
             "provided_source_files": sorted(source_hashes),
         }
         context = {
@@ -1042,12 +1072,31 @@ def _compact_design_module(row: dict[str, Any]) -> dict[str, Any]:
 
 def _compact_frontend_design_row(row: dict[str, Any], kind: str) -> dict[str, Any]:
     fields = {
-        "screen": ("id", "route", "title", "description", "requirement_ids", "required_api_ids", "navigation_targets", "visual_reference_ids"),
-        "journey": ("id", "requirement_id", "source_screen_id", "target_screen_id", "steps", "api_id"),
+        "screen": (
+            "id",
+            "route",
+            "purpose",
+            "route_inputs",
+            "requirement_ids",
+            "entry_conditions",
+            "observable_states",
+            "required_api_ids",
+            "navigation_targets",
+            "visual_reference_ids",
+        ),
+        "journey": (
+            "id",
+            "requirement_id",
+            "source_screen_id",
+            "trigger",
+            "api_id",
+            "success_target_route",
+            "failure_behavior",
+        ),
         "component": ("id", "screen_id", "purpose", "requirement_ids", "inputs", "required_api_ids", "shared_state_ids", "observable_states", "visual_reference_ids"),
-        "api_usage": ("screen_id", "consumer_id", "api_id", "purpose", "trigger"),
-        "state": ("id", "name", "requirement_ids", "persistence", "storage_key", "state", "actions"),
-        "visual": ("id", "uri", "path", "description", "analysis", "style_summary"),
+        "api_usage": ("screen_id", "api_id", "request_bindings", "response_bindings"),
+        "state": ("id", "purpose", "requirement_ids", "persistence", "state", "actions"),
+        "visual": ("id", "source_path", "analysis"),
     }[kind]
     return {key: copy.deepcopy(row.get(key)) for key in fields if key in row}
 

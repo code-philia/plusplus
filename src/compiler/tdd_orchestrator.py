@@ -22,6 +22,14 @@ from .artifacts import CompilerArtifactStore
 from .code_binding import CodeTargetResolver
 from .exact_file_patcher import ExactFilePatcher
 from .failure_analysis import FailureAnalysisResult, FailureAnalyzer, TestFailureReport
+from .initial_implementation import (
+    BACKEND_INITIAL_KINDS,
+    FRONTEND_INITIAL_KINDS,
+    InitialImplementationLedger,
+    classify_initial_targets,
+    finalize_ledger,
+    ledger_entries_for_targets,
+)
 from .test_generation import RequirementTestGenerationPass, TEST_LAYERS
 from .test_runner import TestRunResult, TestRunner, TestSelection
 
@@ -56,6 +64,7 @@ class NodeTDDPolicy:
     max_iterations_per_node: int = 10
     no_progress_limit: int = 3
     infra_retry_count: int = 2
+    initial_target_retry_count: int = 2
 
     def __post_init__(self) -> None:
         for name in (
@@ -66,6 +75,8 @@ class NodeTDDPolicy:
                 raise ValueError(f"{name} must be at least 1.")
         if self.infra_retry_count < 0:
             raise ValueError("infra_retry_count must not be negative.")
+        if self.initial_target_retry_count < 0:
+            raise ValueError("initial_target_retry_count must not be negative.")
 
     @classmethod
     def from_environment(
@@ -82,6 +93,9 @@ class NodeTDDPolicy:
             ),
             infra_retry_count=_bounded_int(
                 values, "ARC_TDD_INFRA_RETRY_COUNT", 2, 0, 10
+            ),
+            initial_target_retry_count=_bounded_int(
+                values, "ARC_TDD_INITIAL_TARGET_RETRY_COUNT", 2, 0, 10
             ),
         )
 
@@ -319,21 +333,24 @@ class NodeTDDOrchestrator:
 
             changed_files: set[str] = set()
             previous_patch_metadata: dict[str, Any] | None = None
-            frontend_implemented, frontend_errors, frontend_patch_metadata = (
-                self._preimplement_frontend(requirement_id)
+            initial_changed, initial_ledger_path, initial_warnings = (
+                self._run_initial_implementation(requirement_id)
             )
-            if frontend_errors:
-                return self._finish(
-                    result,
-                    "AGENT_FAILED",
-                    frontend_errors,
-                    changed_files=changed_files,
+            if initial_ledger_path:
+                result.artifacts["initial_implementation_ledger"] = initial_ledger_path
+            for warning in initial_warnings:
+                self._log.info(
+                    f"INITIAL_IMPLEMENTATION_WARNING requirement={requirement_id} "
+                    f"{warning}"
                 )
-            if frontend_implemented:
-                changed_files.update(frontend_implemented)
+            if initial_changed:
+                changed_files.update(initial_changed)
                 result.changed_files = sorted(changed_files)
-                previous_patch_metadata = frontend_patch_metadata
-                self._transition(requirement_id, "FRONTEND_IMPLEMENTED")
+                previous_patch_metadata = {
+                    "phase": "INITIAL_IMPLEMENTATION",
+                    "changed_files": sorted(initial_changed),
+                }
+                self._transition(requirement_id, "INITIAL_IMPLEMENTED")
 
             self._log.info(
                 f"IMPLEMENTATION_PHASE requirement={requirement_id} phase=BASELINE_TEST"
@@ -342,7 +359,7 @@ class NodeTDDOrchestrator:
             baseline = self._run_and_analyze(
                 requirement_id,
                 iteration=0,
-                include_typecheck=bool(frontend_implemented),
+                include_typecheck=bool(initial_changed),
                 changed_files=sorted(changed_files),
             )
             self._record_compilable_checkpoint(
@@ -355,7 +372,7 @@ class NodeTDDOrchestrator:
             if baseline.analysis.errors:
                 return self._finish(result, "INTERNAL_ERROR", baseline.analysis.errors)
             if baseline.test_run.ok:
-                if frontend_implemented:
+                if initial_changed:
                     return self._accept_node(result)
                 return self._finish(
                     result,
@@ -379,7 +396,7 @@ class NodeTDDOrchestrator:
             unchanged_failures = 0
             functional_iterations = 0
             visual_iterations = 0
-            patch_iteration = 1 if frontend_implemented else 0
+            patch_iteration = 1 if initial_changed else 0
             retry_feedback: tuple[str, ...] = ()
 
             while True:
@@ -911,6 +928,246 @@ class NodeTDDOrchestrator:
             self.node_states[str(requirement_id)] = "NODE_ACCEPTED"
             self._state_history[str(requirement_id)] = list(result.state_history) or ["NODE_ACCEPTED"]
             self._accepted_results[str(requirement_id)] = result
+
+    def _run_initial_implementation(
+        self,
+        requirement_id: str,
+    ) -> tuple[set[str], str | None, list[str]]:
+        """Give every owned business target one compile-gated first pass.
+
+        This pass is deliberately independent from failure localization.  A
+        module that is not directly exercised by a generated test still gets a
+        bounded implementation opportunity before the first business-test run.
+        Targets that cannot be completed remain in the workspace's latest
+        compilable state and are recorded in a requirement-local ledger.
+        """
+
+        try:
+            resolved = CodeTargetResolver(
+                self.code_binding_registry
+            ).resolve_requirement_targets(requirement_id)
+        except (KeyError, ValueError) as exc:
+            warning = (
+                "INITIAL_IMPLEMENTATION_TARGETS_UNAVAILABLE: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return set(), None, [warning]
+
+        targets, ignored_ids = classify_initial_targets(resolved)
+        ledger = InitialImplementationLedger(
+            requirement_id=requirement_id,
+            entries=ledger_entries_for_targets(targets),
+        )
+        if ignored_ids:
+            ledger.warnings.append(
+                "INITIAL_IMPLEMENTATION_COMPILER_OWNED_SKIPPED: excluded non-business "
+                f"target(s) {ignored_ids}."
+            )
+
+        changed_files: set[str] = set()
+        requirement = self.requirement_ir.get("nodes", {}).get(requirement_id, {})
+        if not isinstance(requirement, dict):
+            requirement = {}
+        target_by_id = {
+            str(row.get("module_id", "")): row
+            for row in targets
+            if str(row.get("module_id", "")).strip()
+        }
+        frontend_kinds = {value.upper() for value in FRONTEND_INITIAL_KINDS}
+        backend_kinds = {value.upper() for value in BACKEND_INITIAL_KINDS}
+        max_attempts = max(1, self.policy.initial_target_retry_count + 1)
+
+        for entry in ledger.entries:
+            target = target_by_id.get(entry.module_id)
+            if target is None:
+                entry.status = "INCOMPLETE"
+                entry.errors.append("target binding disappeared before implementation")
+                continue
+            kind = entry.kind.upper()
+            if kind not in frontend_kinds | backend_kinds:
+                entry.status = "ALREADY_SATISFIED"
+                continue
+
+            agent = (
+                self.frontend_implementation_agent
+                if kind in frontend_kinds
+                else self.implementation_agent
+            )
+            agent_name = (
+                "FrontendImplementationAgent"
+                if kind in frontend_kinds
+                else "ImplementationAgent"
+            )
+            retry_feedback: tuple[str, ...] = ()
+            target_metadata: dict[str, Any] | None = None
+            target_succeeded = False
+            for attempt in range(1, max_attempts + 1):
+                entry.attempts = attempt
+                checkpoint_sources = self.file_patcher.snapshot(
+                    self._checkpoint_files(requirement_id)
+                )
+                target_metadata = {
+                    "phase": "INITIAL_IMPLEMENTATION",
+                    "target_module_id": entry.module_id,
+                    "target_kind": entry.kind,
+                    "attempt": attempt,
+                }
+                fingerprint = hashlib.sha256(
+                    f"{requirement_id}:initial:{entry.module_id}".encode("utf-8")
+                ).hexdigest()
+                report = TestFailureReport(
+                    requirement_id=requirement_id,
+                    iteration=attempt,
+                    test_id=None,
+                    test_ids=[],
+                    layer=None,
+                    phase="INITIAL_IMPLEMENTATION",
+                    failure_class="IMPLEMENTATION_BEHAVIOR",
+                    message=(
+                        "Initial implementation coverage pass for the supplied "
+                        f"{entry.kind} target {entry.module_id}."
+                    ),
+                    stack_frames=[],
+                    target_modules=[entry.module_id],
+                    writable_targets=[copy.deepcopy(target)],
+                    read_only_dependencies=[],
+                    changed_files=sorted(changed_files),
+                    failure_fingerprint=fingerprint,
+                    diagnostic_output=(
+                        "No business test has run yet. Implement this one owned target "
+                        "from the requirement, contract, design context, and supplied "
+                        "source, then keep the result typecheckable."
+                    ),
+                )
+                self._log.info(
+                    f"{agent_name} INITIAL_IMPLEMENTATION_REQUEST "
+                    f"requirement={requirement_id} target={entry.module_id} "
+                    f"kind={entry.kind} attempt={attempt}/{max_attempts}"
+                )
+                try:
+                    implementation = agent.implement(
+                        ImplementationRequest(
+                            requirement_id=requirement_id,
+                            requirement=requirement,
+                            requirement_contract=self._requirement_contract(requirement_id),
+                            test_manifest={},
+                            code_binding_registry=self.code_binding_registry,
+                            failure_reports=(report,),
+                            failure_analysis_text=report.diagnostic_output,
+                            iteration=attempt,
+                            mode="INITIAL_IMPLEMENTATION",
+                            design_context=self._design_context(requirement_id),
+                            previous_patch_metadata=target_metadata,
+                            retry_feedback=retry_feedback,
+                            target_module_ids=(entry.module_id,),
+                        )
+                    )
+                except Exception as exc:
+                    detail = f"{type(exc).__name__}: {exc}"
+                    implementation = None
+                    retry_feedback = (
+                        "The initial implementation call raised an exception; retry "
+                        "using only the supplied target source.",
+                        detail,
+                    )
+                    entry.errors.append(detail)
+                    self._log.info(
+                        f"{agent_name} INITIAL_IMPLEMENTATION_EXCEPTION "
+                        f"requirement={requirement_id} target={entry.module_id} "
+                        f"error={detail}"
+                    )
+                if implementation is None:
+                    continue
+                if not implementation.ok or implementation.patch is None:
+                    retry_feedback = tuple(
+                        [
+                            "The initial implementation model call did not produce an "
+                            "applicable patch for the requested target.",
+                            *implementation.errors,
+                        ]
+                    )
+                    entry.errors.extend(implementation.errors)
+                    self._log.info(
+                        f"{agent_name} INITIAL_IMPLEMENTATION_REJECTED "
+                        f"requirement={requirement_id} target={entry.module_id} "
+                        f"errors={implementation.errors}"
+                    )
+                    continue
+
+                applied = self.file_patcher.apply(
+                    implementation.patch,
+                    code_binding_registry=self.code_binding_registry,
+                )
+                if not applied.ok:
+                    self.file_patcher.restore(checkpoint_sources)
+                    retry_feedback = tuple(
+                        [
+                            "The previous initial patch was rejected by exact file "
+                            "application; use the current source and a unique search fragment.",
+                            *applied.rejected_changes,
+                        ]
+                    )
+                    entry.errors.extend(applied.rejected_changes)
+                    self._log.info(
+                        f"{agent_name} INITIAL_IMPLEMENTATION_PATCH_REJECTED "
+                        f"requirement={requirement_id} target={entry.module_id} "
+                        f"errors={applied.rejected_changes}"
+                    )
+                    continue
+
+                typecheck = self.test_runner.run_workspace_typecheck()
+                if typecheck.status != "PASSED":
+                    self.file_patcher.restore(checkpoint_sources)
+                    detail = (
+                        typecheck.stderr
+                        or typecheck.stdout
+                        or typecheck.error
+                        or "workspace typecheck failed"
+                    )
+                    retry_feedback = tuple(
+                        [
+                            "The initial patch was applied but did not pass workspace "
+                            "typecheck. Fix the target without changing its public contract.",
+                            detail,
+                        ]
+                    )
+                    entry.errors.append(detail)
+                    self._log.info(
+                        f"{agent_name} INITIAL_IMPLEMENTATION_TYPECHECK_FAILED "
+                        f"requirement={requirement_id} target={entry.module_id} "
+                        f"detail={detail}"
+                    )
+                    continue
+
+                changed_files.update(_normalize_path(value) for value in applied.changed_files)
+                entry.changed_files = sorted(
+                    set(entry.changed_files)
+                    | {_normalize_path(value) for value in applied.changed_files}
+                )
+                entry.status = "COMPILE_ACCEPTED"
+                target_succeeded = True
+                self._node_checkpoints[requirement_id] = _CompilableCheckpoint(
+                    sources=self.file_patcher.snapshot(self._checkpoint_files(requirement_id)),
+                    changed_files=sorted(changed_files),
+                )
+                self._log.info(
+                    f"{agent_name} INITIAL_IMPLEMENTATION_ACCEPTED "
+                    f"requirement={requirement_id} target={entry.module_id} "
+                    f"changed_files={entry.changed_files}"
+                )
+                break
+
+            if not target_succeeded:
+                entry.status = "INCOMPLETE"
+                ledger.warnings.append(
+                    "INITIAL_IMPLEMENTATION_TARGET_INCOMPLETE: "
+                    f"{entry.module_id} remained at its latest compilable source."
+                )
+
+        finalize_ledger(ledger)
+        ledger_path = self._node_root(requirement_id) / "initial_implementation_ledger.json"
+        write_json_atomic(ledger_path, ledger.to_dict())
+        return changed_files, str(ledger_path), list(ledger.warnings)
 
     def _preimplement_frontend(
         self,
