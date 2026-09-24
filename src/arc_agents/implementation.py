@@ -39,7 +39,6 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
                     "search": {"type": "string", "minLength": 1, "maxLength": 80000},
                     "replacement": {
                         "type": "string",
-                        "minLength": 1,
                     },
                 },
             },
@@ -134,7 +133,9 @@ Hard scope rules:
 - The `edits` list is file-based. A relative file path may appear more than once, and this is
   intentional: use one row per exact search/replacement pair. Never merge unrelated edits merely
   because they share a file. Do not return module_id in the output.
-- Do not modify tests, assertions, imports, exports, signatures, routes, generated types, configs, or compiler glue.
+- Do not modify tests, assertions, signatures, routes, generated types, configs, or compiler glue.
+  Imports and exports may be changed when they are part of a supplied writable
+  file and are covered by an exact search/replacement edit.
 - Use only symbols already available in the supplied source file and public read-only interfaces.
 - Do not invent files, modules, APIs, fields, routes, database tables, or requirement behavior.
 - In TDD mode, do not weaken or work around frozen tests. In AGGREGATE mode, no frozen tests exist;
@@ -230,8 +231,10 @@ Patch scope:
 - For every edit, obtain `file` and the old text from the same `writable_targets` card; never
   invent a path, use a module_id as a path, or rely on a separate `target_modules` list for source.
 - Return an exact `search` fragment copied from the current source and its replacement. The search
-  fragment must be unique in the selected writable source file.
-- Do not change imports, exports, signatures, routes, generated types, tests, or compiler glue.
+  fragment must be unique in the selected source file. A replacement may be empty when the exact
+  fragment must be deleted.
+- Do not change signatures, routes, generated types, tests, or compiler glue.
+  Imports and exports in the supplied target file are valid edit locations.
 - Return exact file-based edits. The same relative file may appear multiple times when it needs
   multiple non-overlapping replacements. Do not emit module_id in the output.
 - Keep each replacement concise and complete; never truncate JSX, strings, or object literals.
@@ -323,7 +326,7 @@ class ImplementationAgent:
 
     def implement(self, request: ImplementationRequest) -> ImplementationResult:
         requirement_id = str(request.requirement_id).strip()
-        context, source_hashes, focus_ids, errors = self._build_context(request)
+        context, source_hashes, _focus_ids, errors = self._build_context(request)
         if errors:
             return ImplementationResult(
                 requirement_id=requirement_id,
@@ -335,8 +338,6 @@ class ImplementationAgent:
             context,
             validate=lambda output: _validate_decision(
                 output,
-                allowed_ids=set(source_hashes),
-                focus_ids=focus_ids,
             ),
             initial_feedback=list(request.retry_feedback),
         )
@@ -648,7 +649,7 @@ class ImplementationAgent:
             ),
             "previous_patch_metadata": request.previous_patch_metadata,
             "prior_retry_feedback": list(request.retry_feedback),
-            "allowed_writable_files": sorted(source_hashes),
+            "provided_source_files": sorted(source_hashes),
         }
         context = {
             CONTEXT_SEGMENTS_KEY: [
@@ -830,9 +831,6 @@ def _model_log_phase(payload: dict[str, Any]) -> str:
 
 def _validate_decision(
     decision: dict[str, Any],
-    *,
-    allowed_ids: set[str],
-    focus_ids: set[str],
 ) -> list[str]:
     if not isinstance(decision, dict) or set(decision) != {"edits"}:
         return ["ARC4534 IMPLEMENTATION_OUTPUT_INVALID: output must contain edits only."]
@@ -840,7 +838,6 @@ def _validate_decision(
     errors: list[str] = []
     if not isinstance(edits, list) or not 1 <= len(edits) <= 16:
         return [*errors, "ARC4534 IMPLEMENTATION_OUTPUT_INVALID: edits must contain 1..16 rows."]
-    actual_files: list[str] = []
     for row in edits:
         if not isinstance(row, dict) or set(row) != {"file", "search", "replacement"}:
             errors.append("ARC4534 IMPLEMENTATION_OUTPUT_INVALID: malformed edit row.")
@@ -848,12 +845,7 @@ def _validate_decision(
         file = str(row.get("file", "")).strip()
         search = row.get("search")
         replacement = row.get("replacement")
-        actual_files.append(file)
-        if file not in allowed_ids:
-            errors.append(
-                f"ARC4535 IMPLEMENTATION_TARGET_INVALID: {file!r} is not a writable file."
-            )
-        if not isinstance(replacement, str) or not replacement.strip():
+        if not isinstance(replacement, str):
             errors.append(
                 f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} has no replacement."
             )
@@ -868,11 +860,6 @@ def _validate_decision(
         elif isinstance(replacement, str) and len(replacement.encode("utf-8")) > 200_000:
             errors.append(
                 f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} replacement is too large."
-            )
-        if isinstance(replacement, str) and re.search(r"(?m)^\s*(?:import|export)\s", replacement):
-            errors.append(
-                f"ARC4534 IMPLEMENTATION_OUTPUT_INVALID: {file!r} attempts to change "
-                "a file-level import or export."
             )
     return list(dict.fromkeys(errors))
 
@@ -1197,7 +1184,7 @@ def _scope_warnings(
     if "DEFERRED_DEPENDENCY" in classes or read_only_ids:
         warnings.append(
             "DEPENDENCY_SCOPE_WARNING: dependency-owned modules are read-only. "
-            "修复应回到拥有该模块的 requirement；WriteGuard will reject edits to those modules."
+            "Dependency source is not included in this implementation context."
         )
     diagnostic_text = "\n".join(
         str(report.get("diagnostic_output", "")) for report in reports
@@ -1206,13 +1193,12 @@ def _scope_warnings(
         "frozen test",
         "generated glue",
         "compiler-owned",
-        "import/export",
         "route is compiler-owned",
     )
     if any(token in diagnostic_text for token in compiler_tokens):
         warnings.append(
             "COMPILER_OWNED_WARNING: the diagnostic references compiler-owned structure "
-            "(tests, imports/exports, routes, generated glue, or config); keep it read-only."
+            "(tests, routes, generated glue, or config); keep that structure read-only."
         )
     warnings.append(
         "EDIT_SCOPE_WARNING: every supplied writable source file is available for diagnosis, "

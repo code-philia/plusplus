@@ -20,10 +20,10 @@ from core.logging import SynchronousLog
 
 from .artifacts import CompilerArtifactStore
 from .code_binding import CodeTargetResolver
+from .exact_file_patcher import ExactFilePatcher
 from .failure_analysis import FailureAnalysisResult, FailureAnalyzer, TestFailureReport
 from .test_generation import RequirementTestGenerationPass, TEST_LAYERS
 from .test_runner import TestRunResult, TestRunner, TestSelection
-from .write_guard import WriteGuard
 
 
 NODE_TDD_SCHEMA_VERSION = 1
@@ -125,7 +125,7 @@ class NodeTDDOrchestrator:
     """Own the deterministic RED-to-GREEN lifecycle for exactly one node.
 
     The implementation model can only propose exact file edits. This class
-    owns test execution, failure routing, write authorization, budgets, state,
+    owns test execution, failure routing, exact patch persistence, budgets, state,
     regression checks, and artifacts. Failed nodes retain their latest
     workspace-typecheck-passing source checkpoint rather than reverting to the
     original skeleton.
@@ -151,7 +151,7 @@ class NodeTDDOrchestrator:
         failure_analyzer: FailureAnalyzer | None = None,
         implementation_agent: ImplementationAgent | None = None,
         frontend_implementation_agent: FrontendImplementationAgent | None = None,
-        write_guard: WriteGuard | None = None,
+        file_patcher: ExactFilePatcher | None = None,
         resume: bool = False,
     ) -> None:
         self.output_root = output_root.expanduser().resolve()
@@ -192,10 +192,7 @@ class NodeTDDOrchestrator:
                 trace=self._trace_implementation,
             )
         )
-        self.write_guard = write_guard or WriteGuard(
-            self.output_root,
-            requirement_ir=self.requirement_ir,
-        )
+        self.file_patcher = file_patcher or ExactFilePatcher(self.output_root)
 
         self.node_states: dict[str, str] = {}
         self._state_history: dict[str, list[str]] = {}
@@ -317,7 +314,7 @@ class NodeTDDOrchestrator:
             # The skeleton is the initial known-compilable checkpoint. Later
             # implementation rounds replace it after workspace typecheck passes.
             self._node_checkpoints[requirement_id] = _CompilableCheckpoint(
-                sources=self.write_guard.snapshot(self._writable_files(requirement_id))
+                sources=self.file_patcher.snapshot(self._checkpoint_files(requirement_id))
             )
 
             changed_files: set[str] = set()
@@ -432,17 +429,17 @@ class NodeTDDOrchestrator:
                         changed_files=changed_files,
                     )
 
-                applied = self.write_guard.apply(
+                applied = self.file_patcher.apply(
                     implementation.patch,
                     code_binding_registry=self.code_binding_registry,
                 )
                 if not applied.ok:
-                    # Feed exact WriteGuard/compiler feedback into the next
+                    # Feed exact patch-application feedback into the next
                     # implementation attempt instead of terminating the node.
                     # The next model call receives the original requirement,
                     # source context, and this rejection as additional evidence.
                     retry_feedback = [
-                        "The previous implementation patch was rejected by the write guard.",
+                        "The previous exact patch could not be applied to the current source.",
                         *applied.rejected_changes,
                     ]
                     retry_feedback = tuple(retry_feedback)
@@ -571,7 +568,7 @@ class NodeTDDOrchestrator:
                 return self._finish(result, "NODE_ACCEPTED", [])
 
             self._node_checkpoints[requirement_id] = _CompilableCheckpoint(
-                sources=self.write_guard.snapshot(self._writable_files(requirement_id))
+                sources=self.file_patcher.snapshot(self._checkpoint_files(requirement_id))
             )
 
             frontend_kinds = {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
@@ -663,7 +660,7 @@ class NodeTDDOrchestrator:
                     or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."],
                     iterations=1,
                 )
-            applied = self.write_guard.apply(
+            applied = self.file_patcher.apply(
                 implementation.patch,
                 code_binding_registry=self.code_binding_registry,
             )
@@ -795,7 +792,7 @@ class NodeTDDOrchestrator:
                     or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."]
                 )
                 break
-            applied = self.write_guard.apply(
+            applied = self.file_patcher.apply(
                 implementation.patch,
                 code_binding_registry=self.code_binding_registry,
             )
@@ -1039,7 +1036,7 @@ class NodeTDDOrchestrator:
                     implementation.errors
                     or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."]
                 ), None
-            applied = self.write_guard.apply(
+            applied = self.file_patcher.apply(
                 implementation.patch,
                 code_binding_registry=self.code_binding_registry,
             )
@@ -1133,7 +1130,7 @@ class NodeTDDOrchestrator:
         if not typecheck_passed:
             return
         self._node_checkpoints[requirement_id] = _CompilableCheckpoint(
-            sources=self.write_guard.snapshot(self._writable_files(requirement_id)),
+            sources=self.file_patcher.snapshot(self._checkpoint_files(requirement_id)),
             changed_files=sorted({_normalize_path(value) for value in changed_files}),
         )
         self._log.info(
@@ -1475,7 +1472,7 @@ class NodeTDDOrchestrator:
         checkpoint = self._node_checkpoints.pop(result.requirement_id, None)
         if checkpoint is None:
             return
-        restored, errors = self.write_guard.restore(checkpoint.sources)
+        restored, errors = self.file_patcher.restore(checkpoint.sources)
         if restored:
             result.changed_files = list(checkpoint.changed_files)
             self._log.info(
@@ -1506,28 +1503,20 @@ class NodeTDDOrchestrator:
                 )
             )
 
-    def _writable_files(self, requirement_id: str) -> list[str]:
-        """List every source file this requirement is allowed to edit."""
+    def _checkpoint_files(self, requirement_id: str) -> list[str]:
+        """List source files owned by this requirement for checkpointing only."""
 
-        targets = next(
-            (
-                row
-                for row in self.code_binding_registry.get("requirement_targets", [])
-                if isinstance(row, dict)
-                and str(row.get("requirement_id", "")) == requirement_id
-            ),
-            None,
-        )
-        if targets is None:
+        try:
+            targets = CodeTargetResolver(
+                self.code_binding_registry
+            ).resolve_requirement_targets(requirement_id)
+        except (KeyError, ValueError):
             return []
-        writable_ids = {str(value) for value in targets.get("writable", []) if str(value)}
         return sorted(
             {
                 str(row.get("file", ""))
-                for row in self.code_binding_registry.get("code_bindings", [])
-                if isinstance(row, dict)
-                and str(row.get("module_id", "")) in writable_ids
-                and str(row.get("file", ""))
+                for row in targets.get("owned_targets", [])
+                if isinstance(row, dict) and str(row.get("file", ""))
             }
         )
 

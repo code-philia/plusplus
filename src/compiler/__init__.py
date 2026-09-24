@@ -2,19 +2,22 @@
 
 from .controller import Compiler
 from .code_binding import CodeTargetResolver, resolve_requirement_targets
+from .exact_file_patcher import AppliedFileEdit, ExactFilePatcher, FilePatchResult
 from .failure_analysis import FailureAnalysisResult, FailureAnalyzer, TestFailureReport
 from .models import CompilationRequest
 from .test_runner import TestRunResult, TestRunner, TestSelection
 from .tdd_orchestrator import NodeTDDOrchestrator, NodeTDDPolicy, NodeTDDResult
-from .write_guard import ApplyResult, ProposedEdit, ProposedPatch, WriteGuard
+from arc_agents.contracts import ProposedEdit, ProposedPatch
 
 __all__ = [
-    "ApplyResult",
+    "AppliedFileEdit",
     "CodeTargetResolver",
     "CompilationRequest",
     "Compiler",
     "FailureAnalysisResult",
     "FailureAnalyzer",
+    "ExactFilePatcher",
+    "FilePatchResult",
     "NodeTDDOrchestrator",
     "NodeTDDPolicy",
     "NodeTDDResult",
@@ -24,6 +27,5 @@ __all__ = [
     "TestRunResult",
     "TestRunner",
     "TestSelection",
-    "WriteGuard",
     "resolve_requirement_targets",
 ]

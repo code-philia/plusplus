@@ -751,7 +751,7 @@ def _failure_scope_warning(reports: list[TestFailureReport]) -> str:
     if any(report.read_only_dependencies for report in reports):
         warnings.append(
             "READ_ONLY_SCOPE_WARNING: read-only dependency source is provided for diagnosis only; "
-            "WriteGuard will reject edits outside the current requirement's writable modules."
+            "the implementation context does not include dependency source as an edit target."
         )
     return "\n".join(dict.fromkeys(warnings))
 
