@@ -22,6 +22,7 @@ from .artifacts import CompilerArtifactStore
 from .code_binding import CodeTargetResolver
 from .exact_file_patcher import ExactFilePatcher
 from .failure_analysis import FailureAnalysisResult, FailureAnalyzer, TestFailureReport
+from .e2e_repair_router import classify_e2e_route
 from .initial_implementation import (
     BACKEND_INITIAL_KINDS,
     FRONTEND_INITIAL_KINDS,
@@ -212,6 +213,7 @@ class NodeTDDOrchestrator:
         self._state_history: dict[str, list[str]] = {}
         self._accepted_results: dict[str, NodeTDDResult] = {}
         self._node_checkpoints: dict[str, _CompilableCheckpoint] = {}
+        self._layer_gate_outcomes: dict[str, dict[str, str]] = {}
         self._tdd_root = self.output_root / ".arc" / "tdd"
         if resume and self.test_manifest is not None:
             self._restore_accepted_checkpoints()
@@ -287,6 +289,38 @@ class NodeTDDOrchestrator:
             return self.frontend_implementation_agent
         return self.implementation_agent
 
+    def _implementation_agents_for_reports(
+        self,
+        reports: list[TestFailureReport],
+        *,
+        layer: str | None,
+    ) -> list[ImplementationAgent]:
+        """Choose the specialist sequence for the current test layer."""
+
+        normalized_layer = str(layer or "").upper()
+        if normalized_layer in {"UNIT", "INTEGRATION"}:
+            return [self.implementation_agent]
+        if normalized_layer != "E2E":
+            return [self._implementation_agent_for_reports(reports)]
+
+        route = classify_e2e_route(
+            reports,
+            code_binding_registry=self.code_binding_registry,
+        )
+        self._log.info(
+            "E2E_REPAIR_ROUTE "
+            f"route={route.route} backend_targets={list(route.backend_targets)} "
+            f"frontend_targets={list(route.frontend_targets)} reasons={list(route.reasons)}"
+        )
+        if route.route == "FRONTEND_ONLY":
+            return [self.frontend_implementation_agent]
+        if route.route == "BACKEND_ONLY":
+            return [self.implementation_agent]
+        # CROSS_LAYER and AMBIGUOUS deliberately use two small calls.  The
+        # second call receives a fresh E2E report after the first patch, so it
+        # never needs a combined oversized frontend/backend payload.
+        return [self.implementation_agent, self.frontend_implementation_agent]
+
     def run_node(self, requirement_id: str) -> NodeTDDResult:
         """Generate this node's tests and drive only this node to acceptance."""
 
@@ -352,198 +386,258 @@ class NodeTDDOrchestrator:
                 }
                 self._transition(requirement_id, "INITIAL_IMPLEMENTED")
 
-            self._log.info(
-                f"IMPLEMENTATION_PHASE requirement={requirement_id} phase=BASELINE_TEST"
-            )
-
-            baseline = self._run_and_analyze(
-                requirement_id,
-                iteration=0,
-                include_typecheck=bool(initial_changed),
-                changed_files=sorted(changed_files),
-            )
-            self._record_compilable_checkpoint(
-                requirement_id,
-                baseline.test_run,
-                changed_files,
-            )
-            result.infrastructure_retries += baseline.infrastructure_retries
-            failure_analysis_text = baseline.analysis.agent_context
-            if baseline.analysis.errors:
-                return self._finish(result, "INTERNAL_ERROR", baseline.analysis.errors)
-            if baseline.test_run.ok:
-                if initial_changed:
-                    return self._accept_node(result)
+            available_layers = [
+                layer
+                for layer in TEST_LAYERS
+                if any(
+                    isinstance(row, dict)
+                    and str(row.get("requirement_id", "")) == requirement_id
+                    and str(row.get("layer", "")).upper() == layer
+                    for row in (self.test_manifest or {}).get("files", [])
+                )
+            ]
+            if not available_layers:
                 return self._finish(
                     result,
-                    "RED_NOT_OBSERVED",
-                    [
-                        "ARC4543 RED_NOT_OBSERVED: frozen tests already pass before "
-                        f"implementing {requirement_id}."
-                    ],
-                )
-            blocked = _blocked_state(baseline.analysis.reports)
-            if blocked:
-                return self._finish(
-                    result,
-                    blocked,
-                    _report_messages(baseline.analysis.reports),
+                    "BLOCKED_TEST_MATERIALIZATION",
+                    [f"ARC4503 TEST_SELECTION_INVALID: no test layers for {requirement_id}."],
                 )
 
-            self._transition(requirement_id, "RED_CONFIRMED")
-            reports = baseline.analysis.reports
-            last_fingerprint = _selected_cluster(reports)[0].failure_fingerprint
-            unchanged_failures = 0
+            failure_analysis_text = ""
             functional_iterations = 0
             visual_iterations = 0
             patch_iteration = 1 if initial_changed else 0
             retry_feedback: tuple[str, ...] = ()
+            any_red_observed = False
+            layer_outcomes = self._layer_gate_outcomes.setdefault(requirement_id, {})
 
-            while True:
-                cluster = _selected_cluster(reports)
-                if functional_iterations >= self.policy.max_iterations_per_node:
-                    return self._budget_exhausted(
-                        result,
-                        functional_iterations,
-                        visual_iterations,
-                        changed_files,
-                        "implementation",
-                    )
-                functional_iterations += 1
-                patch_iteration += 1
-                result.iterations = functional_iterations
-                result.visual_iterations = visual_iterations
-                self._transition(requirement_id, "IMPLEMENTING")
+            for layer_index, active_layer in enumerate(available_layers):
                 self._log.info(
-                    f"IMPLEMENTATION_PHASE requirement={requirement_id} phase=TDD_REPAIR "
-                    f"iteration={patch_iteration}"
+                    f"LAYER_GATE_STARTED requirement={requirement_id} layer={active_layer}"
                 )
-
-                implementation_agent = self._implementation_agent_for_reports(cluster)
-                implementation = implementation_agent.implement(
-                    ImplementationRequest(
-                        requirement_id=requirement_id,
-                        requirement=self.requirement_ir["nodes"][requirement_id],
-                        requirement_contract=self._requirement_contract(requirement_id),
-                        test_manifest=self.test_manifest or {},
-                        code_binding_registry=self.code_binding_registry,
-                        failure_reports=tuple(cluster),
-                        failure_analysis_text=failure_analysis_text,
-                        iteration=patch_iteration,
-                        design_context=self._design_context(requirement_id),
-                        previous_patch_metadata=previous_patch_metadata,
-                        retry_feedback=retry_feedback,
-                    )
-                )
-                if not implementation.ok or implementation.patch is None:
-                    return self._finish(
-                        result,
-                        "AGENT_FAILED",
-                        implementation.errors
-                        or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."],
-                        iterations=functional_iterations,
-                        visual_iterations=visual_iterations,
-                        changed_files=changed_files,
-                    )
-
-                applied = self.file_patcher.apply(
-                    implementation.patch,
-                    code_binding_registry=self.code_binding_registry,
-                )
-                if not applied.ok:
-                    # Feed exact patch-application feedback into the next
-                    # implementation attempt instead of terminating the node.
-                    # The next model call receives the original requirement,
-                    # source context, and this rejection as additional evidence.
-                    retry_feedback = [
-                        "The previous exact patch could not be applied to the current source.",
-                        *applied.rejected_changes,
-                    ]
-                    retry_feedback = tuple(retry_feedback)
-                    failure_analysis_text = "\n\n".join(
-                        value
-                        for value in (
-                            failure_analysis_text,
-                            "IMPLEMENTATION PATCH RETRY FEEDBACK:\n"
-                            + "\n".join(retry_feedback),
-                        )
-                        if value
-                    )
-                    previous_patch_metadata = {
-                        "iteration": patch_iteration,
-                        "patch_rejected": True,
-                        "rejection_feedback": applied.rejected_changes,
-                    }
-                    continue
-                changed_files.update(_normalize_path(value) for value in applied.changed_files)
-                result.changed_files = sorted(changed_files)
-                previous_patch_metadata = {
-                    "iteration": patch_iteration,
-                    "changed_files": applied.changed_files,
-                    "changed_modules": applied.changed_modules,
-                    "failure_fingerprint_before": cluster[0].failure_fingerprint,
-                }
-
-                verification = self._run_and_analyze(
+                baseline = self._run_and_analyze(
                     requirement_id,
                     iteration=patch_iteration,
-                    include_typecheck=True,
+                    include_typecheck=bool(initial_changed) and layer_index == 0,
+                    layers=(active_layer,),
                     changed_files=sorted(changed_files),
                 )
                 self._record_compilable_checkpoint(
-                    requirement_id,
-                    verification.test_run,
-                    changed_files,
+                    requirement_id, baseline.test_run, changed_files
                 )
-                result.infrastructure_retries += verification.infrastructure_retries
-                if verification.analysis.errors:
-                    return self._finish(
-                        result,
-                        "INTERNAL_ERROR",
-                        verification.analysis.errors,
-                        iterations=functional_iterations,
-                        visual_iterations=visual_iterations,
-                        changed_files=changed_files,
+                result.infrastructure_retries += baseline.infrastructure_retries
+                if baseline.analysis.errors:
+                    return self._finish(result, "INTERNAL_ERROR", baseline.analysis.errors)
+                if baseline.test_run.ok:
+                    if not initial_changed and layer_index == 0:
+                        self._log.info(
+                            f"LAYER_GREEN_ALREADY requirement={requirement_id} "
+                            f"layer={active_layer}; continuing layered gate"
+                        )
+                    self._transition(requirement_id, f"{active_layer}_GREEN")
+                    layer_outcomes[active_layer] = "PASSED"
+                    self._log.info(
+                        f"LAYER_GATE_PASSED requirement={requirement_id} layer={active_layer}"
                     )
-                if verification.test_run.ok:
-                    result.iterations = functional_iterations
-                    result.visual_iterations = visual_iterations
-                    result.changed_files = sorted(changed_files)
-                    return self._accept_node(result)
+                    continue
 
-                blocked = _blocked_state(verification.analysis.reports)
+                blocked = _blocked_state(baseline.analysis.reports)
                 if blocked:
                     return self._finish(
-                        result,
-                        blocked,
-                        _report_messages(verification.analysis.reports),
+                        result, blocked, _report_messages(baseline.analysis.reports),
                         iterations=functional_iterations,
                         visual_iterations=visual_iterations,
                         changed_files=changed_files,
                     )
-                reports = verification.analysis.reports
-                failure_analysis_text = verification.analysis.agent_context
-                fingerprint = _selected_cluster(reports)[0].failure_fingerprint
-                if previous_patch_metadata is not None:
-                    previous_patch_metadata["failure_fingerprint_after"] = fingerprint
-                    previous_patch_metadata["failure_changed"] = fingerprint != last_fingerprint
-                if fingerprint == last_fingerprint:
-                    unchanged_failures += 1
-                else:
-                    unchanged_failures = 0
-                last_fingerprint = fingerprint
-                if unchanged_failures >= self.policy.no_progress_limit:
-                    return self._finish(
-                        result,
-                        "NO_PROGRESS",
-                        [
-                            "ARC4545 NO_PROGRESS: the selected failure fingerprint remained "
-                            f"unchanged for {unchanged_failures} implementation iterations."
-                        ],
-                        iterations=functional_iterations,
-                        visual_iterations=visual_iterations,
-                        changed_files=changed_files,
+                any_red_observed = True
+                self._transition(requirement_id, "RED_CONFIRMED")
+                reports = baseline.analysis.reports
+                failure_analysis_text = baseline.analysis.agent_context
+                last_fingerprint = _selected_cluster(reports)[0].failure_fingerprint
+                unchanged_failures = 0
+                layer_start_iterations = functional_iterations
+                layer_done = False
+                agent_attempt_index = 0
+                no_progress_warning_emitted = False
+
+                while not layer_done:
+                    cluster = _selected_cluster(reports)
+                    if functional_iterations - layer_start_iterations >= self.policy.max_iterations_per_node:
+                        self._log.info(
+                            f"LAYER_GATE_BUDGET_EXHAUSTED requirement={requirement_id} "
+                            f"layer={active_layer} budget={self.policy.max_iterations_per_node}; continuing"
+                        )
+                        layer_outcomes[active_layer] = "BUDGET_EXHAUSTED"
+                        break
+                    functional_iterations += 1
+                    patch_iteration += 1
+                    result.iterations = functional_iterations
+                    result.visual_iterations = visual_iterations
+                    self._transition(requirement_id, "IMPLEMENTING")
+                    self._log.info(
+                        f"IMPLEMENTATION_PHASE requirement={requirement_id} phase=TDD_REPAIR "
+                        f"layer={active_layer} iteration={patch_iteration}"
                     )
+
+                    agents = self._implementation_agents_for_reports(
+                        cluster, layer=active_layer
+                    )
+                    implementation_agent = agents[agent_attempt_index % len(agents)]
+                    agent_attempt_index += 1
+                    implementation = implementation_agent.implement(
+                        ImplementationRequest(
+                            requirement_id=requirement_id,
+                            requirement=self.requirement_ir["nodes"][requirement_id],
+                            requirement_contract=self._requirement_contract(requirement_id),
+                            test_manifest=self.test_manifest or {},
+                            code_binding_registry=self.code_binding_registry,
+                            failure_reports=tuple(cluster),
+                            failure_analysis_text=failure_analysis_text,
+                            iteration=patch_iteration,
+                            design_context=self._design_context(requirement_id),
+                            previous_patch_metadata=previous_patch_metadata,
+                            retry_feedback=retry_feedback,
+                        )
+                    )
+                    if not implementation.ok or implementation.patch is None:
+                        self._log.info(
+                            f"LAYER_GATE_AGENT_FAILED requirement={requirement_id} "
+                            f"layer={active_layer}; continuing to next layer"
+                        )
+                        layer_outcomes[active_layer] = "AGENT_FAILED"
+                        break
+
+                    applied = self.file_patcher.apply(
+                        implementation.patch,
+                        code_binding_registry=self.code_binding_registry,
+                    )
+                    if not applied.ok:
+                        retry_feedback = tuple(
+                            [
+                                "The previous exact patch could not be applied to the current source.",
+                                *applied.rejected_changes,
+                            ]
+                        )
+                        failure_analysis_text = "\n\n".join(
+                            value
+                            for value in (
+                                failure_analysis_text,
+                                "IMPLEMENTATION PATCH RETRY FEEDBACK:\n"
+                                + "\n".join(retry_feedback),
+                            )
+                            if value
+                        )
+                        previous_patch_metadata = {
+                            "iteration": patch_iteration,
+                            "patch_rejected": True,
+                            "rejection_feedback": applied.rejected_changes,
+                        }
+                        continue
+                    changed_files.update(
+                        _normalize_path(value) for value in applied.changed_files
+                    )
+                    result.changed_files = sorted(changed_files)
+                    previous_patch_metadata = {
+                        "iteration": patch_iteration,
+                        "changed_files": applied.changed_files,
+                        "changed_modules": applied.changed_modules,
+                        "failure_fingerprint_before": cluster[0].failure_fingerprint,
+                    }
+                    if active_layer == "INTEGRATION" and "UNIT" in available_layers:
+                        unit_regression = self._run_and_analyze(
+                            requirement_id,
+                            iteration=patch_iteration,
+                            include_typecheck=True,
+                            layers=("UNIT",),
+                            changed_files=sorted(changed_files),
+                        )
+                        result.infrastructure_retries += unit_regression.infrastructure_retries
+                        if not unit_regression.test_run.ok and not unit_regression.analysis.errors:
+                            self._log.info(
+                                f"INTEGRATION_UNIT_REGRESSION_FAILED requirement={requirement_id}"
+                            )
+                            reports = unit_regression.analysis.reports
+                            failure_analysis_text = unit_regression.analysis.agent_context
+                            if reports:
+                                continue
+                    if active_layer == "E2E" and implementation_agent is self.implementation_agent:
+                        backend_layers = tuple(
+                            layer for layer in ("UNIT", "INTEGRATION")
+                            if layer in available_layers
+                        )
+                        if backend_layers:
+                            backend_regression = self._run_and_analyze(
+                                requirement_id,
+                                iteration=patch_iteration,
+                                include_typecheck=True,
+                                layers=backend_layers,
+                                changed_files=sorted(changed_files),
+                            )
+                            result.infrastructure_retries += backend_regression.infrastructure_retries
+                            if not backend_regression.test_run.ok and not backend_regression.analysis.errors:
+                                self._log.info(
+                                    f"E2E_BACKEND_REGRESSION_FAILED requirement={requirement_id} "
+                                    f"layers={backend_layers}"
+                                )
+                                reports = backend_regression.analysis.reports
+                                failure_analysis_text = backend_regression.analysis.agent_context
+                                if reports:
+                                    continue
+
+                    verification = self._run_and_analyze(
+                        requirement_id,
+                        iteration=patch_iteration,
+                        include_typecheck=True,
+                        layers=(active_layer,),
+                        changed_files=sorted(changed_files),
+                    )
+                    self._record_compilable_checkpoint(
+                        requirement_id, verification.test_run, changed_files
+                    )
+                    result.infrastructure_retries += verification.infrastructure_retries
+                    if verification.analysis.errors:
+                        return self._finish(
+                            result, "INTERNAL_ERROR", verification.analysis.errors,
+                            iterations=functional_iterations,
+                            visual_iterations=visual_iterations,
+                            changed_files=changed_files,
+                        )
+                    if verification.test_run.ok:
+                        self._transition(requirement_id, f"{active_layer}_GREEN")
+                        layer_outcomes[active_layer] = "PASSED"
+                        layer_done = True
+                        continue
+                    blocked = _blocked_state(verification.analysis.reports)
+                    if blocked:
+                        return self._finish(
+                            result, blocked, _report_messages(verification.analysis.reports),
+                            iterations=functional_iterations,
+                            visual_iterations=visual_iterations,
+                            changed_files=changed_files,
+                        )
+                    reports = verification.analysis.reports
+                    failure_analysis_text = verification.analysis.agent_context
+                    fingerprint = _selected_cluster(reports)[0].failure_fingerprint
+                    if previous_patch_metadata is not None:
+                        previous_patch_metadata["failure_fingerprint_after"] = fingerprint
+                        previous_patch_metadata["failure_changed"] = fingerprint != last_fingerprint
+                    unchanged_failures = unchanged_failures + 1 if fingerprint == last_fingerprint else 0
+                    last_fingerprint = fingerprint
+                    if unchanged_failures >= self.policy.no_progress_limit:
+                        if not no_progress_warning_emitted:
+                            self._log.info(
+                                f"LAYER_GATE_NO_PROGRESS requirement={requirement_id} "
+                                f"layer={active_layer} unchanged={unchanged_failures}; "
+                                "continuing until the layer iteration budget is exhausted"
+                            )
+                            no_progress_warning_emitted = True
+
+            if not any_red_observed and not initial_changed:
+                self._log.info(
+                    f"LAYER_GREEN_ALREADY requirement={requirement_id} "
+                    "all available layers passed without a repair patch"
+                )
+            return self._accept_node(result)
         except Exception as exc:
             return self._finish(
                 result,
@@ -1328,6 +1422,7 @@ class NodeTDDOrchestrator:
         *,
         iteration: int,
         include_typecheck: bool,
+        layers: tuple[str, ...] = (),
         changed_files: list[str],
     ) -> _RunAnalysis:
         retries = 0
@@ -1335,10 +1430,8 @@ class NodeTDDOrchestrator:
             test_run = self.test_runner.run(
                 TestSelection(
                     requirement_id=requirement_id,
+                    layers=layers,
                     include_typecheck=include_typecheck,
-                    # Collect every test layer in one run so FailureAnalyzer can
-                    # compare all observed failures and form a fingerprint cluster.
-                    # TestRunner still stops immediately on a failed typecheck.
                     stop_on_failure=False,
                 ),
                 test_manifest=self.test_manifest,
@@ -1422,9 +1515,15 @@ class NodeTDDOrchestrator:
             if isinstance(row, dict)
             and str(row.get("requirement_id", "")) == requirement_id
         }
-        for layer in TEST_LAYERS:
-            if layer in available_layers:
-                self._transition(requirement_id, f"{layer}_GREEN")
+        layer_outcomes = self._layer_gate_outcomes.get(requirement_id)
+        if layer_outcomes is None:
+            for layer in TEST_LAYERS:
+                if layer in available_layers:
+                    self._transition(requirement_id, f"{layer}_GREEN")
+        else:
+            for layer in TEST_LAYERS:
+                if layer_outcomes.get(layer) == "PASSED":
+                    self._transition(requirement_id, f"{layer}_GREEN")
 
         impacted = self._impacted_accepted_requirements(
             requirement_id,

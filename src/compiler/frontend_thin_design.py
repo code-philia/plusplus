@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -463,6 +464,82 @@ def validate_screen_components(frontend_ir: dict[str, Any]) -> list[FrontendDesi
         issues.extend(_partition_issues(screen_id, "API", [str(value) for value in screen["required_api_ids"]], rows, "required_api_ids"))
         issues.extend(_partition_issues(screen_id, "observable state", [str(value) for value in screen["observable_states"]], rows, "observable_states"))
     return issues
+
+
+def materialize_screen_components(
+    frontend_ir: dict[str, Any],
+    requirement_ir: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive component rows from screens and requirement ownership.
+
+    The model does not need to repeat the same requirement/API/state facts in a
+    second table.  One deterministic feature component is created for each
+    requirement served by a screen; API and state ownership are joined from
+    their canonical owners and observable states are assigned by stable order.
+    """
+
+    result = copy.deepcopy(frontend_ir)
+    nodes = requirement_ir.get("nodes", {})
+    stores_by_requirement: dict[str, list[str]] = {}
+    for store in result.get("shared_state_policies", []):
+        if not isinstance(store, dict):
+            continue
+        store_id = str(store.get("id", ""))
+        for requirement_id in store.get("requirement_ids", []):
+            stores_by_requirement.setdefault(str(requirement_id), []).append(store_id)
+
+    api_owner: dict[str, str] = {}
+    for screen in result.get("screens", []):
+        if not isinstance(screen, dict):
+            continue
+        for api_id in screen.get("required_api_ids", []):
+            value = str(api_id)
+            api_owner.setdefault(value, value.split("::", 1)[0])
+
+    components: list[dict[str, Any]] = []
+    for screen in result.get("screens", []):
+        if not isinstance(screen, dict):
+            continue
+        screen_id = str(screen.get("id", ""))
+        requirement_ids = sorted({str(value) for value in screen.get("requirement_ids", []) if str(value)})
+        if not requirement_ids:
+            continue
+        route_inputs = copy.deepcopy(screen.get("route_inputs", []))
+        states = [str(value) for value in screen.get("observable_states", []) if str(value)]
+        for index, requirement_id in enumerate(requirement_ids):
+            node = nodes.get(requirement_id, {}) if isinstance(nodes, dict) else {}
+            name = str(node.get("name", "")).strip() if isinstance(node, dict) else ""
+            description = str(node.get("description", "")).strip() if isinstance(node, dict) else ""
+            purpose = name or description or f"Implement {requirement_id} on {screen_id}."
+            component_id = f"COMPONENT.{_component_token(screen_id)}{_component_token(requirement_id)}"
+            owned_apis = sorted(
+                api_id for api_id, owner in api_owner.items() if owner == requirement_id
+            )
+            if not owned_apis and index == 0:
+                owned_apis = sorted(api_owner)
+            owned_states = [state for pos, state in enumerate(states) if pos % len(requirement_ids) == index]
+            linked_visuals = sorted(
+                set(str(value) for value in screen.get("visual_reference_ids", []) if str(value))
+                if index == 0 else set()
+            )
+            components.append({
+                "id": component_id,
+                "screen_id": screen_id,
+                "purpose": purpose,
+                "requirement_ids": [requirement_id],
+                "inputs": route_inputs if index == 0 else [],
+                "required_api_ids": owned_apis,
+                "shared_state_ids": sorted(set(stores_by_requirement.get(requirement_id, []))),
+                "observable_states": owned_states,
+                "visual_reference_ids": linked_visuals,
+            })
+    result["screen_components"] = sorted(components, key=lambda row: str(row["id"]))
+    return result
+
+
+def _component_token(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9]+", " ", str(value)).strip()
+    return "".join(part[:1].upper() + part[1:] for part in text.split()) or "Feature"
 
 
 def _partition_issues(screen_id: str, label: str, expected: list[str], components: list[dict[str, Any]], key: str) -> list[FrontendDesignIssue]:

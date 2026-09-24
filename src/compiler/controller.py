@@ -24,6 +24,7 @@ from .file_planning import GlobalFilePlanner
 from .frontend_thin_design import (
     ThinFrontendDesignPass,
     frontend_design_traceability,
+    materialize_screen_components,
     project_frontend_runtime_ir,
 )
 from .frontend_lowering import (
@@ -42,7 +43,6 @@ from .model_client import Model, ModelConfigurationError, StructuredModel
 from .models import CompilationRequest, CompilationResult
 from .module_lowering import ModuleSkeletonLowerer
 from .project_build import ProjectBuilder
-from .screen_partition_stage import ScreenPartitionPass
 from .project_initialization import (
     ProjectInitializer,
     validate_frontend_environment,
@@ -502,29 +502,20 @@ class Compiler:
                     frontend_errors.append(f"ARC4150 DUAL_DESIGN_INVALID: {exc}")
 
         if not frontend_errors and not frontend_design_ir.get("screen_components"):
+            await self._log(
+                "Compiler",
+                "Deriving screen components deterministically from requirement ownership.",
+            )
+            frontend_design_ir = materialize_screen_components(
+                frontend_design_ir,
+                preprocessing.requirement_ir,
+            )
             try:
-                model = model or Model.from_env()
-            except ModelConfigurationError as exc:
-                frontend_errors.append(str(exc))
-            if not frontend_errors and model is not None:
-                await self._log(
-                    "Compiler",
-                    "Partitioning every screen into writable components, one bounded call per screen.",
-                )
-                partition = ScreenPartitionPass(model, artifact_store.root).compile(
-                    frontend_design_ir,
-                    preprocessing.requirement_ir,
-                )
-                if not partition.ok:
-                    frontend_errors.extend(partition.errors)
-                else:
-                    frontend_design_ir = partition.frontend_ir
-                    try:
-                        artifacts.update(artifact_store.write_frontend_design(
-                            frontend_ir=frontend_design_ir,
-                        ))
-                    except ValueError as exc:
-                        frontend_errors.append(f"ARC4150 DUAL_DESIGN_INVALID: {exc}")
+                artifacts.update(artifact_store.write_frontend_design(
+                    frontend_ir=frontend_design_ir,
+                ))
+            except ValueError as exc:
+                frontend_errors.append(f"ARC4150 DUAL_DESIGN_INVALID: {exc}")
 
         if frontend_errors:
             for node_id in requirement_ids:
