@@ -257,7 +257,7 @@ def test_workspace_spec(
                 '      command: "npm run build -w @arc/frontend && npm run start -w @arc/backend",\n'
                 f'      url: "http://127.0.0.1:{port}/__arc/health",\n'
                 f'      env: {{ DATABASE_URL: ":memory:", NODE_ENV: "test", PORT: "{port}" }},\n'
-                "      reuseExistingServer: true,\n"
+                "      reuseExistingServer: false,\n"
                 "      timeout: 60_000,\n"
                 "    },\n"
                 "});\n"

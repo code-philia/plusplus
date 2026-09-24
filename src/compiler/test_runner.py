@@ -14,6 +14,7 @@ from core.logging import SynchronousLog
 from .process_utils import (
     process_group_kwargs,
     resolve_executable,
+    terminate_tcp_listeners,
     terminate_process_tree,
 )
 from .test_generation import TEST_ENVIRONMENT_READY, TEST_LAYERS, TESTS_FROZEN
@@ -197,6 +198,12 @@ class TestRunner:
             if any(str(row.get("layer", "")).upper() == layer for row in file_rows)
         ]
         selected_layers = layers or available_layers
+        backend_port = _environment_backend_port(environment)
+        if "E2E" in selected_layers and backend_port is None:
+            errors.append(
+                "ARC4502 TEST_ENVIRONMENT_INVALID: backend_port must be an integer "
+                "between 1 and 65535 before E2E execution."
+            )
         missing_layers = [layer for layer in selected_layers if layer not in available_layers]
         if missing_layers:
             errors.append(
@@ -312,6 +319,7 @@ class TestRunner:
                 command=command,
                 test_files=layer_files,
                 timeout=self._timeouts[layer],
+                e2e_port=backend_port if layer == "E2E" else None,
             )
             result.commands.append(command_result)
             if command_result.status != "PASSED" and selection.stop_on_failure:
@@ -362,6 +370,7 @@ class TestRunner:
         command: list[str],
         test_files: list[str],
         timeout: float,
+        e2e_port: int | None = None,
     ) -> TestCommandResult:
         started = time.perf_counter()
         command_text = " ".join(command)
@@ -369,6 +378,33 @@ class TestRunner:
             f"STARTED phase={phase} layer={layer or '-'} timeout_s={timeout:g} "
             f"command={command_text}"
         )
+        if str(layer or "").upper() == "E2E" and e2e_port is not None:
+            terminated_pids, cleanup_errors = terminate_tcp_listeners(e2e_port)
+            if terminated_pids:
+                self._log.info(
+                    "STALE_E2E_SERVER_TERMINATED "
+                    f"port={e2e_port} pids={terminated_pids}"
+                )
+            if cleanup_errors:
+                duration_ms = round((time.perf_counter() - started) * 1000)
+                detail = "; ".join(cleanup_errors)
+                self._log.info(
+                    "E2E_PORT_CLEANUP_FAILED "
+                    f"port={e2e_port} duration_ms={duration_ms} errors={detail}"
+                )
+                return TestCommandResult(
+                    phase=phase,
+                    layer=layer,
+                    command=command,
+                    test_files=test_files,
+                    status="ERROR",
+                    returncode=None,
+                    duration_ms=duration_ms,
+                    error=(
+                        "ARC4509 E2E_PORT_CLEANUP_FAILED: cannot release TCP port "
+                        f"{e2e_port}: {detail}"
+                    ),
+                )
         executable = resolve_executable(command[0], self.environment)
         if executable is None:
             self._log.info(
@@ -635,3 +671,11 @@ def _bounded_float(
         return max(minimum, min(float(environment.get(name, str(default))), maximum))
     except ValueError:
         return default
+
+
+def _environment_backend_port(environment: Mapping[str, Any]) -> int | None:
+    try:
+        port = int(environment.get("backend_port", 0))
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None

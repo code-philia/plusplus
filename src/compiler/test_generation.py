@@ -343,7 +343,7 @@ class TestEnvironmentInitializer:
                 workspaces.count("tests") if isinstance(workspaces, list) else 0
             ),
             "backend_port": self.backend_port,
-                "frontend_port": self.backend_port,
+            "frontend_port": self.backend_port,
             "versions": {
                 "typescript": self.catalog.typescript,
                 "vitest": self.catalog.vitest,
