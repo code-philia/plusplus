@@ -425,6 +425,7 @@ class Compiler:
                 for table_name in (
                     "visual_references",
                     "screens",
+                    "placements",
                     "screen_components",
                     "journeys",
                     "api_usages",
@@ -479,7 +480,7 @@ class Compiler:
             if not frontend_errors:
                 await self._log(
                     "Compiler",
-                    "Running one-pass THIN FRONTEND DESIGN for screens, journeys, API usages, shared state, and visual evidence.",
+                    "Running multi-pass THIN FRONTEND DESIGN: one product-wide screen/route/navigation architecture pass followed by requirement-ordered UI placement passes; implementation targets and API associations are compiler-derived.",
                 )
                 ui_scope = ThinFrontendDesignPass(model, artifact_store.root).compile(
                     preprocessing.requirement_ir,
@@ -504,7 +505,7 @@ class Compiler:
         if not frontend_errors and not frontend_design_ir.get("screen_components"):
             await self._log(
                 "Compiler",
-                "Deriving screen components deterministically from requirement ownership.",
+                "Deriving frontend implementation components deterministically from requirement placements.",
             )
             frontend_design_ir = materialize_screen_components(
                 frontend_design_ir,
@@ -1278,17 +1279,25 @@ class Compiler:
                 )
             if not node_result.ok:
                 tdd_failed_nodes.append(requirement_id)
+                layer_summary = (
+                    f" layer_outcomes={node_result.layer_outcomes}"
+                    if node_result.layer_outcomes
+                    else ""
+                )
                 await self._log(
                     "Compiler",
-                    f"NODE_TDD_SKIPPED: {requirement_id} stopped at {node_result.status}; "
-                    "continuing with the next atomic requirement.",
+                    f"NODE_TDD_INCOMPLETE: {requirement_id} finished with "
+                    f"{node_result.status};{layer_summary} the latest compilable "
+                    "checkpoint was retained and compilation will continue with the "
+                    "next atomic requirement.",
                     "warning",
                     requirement_id,
                 )
                 continue
             await self._log(
                 "NodeTDDOrchestrator",
-                f"NODE_ACCEPTED: {requirement_id} passed its frozen tests and impacted regressions.",
+                f"NODE_ACCEPTED: {requirement_id} passed its frozen tests and impacted "
+                f"regressions; layer_outcomes={node_result.layer_outcomes}.",
                 node_id=requirement_id,
             )
 
@@ -1319,6 +1328,8 @@ class Compiler:
             )
 
         aggregate_failed_nodes: list[str] = []
+        aggregate_accepted_nodes: list[str] = []
+        aggregate_noop_nodes: list[str] = []
         for requirement_id in folder_order:
             await self._log(
                 "NodeTDDOrchestrator",
@@ -1337,9 +1348,16 @@ class Compiler:
             if not node_result.ok:
                 aggregate_failed_nodes.append(requirement_id)
                 continue
+            if node_result.status == "NO_IMPLEMENTATION_REQUIRED":
+                aggregate_noop_nodes.append(requirement_id)
+            else:
+                aggregate_accepted_nodes.append(requirement_id)
             await self._log(
                 "NodeTDDOrchestrator",
-                f"AGGREGATE_ACCEPTED: {requirement_id} implemented its owned targets.",
+                (
+                    f"{node_result.status}: {requirement_id} aggregate frontend work "
+                    "was processed."
+                ),
                 node_id=requirement_id,
             )
 
@@ -1348,14 +1366,18 @@ class Compiler:
             await self._log(
                 "Compiler",
                 "IMPLEMENTATION_COMPLETE_WITH_SKIPS: all atomic and aggregate requirements "
-                f"were processed; skipped={failed_nodes}.",
+                f"were processed; atomic_failed={sorted(set(tdd_failed_nodes))}; "
+                f"aggregate_failed={sorted(set(aggregate_failed_nodes))}; "
+                f"aggregate_accepted={aggregate_accepted_nodes}; "
+                f"aggregate_noop={aggregate_noop_nodes}.",
                 "warning",
             )
         else:
             await self._log(
                 "Compiler",
-                "IMPLEMENTATION_COMPLETE: every atomic and aggregate requirement reached "
-                "NODE_ACCEPTED.",
+                "IMPLEMENTATION_COMPLETE: every atomic and aggregate requirement was "
+                f"processed; aggregate_accepted={aggregate_accepted_nodes}; "
+                f"aggregate_noop={aggregate_noop_nodes}.",
             )
 
         await self._log(

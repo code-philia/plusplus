@@ -50,9 +50,13 @@ TERMINAL_NODE_STATES = {
     "BLOCKED_CONTRACT",
     "RED_NOT_OBSERVED",
     "AGENT_FAILED",
+    "AGGREGATE_IMPLEMENTATION_INCOMPLETE",
+    "AGGREGATE_ACCEPTED",
+    "NO_IMPLEMENTATION_REQUIRED",
     "PATCH_REJECTED",
     "NO_PROGRESS",
     "ITERATION_BUDGET_EXHAUSTED",
+    "NODE_COMPLETED_WITH_FAILURES",
     "REGRESSION_FAILED",
     "INTERNAL_ERROR",
 }
@@ -111,13 +115,18 @@ class NodeTDDResult:
     state_history: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     impacted_requirements: list[str] = field(default_factory=list)
+    layer_outcomes: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     schema_version: int = NODE_TDD_SCHEMA_VERSION
 
     @property
     def ok(self) -> bool:
-        return self.status == "NODE_ACCEPTED" and not self.errors
+        return self.status in {
+            "NODE_ACCEPTED",
+            "AGGREGATE_ACCEPTED",
+            "NO_IMPLEMENTATION_REQUIRED",
+        } and not self.errors
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -402,6 +411,12 @@ class NodeTDDOrchestrator:
                     "BLOCKED_TEST_MATERIALIZATION",
                     [f"ARC4503 TEST_SELECTION_INVALID: no test layers for {requirement_id}."],
                 )
+            for skipped_layer in TEST_LAYERS:
+                if skipped_layer not in available_layers:
+                    self._log.info(
+                        f"LAYER_GATE_SKIPPED requirement={requirement_id} "
+                        f"layer={skipped_layer} reason=NO_FROZEN_TESTS"
+                    )
 
             failure_analysis_text = ""
             functional_iterations = 0
@@ -436,6 +451,7 @@ class NodeTDDOrchestrator:
                         )
                     self._transition(requirement_id, f"{active_layer}_GREEN")
                     layer_outcomes[active_layer] = "PASSED"
+                    result.layer_outcomes = dict(layer_outcomes)
                     self._log.info(
                         f"LAYER_GATE_PASSED requirement={requirement_id} layer={active_layer}"
                     )
@@ -468,6 +484,7 @@ class NodeTDDOrchestrator:
                             f"layer={active_layer} budget={self.policy.max_iterations_per_node}; continuing"
                         )
                         layer_outcomes[active_layer] = "BUDGET_EXHAUSTED"
+                        result.layer_outcomes = dict(layer_outcomes)
                         break
                     functional_iterations += 1
                     patch_iteration += 1
@@ -505,6 +522,7 @@ class NodeTDDOrchestrator:
                             f"layer={active_layer}; continuing to next layer"
                         )
                         layer_outcomes[active_layer] = "AGENT_FAILED"
+                        result.layer_outcomes = dict(layer_outcomes)
                         break
 
                     applied = self.file_patcher.apply(
@@ -605,6 +623,7 @@ class NodeTDDOrchestrator:
                     if verification.test_run.ok:
                         self._transition(requirement_id, f"{active_layer}_GREEN")
                         layer_outcomes[active_layer] = "PASSED"
+                        result.layer_outcomes = dict(layer_outcomes)
                         layer_done = True
                         continue
                     blocked = _blocked_state(verification.analysis.reports)
@@ -637,6 +656,27 @@ class NodeTDDOrchestrator:
                     f"LAYER_GREEN_ALREADY requirement={requirement_id} "
                     "all available layers passed without a repair patch"
                 )
+            result.layer_outcomes = dict(layer_outcomes)
+            incomplete_layers = {
+                layer: layer_outcomes.get(layer, "NOT_RUN")
+                for layer in available_layers
+                if layer_outcomes.get(layer) != "PASSED"
+            }
+            if incomplete_layers:
+                warnings = [
+                    "LAYER_GATE_INCOMPLETE: "
+                    f"{layer} ended with {outcome}; the latest compilable checkpoint "
+                    "was preserved and later layers were still processed."
+                    for layer, outcome in incomplete_layers.items()
+                ]
+                return self._finish(
+                    result,
+                    "NODE_COMPLETED_WITH_FAILURES",
+                    warnings,
+                    iterations=functional_iterations,
+                    visual_iterations=visual_iterations,
+                    changed_files=changed_files,
+                )
             return self._accept_node(result)
         except Exception as exc:
             return self._finish(
@@ -654,7 +694,11 @@ class NodeTDDOrchestrator:
         requirement_id = str(requirement_id).strip()
         result = NodeTDDResult(requirement_id=requirement_id, status="INTERNAL_ERROR")
         try:
-            if self.node_states.get(requirement_id) == "NODE_ACCEPTED":
+            if self.node_states.get(requirement_id) in {
+                "NODE_ACCEPTED",
+                "AGGREGATE_ACCEPTED",
+                "NO_IMPLEMENTATION_REQUIRED",
+            }:
                 return copy.deepcopy(self._accepted_results[requirement_id])
             nodes = self.requirement_ir.get("nodes", {})
             requirement = nodes.get(requirement_id) if isinstance(nodes, dict) else None
@@ -665,7 +709,7 @@ class NodeTDDOrchestrator:
                     [f"ARC4541 AGGREGATE_INPUT_INVALID: {requirement_id} is not a folder requirement."],
                 )
 
-            self._transition(requirement_id, "NODE_DISCOVERED")
+            self._transition(requirement_id, "AGGREGATE_DISCOVERED")
             resolved = CodeTargetResolver(
                 self.code_binding_registry
             ).resolve_requirement_targets(requirement_id)
@@ -674,134 +718,66 @@ class NodeTDDOrchestrator:
                 for row in resolved.get("owned_targets", [])
                 if isinstance(row, dict)
             ]
-            if not writable_targets:
+            frontend_kinds = {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
+            frontend_targets = [
+                row for row in writable_targets
+                if str(row.get("kind", "")).upper() in frontend_kinds
+            ]
+            ignored_backend_targets = [
+                str(row.get("module_id", ""))
+                for row in writable_targets
+                if str(row.get("kind", "")).upper() not in frontend_kinds
+            ]
+            if ignored_backend_targets:
+                self._log.info(
+                    f"AGGREGATE_BACKEND_TARGETS_DEFERRED requirement={requirement_id} "
+                    f"targets={sorted(ignored_backend_targets)}"
+                )
+            if not frontend_targets:
                 self._transition(requirement_id, "NO_IMPLEMENTATION_REQUIRED")
-                return self._finish(result, "NODE_ACCEPTED", [])
+                return self._finish(result, "NO_IMPLEMENTATION_REQUIRED", [])
 
             self._node_checkpoints[requirement_id] = _CompilableCheckpoint(
                 sources=self.file_patcher.snapshot(self._checkpoint_files(requirement_id))
             )
 
-            frontend_kinds = {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
-            if writable_targets and all(
-                str(row.get("kind", "")).upper() in frontend_kinds
-                for row in writable_targets
-            ):
-                changed, errors, batch_count = self._implement_frontend_aggregate_batches(
-                    requirement_id,
-                    writable_targets,
-                    requirement,
-                )
-                if errors:
-                    return self._finish(
-                        result,
-                        "AGENT_FAILED",
-                        errors,
-                        iterations=batch_count,
-                        changed_files=changed,
-                    )
-                verification_errors = self._verify_aggregate_patch(
-                    requirement_id,
-                    changed,
-                )
-                if verification_errors:
-                    return self._finish(
-                        result,
-                        "REGRESSION_FAILED",
-                        verification_errors,
-                        iterations=batch_count,
-                        changed_files=changed,
-                    )
-                self._transition(requirement_id, "AGGREGATE_IMPLEMENTED")
+            self._transition(requirement_id, "AGGREGATE_FRONTEND_IMPLEMENTING")
+            changed, errors, batch_count = self._implement_frontend_aggregate_batches(
+                requirement_id,
+                frontend_targets,
+                requirement,
+            )
+            if errors:
                 return self._finish(
                     result,
-                    "NODE_ACCEPTED",
-                    [],
+                    "AGGREGATE_IMPLEMENTATION_INCOMPLETE",
+                    errors,
                     iterations=batch_count,
                     changed_files=changed,
                 )
-
-            target_ids = sorted(str(row["module_id"]) for row in writable_targets)
-            fingerprint = hashlib.sha256(
-                f"{requirement_id}:aggregate-implementation".encode("utf-8")
-            ).hexdigest()
-            report = TestFailureReport(
-                requirement_id=requirement_id,
-                iteration=0,
-                test_id=f"aggregate:{requirement_id}",
-                test_ids=[f"aggregate:{requirement_id}"],
-                layer="AGGREGATE",
-                phase="AGGREGATE_IMPLEMENTATION",
-                failure_class="IMPLEMENTATION_BEHAVIOR",
-                message=(
-                    "Implement the connected frontend and any other source modules owned "
-                    "by this non-leaf requirement."
-                ),
-                stack_frames=[],
-                target_modules=target_ids,
-                writable_targets=writable_targets,
-                read_only_dependencies=[],
-                changed_files=[],
-                failure_fingerprint=fingerprint,
-                diagnostic_output=(
-                    "Treat the non-leaf requirement as an aggregate product scope. Keep its "
-                    "screens, navigation, shared state, and declared backend calls coherent; "
-                    "only edit targets authorized by Code Binding."
-                ),
-            )
-            self._transition(requirement_id, "AGGREGATE_IMPLEMENTING")
-            implementation = self.implementation_agent.implement(
-                ImplementationRequest(
-                    requirement_id=requirement_id,
-                    requirement=requirement,
-                    requirement_contract={},
-                    test_manifest={},
-                    code_binding_registry=self.code_binding_registry,
-                    failure_reports=(report,),
-                    iteration=1,
-                    mode="AGGREGATE",
-                    design_context=self._design_context(requirement_id),
-                )
-            )
-            if not implementation.ok or implementation.patch is None:
-                return self._finish(
-                    result,
-                    "AGENT_FAILED",
-                    implementation.errors
-                    or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."],
-                    iterations=1,
-                )
-            applied = self.file_patcher.apply(
-                implementation.patch,
-                code_binding_registry=self.code_binding_registry,
-            )
-            if not applied.ok:
-                return self._finish(
-                    result,
-                    "PATCH_REJECTED",
-                    applied.rejected_changes,
-                    iterations=1,
-                )
             verification_errors = self._verify_aggregate_patch(
                 requirement_id,
-                set(applied.changed_files),
+                changed,
             )
             if verification_errors:
                 return self._finish(
                     result,
-                    "REGRESSION_FAILED",
+                    "AGGREGATE_IMPLEMENTATION_INCOMPLETE",
                     verification_errors,
-                    iterations=1,
-                    changed_files=set(applied.changed_files),
+                    iterations=batch_count,
+                    changed_files=changed,
                 )
-            self._transition(requirement_id, "AGGREGATE_IMPLEMENTED")
+            self._transition(requirement_id, "AGGREGATE_TYPECHECKED")
+            self._transition(requirement_id, "AGGREGATE_REGRESSION_CHECKED")
+            self._transition(requirement_id, "AGGREGATE_ACCEPTED")
             return self._finish(
                 result,
-                "NODE_ACCEPTED",
+                "AGGREGATE_ACCEPTED",
                 [],
-                iterations=1,
-                changed_files=set(applied.changed_files),
+                iterations=batch_count,
+                changed_files=changed,
             )
+
         except Exception as exc:
             return self._finish(
                 result,
@@ -832,8 +808,16 @@ class NodeTDDOrchestrator:
         }
         changed_files: set[str] = set()
         batch = 0
+        model_attempts = 0
         errors: list[str] = []
         while remaining:
+            if model_attempts >= self.policy.max_iterations_per_node:
+                errors.append(
+                    "ARC4547 AGGREGATE_ITERATION_BUDGET_EXHAUSTED: aggregate frontend "
+                    f"implementation budget was exhausted after {model_attempts} model "
+                    f"attempt(s); remaining={sorted(remaining)}."
+                )
+                break
             batch += 1
             resolved = CodeTargetResolver(
                 self.code_binding_registry
@@ -854,72 +838,92 @@ class NodeTDDOrchestrator:
                 break
             target = targets[0]
             module_id = str(target["module_id"])
-            self._log.info(
-                f"FRONTEND_AGGREGATE_BATCH requirement={requirement_id} "
-                f"batch={batch} module={module_id} remaining={len(remaining)}"
-            )
-            fingerprint = hashlib.sha256(
-                f"{requirement_id}:aggregate-frontend:{batch}:{module_id}".encode(
-                    "utf-8"
+            target_attempt = 0
+            retry_feedback: list[str] = []
+            target_completed = False
+            while target_attempt <= self.policy.initial_target_retry_count:
+                if model_attempts >= self.policy.max_iterations_per_node:
+                    retry_feedback = [
+                        "ARC4547 AGGREGATE_ITERATION_BUDGET_EXHAUSTED: no further "
+                        "aggregate model attempt is available for this target."
+                    ]
+                    break
+                target_attempt += 1
+                model_attempts += 1
+                self._log.info(
+                    f"FRONTEND_AGGREGATE_BATCH requirement={requirement_id} "
+                    f"batch={batch} module={module_id} target_attempt={target_attempt} "
+                    f"remaining={len(remaining)}"
                 )
-            ).hexdigest()
-            report = TestFailureReport(
-                requirement_id=requirement_id,
-                iteration=batch,
-                test_id=f"aggregate:{requirement_id}",
-                test_ids=[f"aggregate:{requirement_id}"],
-                layer="AGGREGATE",
-                phase="FRONTEND_BOOTSTRAP",
-                failure_class="IMPLEMENTATION_BEHAVIOR",
-                message="Implement this one frontend module in the aggregate requirement.",
-                stack_frames=[],
-                target_modules=[module_id],
-                writable_targets=[copy.deepcopy(target)],
-                read_only_dependencies=[],
-                changed_files=sorted(changed_files),
-                failure_fingerprint=fingerprint,
-                diagnostic_output=(
-                    "Implement only the supplied frontend module. Preserve the declared "
-                    "routes, API clients, stores, and visual direction; return one complete "
-                    "search/replacement edit for this module."
-                ),
-            )
-            implementation = self.frontend_implementation_agent.implement(
-                ImplementationRequest(
+                fingerprint = hashlib.sha256(
+                    f"{requirement_id}:aggregate-frontend:{batch}:{module_id}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest()
+                report = TestFailureReport(
                     requirement_id=requirement_id,
-                    requirement=requirement,
-                    requirement_contract={},
-                    test_manifest={},
-                    code_binding_registry=self.code_binding_registry,
-                    failure_reports=(report,),
                     iteration=batch,
-                    mode="AGGREGATE",
-                    design_context=self._design_context(requirement_id),
+                    test_id=f"aggregate:{requirement_id}",
+                    test_ids=[f"aggregate:{requirement_id}"],
+                    layer="AGGREGATE",
+                    phase="FRONTEND_BOOTSTRAP",
+                    failure_class="IMPLEMENTATION_BEHAVIOR",
+                    message="Implement this one frontend module in the aggregate requirement.",
+                    stack_frames=[],
+                    target_modules=[module_id],
+                    writable_targets=[copy.deepcopy(target)],
+                    read_only_dependencies=[],
+                    changed_files=sorted(changed_files),
+                    failure_fingerprint=fingerprint,
+                    diagnostic_output=(
+                        "Implement only the supplied frontend module. Preserve the declared "
+                        "routes, API clients, stores, and visual direction; return exact "
+                        "search/replacement edits for this module.\n"
+                        + ("RETRY FEEDBACK:\n" + "\n".join(retry_feedback) if retry_feedback else "")
+                    ),
                 )
-            )
-            if not implementation.ok or implementation.patch is None:
-                errors.extend(
-                    implementation.errors
-                    or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."]
+                implementation = self.frontend_implementation_agent.implement(
+                    ImplementationRequest(
+                        requirement_id=requirement_id,
+                        requirement=requirement,
+                        requirement_contract={},
+                        test_manifest={},
+                        code_binding_registry=self.code_binding_registry,
+                        failure_reports=(report,),
+                        iteration=batch,
+                        mode="AGGREGATE",
+                        design_context=self._design_context(requirement_id),
+                        retry_feedback=tuple(retry_feedback),
+                    )
                 )
-                break
-            applied = self.file_patcher.apply(
-                implementation.patch,
-                code_binding_registry=self.code_binding_registry,
-            )
-            if not applied.ok:
-                errors.extend(applied.rejected_changes)
-                break
-            applied_ids = set(applied.changed_modules).intersection(remaining)
-            if not applied_ids:
-                errors.append(
-                    "ARC4544 FRONTEND_AGGREGATE_STALLED: the patch did not change the "
-                    "current frontend module."
+                if not implementation.ok or implementation.patch is None:
+                    retry_feedback = list(
+                        implementation.errors
+                        or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."]
+                    )
+                    continue
+                applied = self.file_patcher.apply(
+                    implementation.patch,
+                    code_binding_registry=self.code_binding_registry,
                 )
+                if not applied.ok:
+                    retry_feedback = list(applied.rejected_changes)
+                    continue
+                applied_ids = set(applied.changed_modules).intersection(remaining)
+                if not applied_ids:
+                    retry_feedback = [
+                        "ARC4544 FRONTEND_AGGREGATE_STALLED: the patch did not change the "
+                        "current frontend module."
+                    ]
+                    continue
+                remaining.difference_update(applied_ids)
+                changed_files.update(_normalize_path(value) for value in applied.changed_files)
+                target_completed = True
                 break
-            remaining.difference_update(applied_ids)
-            changed_files.update(_normalize_path(value) for value in applied.changed_files)
-        return changed_files, errors, batch
+            if not target_completed:
+                errors.extend(retry_feedback)
+                break
+        return changed_files, errors, model_attempts
 
     def _verify_aggregate_patch(
         self,
@@ -1070,6 +1074,17 @@ class NodeTDDOrchestrator:
         frontend_kinds = {value.upper() for value in FRONTEND_INITIAL_KINDS}
         backend_kinds = {value.upper() for value in BACKEND_INITIAL_KINDS}
         max_attempts = max(1, self.policy.initial_target_retry_count + 1)
+        backend_target_ids = [
+            entry.module_id for entry in ledger.entries if entry.kind.upper() in backend_kinds
+        ]
+        frontend_target_ids = [
+            entry.module_id for entry in ledger.entries if entry.kind.upper() in frontend_kinds
+        ]
+        self._log.info(
+            f"BACKEND_INITIAL_IMPLEMENTATION_STARTED requirement={requirement_id} "
+            f"targets={backend_target_ids}"
+        )
+        frontend_phase_started = False
 
         for entry in ledger.entries:
             target = target_by_id.get(entry.module_id)
@@ -1081,6 +1096,17 @@ class NodeTDDOrchestrator:
             if kind not in frontend_kinds | backend_kinds:
                 entry.status = "ALREADY_SATISFIED"
                 continue
+
+            if kind in frontend_kinds and not frontend_phase_started:
+                self._log.info(
+                    f"BACKEND_INITIAL_IMPLEMENTATION_COMPLETED requirement={requirement_id} "
+                    f"targets={backend_target_ids}"
+                )
+                self._log.info(
+                    f"FRONTEND_INITIAL_IMPLEMENTATION_STARTED requirement={requirement_id} "
+                    f"targets={frontend_target_ids}"
+                )
+                frontend_phase_started = True
 
             agent = (
                 self.frontend_implementation_agent
@@ -1172,6 +1198,14 @@ class NodeTDDOrchestrator:
                     )
                 if implementation is None:
                     continue
+                if implementation.status == "ALREADY_SATISFIED":
+                    entry.status = "ALREADY_SATISFIED"
+                    target_succeeded = True
+                    self._log.info(
+                        f"{agent_name} INITIAL_IMPLEMENTATION_ALREADY_SATISFIED "
+                        f"requirement={requirement_id} target={entry.module_id}"
+                    )
+                    break
                 if not implementation.ok or implementation.patch is None:
                     retry_feedback = tuple(
                         [
@@ -1258,163 +1292,25 @@ class NodeTDDOrchestrator:
                     f"{entry.module_id} remained at its latest compilable source."
                 )
 
+        if not frontend_phase_started:
+            self._log.info(
+                f"BACKEND_INITIAL_IMPLEMENTATION_COMPLETED requirement={requirement_id} "
+                f"targets={backend_target_ids}"
+            )
+            self._log.info(
+                f"FRONTEND_INITIAL_IMPLEMENTATION_SKIPPED requirement={requirement_id} "
+                "reason=NO_FRONTEND_TARGETS"
+            )
+        else:
+            self._log.info(
+                f"FRONTEND_INITIAL_IMPLEMENTATION_COMPLETED requirement={requirement_id} "
+                f"targets={frontend_target_ids}"
+            )
+
         finalize_ledger(ledger)
         ledger_path = self._node_root(requirement_id) / "initial_implementation_ledger.json"
         write_json_atomic(ledger_path, ledger.to_dict())
         return changed_files, str(ledger_path), list(ledger.warnings)
-
-    def _preimplement_frontend(
-        self,
-        requirement_id: str,
-    ) -> tuple[set[str], list[str], dict[str, Any] | None]:
-        """Implement a requirement-owned browser path before its first E2E run.
-
-        Frontend bootstrap is deliberately processed in bounded batches.  A
-        requirement may own many Pages, Components, Layouts, and Stores, but a
-        single large JSX response is both slow and vulnerable to JSON
-        truncation.  After each batch is applied, the resolver is called again
-        so the next model call sees the current source rather than the frozen
-        skeleton.  Successful batches are never regenerated.
-        """
-
-        e2e_tests = [
-            str(row.get("test_id", ""))
-            for row in (self.test_manifest or {}).get("tests", [])
-            if isinstance(row, dict)
-            and str(row.get("requirement_id", "")) == requirement_id
-            and str(row.get("layer", "")).upper() == "E2E"
-        ]
-        if not e2e_tests:
-            return set(), [], None
-        resolved = CodeTargetResolver(
-            self.code_binding_registry
-        ).resolve_requirement_targets(requirement_id)
-        frontend_targets = [
-            row
-            for row in resolved.get("owned_targets", [])
-            if isinstance(row, dict)
-            and str(row.get("kind", "")) in {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
-        ]
-        if not frontend_targets:
-            return set(), [], None
-        self._transition(requirement_id, "FRONTEND_IMPLEMENTING")
-        self._log.info(
-            f"IMPLEMENTATION_PHASE requirement={requirement_id} phase=FRONTEND_BOOTSTRAP"
-        )
-        changed: set[str] = set()
-        changed_files: list[str] = []
-        changed_modules: list[str] = []
-        remaining_ids = {
-            str(row["module_id"])
-            for row in frontend_targets
-            if str(row.get("module_id", "")).strip()
-        }
-        batch_number = 0
-        max_batch_size = 6
-
-        while remaining_ids:
-            batch_number += 1
-            resolved = CodeTargetResolver(
-                self.code_binding_registry
-            ).resolve_requirement_targets(requirement_id)
-            current_targets = [
-                row
-                for row in resolved.get("owned_targets", [])
-                if isinstance(row, dict)
-                and str(row.get("kind", ""))
-                in {"PAGE", "COMPONENT", "LAYOUT", "STORE"}
-                and str(row.get("module_id", "")) in remaining_ids
-            ]
-            if not current_targets:
-                return changed, [
-                    "ARC4544 FRONTEND_BOOTSTRAP_STALLED: no remaining writable frontend targets "
-                    "could be resolved for the next batch."
-                ], None
-
-            batch_targets = current_targets[:max_batch_size]
-            batch_ids = [str(row["module_id"]) for row in batch_targets]
-            self._log.info(
-                "FRONTEND_BOOTSTRAP_BATCH "
-                f"requirement={requirement_id} batch={batch_number} "
-                f"size={len(batch_ids)} remaining={len(remaining_ids)} "
-                f"modules={','.join(batch_ids)}"
-            )
-            fingerprint = hashlib.sha256(
-                f"{requirement_id}:frontend-bootstrap:{batch_number}:{','.join(batch_ids)}".encode(
-                    "utf-8"
-                )
-            ).hexdigest()
-            report = TestFailureReport(
-                requirement_id=requirement_id,
-                iteration=batch_number,
-                test_id=e2e_tests[0],
-                test_ids=e2e_tests,
-                layer="E2E",
-                phase="FRONTEND_BOOTSTRAP",
-                failure_class="IMPLEMENTATION_BEHAVIOR",
-                message=(
-                    "Implement this bounded batch of the requirement-owned frontend path "
-                    "before the first E2E execution."
-                ),
-                stack_frames=[],
-                target_modules=batch_ids,
-                writable_targets=copy.deepcopy(batch_targets),
-                read_only_dependencies=[],
-                changed_files=changed_files.copy(),
-                failure_fingerprint=fingerprint,
-                diagnostic_output=(
-                    "Build the functional responsive UI, wire the injected API client and runtime "
-                    "Store, use declared target_route values, and route successful Home transitions "
-                    "to `/`. This is frontend bootstrap batch "
-                    f"{batch_number}; implement only the supplied modules and keep each replacement "
-                    "complete."
-                ),
-            )
-            implementation = self.frontend_implementation_agent.implement(
-                ImplementationRequest(
-                    requirement_id=requirement_id,
-                    requirement=self.requirement_ir["nodes"][requirement_id],
-                    requirement_contract=self._requirement_contract(requirement_id),
-                    test_manifest=self.test_manifest or {},
-                    code_binding_registry=self.code_binding_registry,
-                    failure_reports=(report,),
-                    iteration=batch_number,
-                    design_context=self._design_context(requirement_id),
-                )
-            )
-            if not implementation.ok or implementation.patch is None:
-                return changed, (
-                    implementation.errors
-                    or [f"ARC4544 IMPLEMENTATION_AGENT_FAILED: {implementation.status}."]
-                ), None
-            applied = self.file_patcher.apply(
-                implementation.patch,
-                code_binding_registry=self.code_binding_registry,
-            )
-            if not applied.ok:
-                return changed, applied.rejected_changes, None
-            applied_module_ids = set(applied.changed_modules).intersection(remaining_ids)
-            if not applied_module_ids:
-                return changed, [
-                    "ARC4544 FRONTEND_BOOTSTRAP_STALLED: the model patch applied no new "
-                    "frontend module in the current batch."
-                ], None
-            remaining_ids.difference_update(applied_module_ids)
-            changed.update(_normalize_path(value) for value in applied.changed_files)
-            changed_files.extend(
-                value for value in applied.changed_files if value not in changed_files
-            )
-            changed_modules.extend(
-                value for value in applied.changed_modules if value not in changed_modules
-            )
-
-        return changed, [], {
-            "iteration": batch_number,
-            "phase": "FRONTEND_BOOTSTRAP",
-            "changed_files": changed_files,
-            "changed_modules": changed_modules,
-            "batches": batch_number,
-        }
 
     def _run_and_analyze(
         self,
@@ -1597,15 +1493,6 @@ class NodeTDDOrchestrator:
             for row in resolved.get("owned_targets", [])
             if isinstance(row, dict) and str(row.get("module_id", ""))
         }
-        frontend_link = next(
-            (
-                copy.deepcopy(row)
-                for row in self.frontend_ir.get("requirement_links", [])
-                if isinstance(row, dict)
-                and str(row.get("requirement_id", "")) == requirement_id
-            ),
-            {},
-        )
         screens = [
             copy.deepcopy(row)
             for row in self.frontend_ir.get("screens", [])
@@ -1636,20 +1523,11 @@ class NodeTDDOrchestrator:
                 screens.append(copy.deepcopy(destination))
                 screen_ids.add(destination_id)
 
-        journeys = [
+        placements = [
             copy.deepcopy(row)
-            for row in self.frontend_ir.get("journeys", [])
+            for row in self.frontend_ir.get("placements", [])
             if isinstance(row, dict)
-            and (
-                str(row.get("requirement_id", "")) == requirement_id
-                or str(row.get("source_screen_id", "")) in primary_screen_ids
-            )
-        ]
-        api_usages = [
-            copy.deepcopy(row)
-            for row in self.frontend_ir.get("api_usages", [])
-            if isinstance(row, dict)
-            and str(row.get("screen_id", "")) in primary_screen_ids
+            and str(row.get("requirement_id", "")) == requirement_id
         ]
         shared_state_policies = [
             copy.deepcopy(row)
@@ -1667,11 +1545,6 @@ class NodeTDDOrchestrator:
             for value in screen.get("required_api_ids", [])
             if str(value)
         }
-        referenced_api_ids.update(
-            str(row.get("api_id", ""))
-            for row in [*journeys, *api_usages]
-            if str(row.get("api_id", ""))
-        )
         direct_dependency_ids = {
             str(value)
             for module_id in owned_ids
@@ -1714,29 +1587,17 @@ class NodeTDDOrchestrator:
             "requirement_id": requirement_id,
             "module_ids": sorted(module_ids),
             "backend_modules": backend_modules,
-            "frontend_scope": "REQUIREMENT_SCREEN_ONE_HOP",
+            "frontend_scope": "COMPLETE_REQUIREMENT_FRONTEND_SURFACE",
             "primary_screen_ids": sorted(primary_screen_ids),
             "owned_component_ids": sorted(
                 str(row.get("id", ""))
                 for row in screen_components
                 if requirement_id in {str(value) for value in row.get("requirement_ids", [])}
             ),
-            "active_requirement_link": {
-                **frontend_link,
-                "screen_ids": [
-                    str(value) for value in frontend_link.get("screen_ids", [])
-                    if str(value) in screen_ids
-                ],
-                "visual_reference_ids": [
-                    str(value) for value in frontend_link.get("visual_reference_ids", [])
-                    if str(value) in visual_ids
-                ],
-            },
             "frontend": {
                 "screens": screens,
+                "placements": placements,
                 "screen_components": screen_components,
-                "journeys": journeys,
-                "api_usages": api_usages,
                 "shared_state_policies": shared_state_policies,
                 "visual_references": visual_references,
             },
@@ -1812,7 +1673,11 @@ class NodeTDDOrchestrator:
             self._state_history.get(result.requirement_id or "unknown", [])
         )
         result.errors = list(dict.fromkeys(str(value) for value in errors if str(value)))
-        if status == "NODE_ACCEPTED":
+        if status in {
+            "NODE_ACCEPTED",
+            "AGGREGATE_ACCEPTED",
+            "NO_IMPLEMENTATION_REQUIRED",
+        }:
             self._node_checkpoints.pop(result.requirement_id, None)
             self._accepted_results[result.requirement_id] = copy.deepcopy(result)
         else:

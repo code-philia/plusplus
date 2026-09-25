@@ -13,7 +13,7 @@ from .frontend_ir import (
     schema_shape_errors,
 )
 
-FRONTEND_IR_SCHEMA_VERSION = 3
+FRONTEND_IR_SCHEMA_VERSION = 4
 
 
 def _strings(*, maximum: int = 64) -> dict[str, Any]:
@@ -32,7 +32,7 @@ NAVIGATION_TARGET_SCHEMA = {
 
 SCREEN_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["id", "route", "purpose", "route_inputs", "requirement_ids", "entry_conditions", "observable_states", "required_api_ids", "navigation_targets", "visual_reference_ids"],
+    "required": ["id", "route", "purpose", "route_inputs", "requirement_ids", "entry_conditions", "observable_states", "required_api_ids", "navigation_targets", "visual_reference_ids", "surface_keys"],
     "properties": {
         "id": {"type": "string", "pattern": r"^PAGE\.[A-Za-z][A-Za-z0-9]*$"},
         "route": {"type": "string", "pattern": r"^/"},
@@ -42,6 +42,7 @@ SCREEN_SCHEMA = {
         "observable_states": _strings(maximum=24), "required_api_ids": _strings(maximum=24),
         "navigation_targets": {"type": "array", "items": NAVIGATION_TARGET_SCHEMA},
         "visual_reference_ids": _strings(maximum=24),
+        "surface_keys": _strings(maximum=32),
     },
 }
 
@@ -58,6 +59,41 @@ SCREEN_COMPONENT_SCHEMA = {
         "shared_state_ids": _strings(maximum=16),
         "observable_states": _strings(maximum=24),
         "visual_reference_ids": _strings(maximum=24),
+    },
+}
+
+UI_PLACEMENT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "requirement_id",
+        "ui_scope",
+        "screen_id",
+        "component_id",
+        "strategy",
+    ],
+    "properties": {
+        "requirement_id": {"type": "string", "minLength": 1},
+        "ui_scope": {
+            "type": "string",
+            "enum": ["UI_REQUIRED", "UI_AFFECTING", "NO_UI"],
+        },
+        "screen_id": {
+            "anyOf": [
+                {"type": "string", "pattern": r"^PAGE\."},
+                {"type": "null"},
+            ]
+        },
+        "component_id": {
+            "anyOf": [
+                {"type": "string", "pattern": r"^COMPONENT\."},
+                {"type": "null"},
+            ]
+        },
+        "strategy": {
+            "type": "string",
+            "enum": ["CREATE_FEATURE_COMPONENT", "NO_FRONTEND_IMPLEMENTATION"],
+        },
     },
 }
 
@@ -116,6 +152,7 @@ OPTIONAL_FRONTEND_DESIGN_TABLES = ("screen_components",)
 FRONTEND_DESIGN_TABLE_SCHEMAS = {
     "visual_references": {"type": "array", "items": VISUAL_REFERENCE_SCHEMA},
     "screens": {"type": "array", "items": SCREEN_SCHEMA},
+    "placements": {"type": "array", "items": UI_PLACEMENT_SCHEMA},
     "screen_components": {"type": "array", "items": SCREEN_COMPONENT_SCHEMA},
     "journeys": {"type": "array", "items": JOURNEY_SCHEMA},
     "api_usages": {"type": "array", "items": API_USAGE_SCHEMA},

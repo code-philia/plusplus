@@ -28,7 +28,7 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "edits": {
             "type": "array",
-            "minItems": 1,
+            "minItems": 0,
             "maxItems": 16,
             "items": {
                 "type": "object",
@@ -95,7 +95,9 @@ Implement the smallest coherent code change for the supplied requirement and imp
 When implementation_mode is INITIAL_IMPLEMENTATION, this is the first coverage pass before
 business tests run. Implement the one supplied target module from its requirement and contract;
 do not wait for a failure report and do not redesign unrelated modules. The compiler will typecheck
-the result before moving to the next target.
+the result before moving to the next target. If and only if the supplied target already completely
+satisfies the requirement, return {"edits":[]} to mark it ALREADY_SATISFIED. TDD and AGGREGATE
+requests must always return at least one exact edit.
 
 Context layout:
 - Context arrives as two user messages. The first, "stable_project_context", holds policy, project conventions,
@@ -200,8 +202,9 @@ Implementation rules:
   domain-appropriate direction from the requirement instead of using a generic demo-page aesthetic.
 - Preserve accessibility: semantic controls, associated labels, visible keyboard focus, sufficient contrast, and
   reduced-motion-safe behavior. Ensure navigation between declared pages remains discoverable and coherent.
-- Treat screens and journeys as one connected product graph. Keep navigation, shared visual language, API usage, and
-  cross-page state coherent across every supplied screen; choose layout and internal component decomposition here.
+- Treat screens and their navigation targets as one connected product graph. Keep navigation, shared visual language,
+  compiler-derived API ownership, and cross-page state coherent across every supplied screen; choose layout and internal
+  component decomposition here. Do not recreate requirement links or API association tables.
 - If several supplied failures are consequences of the same root cause, fix that root cause once.
 - Prefer the smallest coherent search/replacement pair and preserve surrounding source.
 
@@ -216,7 +219,8 @@ Implement the current requirement's frontend experience as a coherent, runnable 
 When implementation_phase is INITIAL_IMPLEMENTATION, implement the supplied frontend target as
 the requirement's first coverage pass before E2E tests run. Complete the target from the supplied
 requirement, placement/design context, and API client contract; do not wait for a Playwright failure
-and do not invent additional pages or files.
+and do not invent additional pages or files. If and only if the target is already a complete,
+runnable implementation of that placement, return {"edits":[]}; otherwise return exact edits.
 
 Use the supplied requirement and requirement_contract for behavior, and use design_context
 and its visual references for layout, hierarchy, styling, responsive composition, and content
@@ -360,6 +364,24 @@ class ImplementationAgent:
                 errors=invocation.errors,
             )
 
+        output_rows = invocation.output["edits"]
+        if not output_rows:
+            if str(request.mode).strip().upper() == "INITIAL_IMPLEMENTATION":
+                return ImplementationResult(
+                    requirement_id=requirement_id,
+                    status="ALREADY_SATISFIED",
+                    attempts=invocation.attempts,
+                )
+            return ImplementationResult(
+                requirement_id=requirement_id,
+                status="MODEL_REJECTED",
+                attempts=invocation.attempts,
+                errors=[
+                    "ARC4534 IMPLEMENTATION_OUTPUT_INVALID: empty edits are only "
+                    "valid for an already-satisfied INITIAL_IMPLEMENTATION target."
+                ],
+            )
+
         edits = tuple(
             ProposedEdit(
                 file=str(row["file"]),
@@ -367,7 +389,7 @@ class ImplementationAgent:
                 search=str(row["search"]),
                 replacement=str(row["replacement"]),
             )
-            for row in invocation.output["edits"]
+            for row in output_rows
         )
         return ImplementationResult(
             requirement_id=requirement_id,
@@ -866,8 +888,8 @@ def _validate_decision(
         return ["ARC4534 IMPLEMENTATION_OUTPUT_INVALID: output must contain edits only."]
     edits = decision.get("edits")
     errors: list[str] = []
-    if not isinstance(edits, list) or not 1 <= len(edits) <= 16:
-        return [*errors, "ARC4534 IMPLEMENTATION_OUTPUT_INVALID: edits must contain 1..16 rows."]
+    if not isinstance(edits, list) or len(edits) > 16:
+        return [*errors, "ARC4534 IMPLEMENTATION_OUTPUT_INVALID: edits must contain 0..16 rows."]
     for row in edits:
         if not isinstance(row, dict) or set(row) != {"file", "search", "replacement"}:
             errors.append("ARC4534 IMPLEMENTATION_OUTPUT_INVALID: malformed edit row.")
@@ -943,6 +965,12 @@ def _project_design_context(
     available_components = [
         row for row in frontend.get("screen_components", []) if isinstance(row, dict)
     ]
+    placements = [
+        _compact_frontend_design_row(row, "placement")
+        for row in frontend.get("placements", [])
+        if isinstance(row, dict)
+        and str(row.get("requirement_id", "")) == requirement_id
+    ]
     owned_components = [
         row for row in available_components if str(row.get("id", "")) in target_ids
     ]
@@ -982,18 +1010,6 @@ def _project_design_context(
             screens.append(_compact_frontend_design_row(destination, "screen"))
             screen_ids.add(destination_id)
 
-    journeys = [
-        _compact_frontend_design_row(row, "journey")
-        for row in frontend.get("journeys", [])
-        if isinstance(row, dict)
-        and str(row.get("source_screen_id", "")) in primary_screen_ids
-    ]
-    api_usages = [
-        _compact_frontend_design_row(row, "api_usage")
-        for row in frontend.get("api_usages", [])
-        if isinstance(row, dict)
-        and str(row.get("screen_id", "")) in primary_screen_ids
-    ]
     shared_state_policies = [
         _compact_frontend_design_row(row, "state")
         for row in frontend.get("shared_state_policies", [])
@@ -1010,32 +1026,12 @@ def _project_design_context(
         for row in frontend.get("visual_references", [])
         if isinstance(row, dict) and str(row.get("id", "")) in visual_ids
     ]
-
-    active_link = design_context.get("active_requirement_link", {})
-    projected_link: dict[str, Any] = {}
-    if isinstance(active_link, dict) and (screens or shared_state_policies):
-        projected_link = copy.deepcopy(active_link)
-        if isinstance(projected_link.get("screen_ids"), list):
-            projected_link["screen_ids"] = [
-                str(item)
-                for item in projected_link["screen_ids"]
-                if str(item) in screen_ids
-            ]
-        if isinstance(projected_link.get("shared_state_ids"), list):
-            retained_state_ids = {
-                str(row.get("id", "")) for row in shared_state_policies
-            }
-            projected_link["shared_state_ids"] = [
-                str(item)
-                for item in projected_link["shared_state_ids"]
-                if str(item) in retained_state_ids
-            ]
-        if isinstance(projected_link.get("visual_reference_ids"), list):
-            projected_link["visual_reference_ids"] = [
-                str(item)
-                for item in projected_link["visual_reference_ids"]
-                if str(item) in visual_ids
-            ]
+    referenced_api_ids = {
+        str(value)
+        for row in [*screens, *screen_components]
+        for value in row.get("required_api_ids", [])
+        if str(value)
+    }
 
     return {
         "requirement_id": requirement_id,
@@ -1043,18 +1039,23 @@ def _project_design_context(
             _compact_design_module(row)
             for row in design_context.get("backend_modules", [])
             if isinstance(row, dict)
-            and str(row.get("id", row.get("module_id", ""))) in target_ids
+            and (
+                str(row.get("id", row.get("module_id", ""))) in target_ids
+                or (
+                    frontend_only
+                    and str(row.get("id", row.get("module_id", "")))
+                    in referenced_api_ids
+                )
+            )
             and (
                 not frontend_only
                 or str(row.get("kind", "")).upper() in {"API", "API_CLIENT"}
             )
         ],
-        "active_requirement_link": projected_link,
         "frontend": {
             "screens": screens,
+            "placements": placements,
             "screen_components": screen_components,
-            "journeys": journeys,
-            "api_usages": api_usages,
             "shared_state_policies": shared_state_policies,
             "visual_references": visual_references,
         },
@@ -1083,6 +1084,7 @@ def _compact_frontend_design_row(row: dict[str, Any], kind: str) -> dict[str, An
             "required_api_ids",
             "navigation_targets",
             "visual_reference_ids",
+            "surface_keys",
         ),
         "journey": (
             "id",
@@ -1094,6 +1096,7 @@ def _compact_frontend_design_row(row: dict[str, Any], kind: str) -> dict[str, An
             "failure_behavior",
         ),
         "component": ("id", "screen_id", "purpose", "requirement_ids", "inputs", "required_api_ids", "shared_state_ids", "observable_states", "visual_reference_ids"),
+        "placement": ("requirement_id", "ui_scope", "screen_id", "component_id", "strategy"),
         "api_usage": ("screen_id", "api_id", "request_bindings", "response_bindings"),
         "state": ("id", "purpose", "requirement_ids", "persistence", "state", "actions"),
         "visual": ("id", "source_path", "analysis"),
