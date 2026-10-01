@@ -28,7 +28,7 @@ class TDDProgress:
             if not isinstance(nodes, dict) or set(nodes) - set(order):
                 raise ValueError("Invalid TDD progress nodes")
             if any(not isinstance(row, dict) or row.get("status") not in
-                   {"STARTED", "FAILED", "TESTS_PASSED", "AGGREGATE_NO_UI"} for row in nodes.values()):
+                   {"STARTED", "FAILED", "IMPLEMENTED", "TESTS_PASSED", "AGGREGATE_NO_UI"} for row in nodes.values()):
                 raise ValueError("Invalid TDD progress status")
             self.data = loaded
         elif resume:

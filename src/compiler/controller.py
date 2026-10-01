@@ -776,7 +776,7 @@ class Compiler:
         model=None,
     ) -> CompilationResult:
         """Restore deterministic binding metadata without regenerating installed source files."""
-        await self._log("Compiler", "Preparing code bindings; continuing to test generation and TDD.")
+        await self._log("Compiler", "Preparing code bindings; continuing to node-by-node implementation.")
         try:
             model = model or self._model or Model.from_env()
             if hasattr(model, "set_usage_path"):
@@ -809,7 +809,7 @@ class Compiler:
             return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
         artifacts["code_bindings"] = artifact_store.write_code_bindings(bindings.registry)
         ProjectGitHistory(request.output_dir).commit("4.4 code bindings", [".arc/lowering/code_bindings.json"])
-        return await self._run_tdd(
+        return await self._run_wotdd(
             request=request, artifact_store=artifact_store, requirement_ir=preprocessing.requirement_ir,
             dependency_graph=preprocessing.dependency_graph, database_schema=database_schema,
             design_ir=design_ir, frontend_ir=frontend_ir, code_binding_registry=bindings.registry,
@@ -1068,6 +1068,94 @@ class Compiler:
         return CompilationResult(
             ok=not failed_nodes, root_id=root_id, states=states,
             failed_nodes=failed_nodes, artifacts=artifacts,
+        )
+
+    async def _run_wotdd(
+        self,
+        *,
+        request: CompilationRequest,
+        artifact_store: CompilerArtifactStore,
+        requirement_ir: dict[str, Any],
+        dependency_graph: dict[str, Any],
+        database_schema: dict[str, Any],
+        design_ir: dict[str, Any],
+        frontend_ir: dict[str, Any],
+        code_binding_registry: dict[str, Any],
+        model: StructuredModel,
+        root_id: str | None,
+        states: dict[str, str],
+        artifacts: dict[str, str],
+    ) -> CompilationResult:
+        """WoTDD ablation: implement each node directly, with build feedback only."""
+        atomic_ids = {str(value) for value in requirement_ir.get("atomic_units", []) if str(value)}
+        folder_ids = {str(value) for value in requirement_ir.get("folder_nodes", []) if str(value)}
+        try:
+            order = _tdd_postorder(requirement_ir)
+        except ValueError as exc:
+            await self._log("Compiler", f"ARC4548 TDD_ORDER_INVALID: {exc}", "error")
+            return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
+        await self._log("Compiler", f"WoTDD post-order implementation: {order}")
+        progress = TDDProgress(request.output_dir, requirement_ir, order, resume=False)
+        artifacts["tdd_progress"] = str(progress.path)
+        orchestrator = NodeTDDOrchestrator(
+            model,
+            request.output_dir,
+            requirement_ir=requirement_ir,
+            code_binding_registry=code_binding_registry,
+            frontend_ir=frontend_ir,
+            test_manifest=None,
+        )
+        failed_requirements: set[str] = set()
+        for requirement_id in order:
+            progress.mark(requirement_id, "STARTED", "node implementation")
+            if requirement_id in folder_ids:
+                targets = CodeTargetResolver(code_binding_registry).resolve_requirement_targets(requirement_id)
+                has_screen = any(
+                    isinstance(screen, dict) and requirement_id in screen.get("requirement_ids", [])
+                    for screen in frontend_ir.get("components" if "root_component_id" in frontend_ir else "screens", [])
+                )
+                if not targets["owned_targets"] and not has_screen:
+                    states[requirement_id] = "AGGREGATE_NO_UI"
+                    progress.mark(requirement_id, "AGGREGATE_NO_UI", "no owned UI")
+                    continue
+            include_backend = requirement_id in atomic_ids
+            result = orchestrator.implement_node_with_build_feedback(
+                requirement_id,
+                include_backend=include_backend,
+                include_frontend=True,
+                max_iterations=3,
+            )
+            for error in result.errors:
+                await self._log("NodeTDDOrchestrator", error, "warning")
+            if result.ok:
+                states[requirement_id] = "IMPLEMENTED"
+                progress.mark(requirement_id, "IMPLEMENTED", "build")
+                await self._log("Compiler", f"WoTDD implementation completed for {requirement_id}.")
+                if "." not in requirement_id:
+                    stage_checkpoint(request.output_dir, requirement_id)
+            else:
+                failed_requirements.add(requirement_id)
+                states[requirement_id] = "FAILED"
+                progress.mark(requirement_id, "FAILED", "build feedback exhausted")
+                await self._log(
+                    "Compiler",
+                    f"{requirement_id}: WoTDD build feedback exhausted; continuing with remaining nodes.",
+                    "warning",
+                )
+        final_build = ProjectBuilder(request.output_dir).build()
+        if not final_build.ok:
+            for error in final_build.errors:
+                await self._log("Compiler", f"Final WoTDD build: {error}", "warning")
+            return CompilationResult(
+                ok=False, root_id=root_id, states=states,
+                failed_nodes=sorted(failed_requirements), artifacts=artifacts,
+            )
+        return CompilationResult(
+            ok=not failed_requirements,
+            root_id=root_id,
+            states=states,
+            failed_nodes=sorted(failed_requirements),
+            artifacts=artifacts,
         )
 
     async def _log(

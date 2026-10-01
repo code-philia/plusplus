@@ -214,6 +214,71 @@ class NodeTDDOrchestrator:
         )
         return self._finish_implementation(result, requirement_ids)
 
+    def implement_node_with_build_feedback(
+        self,
+        requirement_id: str,
+        *,
+        include_backend: bool = True,
+        include_frontend: bool = True,
+        max_iterations: int = 3,
+    ) -> TDDStageResult:
+        """Implement one node without tests, using build output as model feedback.
+
+        This is the WoTDD/ablation path. Each iteration may apply backend and/or
+        frontend patches, then the generated workspace is built. Build failures
+        are passed back to the next implementation invocation; no test manifest
+        or test-repair agent is involved.
+        """
+        result = TDDStageResult("node implementation", status="IMPLEMENTATION_FAILED")
+        max_iterations = max(1, min(int(max_iterations), 3))
+        feedback = ""
+        for iteration in range(1, max_iterations + 1):
+            changed_this_round = False
+            round_errors: list[str] = []
+            for enabled, kinds, agent, label in (
+                (include_backend, self._BACKEND_KINDS, self.implementation_agent, "backend"),
+                (include_frontend, self._FRONTEND_KINDS, self.frontend_implementation_agent, "frontend"),
+            ):
+                if not enabled:
+                    continue
+                targets = [row for row in self._owned_targets(requirement_id)
+                           if row.get("kind") in kinds]
+                if not targets:
+                    continue
+                stage = TDDStageResult(f"{label} implementation", status="IMPLEMENTED")
+                changed, error = self._apply_edit(
+                    requirement_id,
+                    self._requirement(requirement_id),
+                    agent,
+                    stage,
+                    target_ids=tuple(str(row["module_id"]) for row in targets),
+                    iteration=iteration,
+                    implementation_feedback=feedback,
+                    commit_stage=f"6 {label} implementation {requirement_id}",
+                    validate_patch=False,
+                )
+                result.changed_files = sorted(set(result.changed_files) | set(stage.changed_files))
+                if changed:
+                    changed_this_round = True
+                else:
+                    round_errors.append(f"{label}: {error}")
+            build = ProjectBuilder(self.output_root).build()
+            if build.ok:
+                result.status = "IMPLEMENTED"
+                result.errors.clear()
+                return result
+            feedback = "\n".join(build.errors)
+            round_errors.extend(build.errors)
+            result.errors = round_errors
+            self._trace_implementation(
+                f"WOTDD_BUILD_FEEDBACK requirement={requirement_id} "
+                f"iteration={iteration}/{max_iterations} changed={changed_this_round}"
+            )
+            if not changed_this_round and iteration == max_iterations:
+                break
+        result.failed_requirements = [requirement_id]
+        return result
+
     def _finish_implementation(self, result: TDDStageResult,
                                requirement_ids: list[str]) -> TDDStageResult:
         if errors := self.validate_stage():
@@ -442,6 +507,8 @@ class NodeTDDOrchestrator:
         test_layer: str = "",
         repair_context: dict[str, Any] | None = None,
         direct_repair: bool = False,
+        implementation_feedback: str = "",
+        validate_patch: bool = True,
     ) -> tuple[bool, str]:
         snapshot = self.file_patcher.snapshot([
             *self._checkpoint_files(requirement_id), *test_files,
@@ -459,7 +526,10 @@ class NodeTDDOrchestrator:
             applied = self.file_patcher.apply(patch)
             errors = list(applied.errors)
             if applied.ok:
-                errors, complete = self._patch_validation_errors(applied.changed_files)
+                if validate_patch:
+                    errors, complete = self._patch_validation_errors(applied.changed_files)
+                else:
+                    errors, complete = [], False
                 if not errors:
                     if applied.changed_files:
                         self._needs_full_validation = not complete
@@ -489,6 +559,7 @@ class NodeTDDOrchestrator:
                 code_binding_registry=self.code_binding_registry,
                 target_module_ids=target_ids, test_files=test_files,
                 frontend_ir=self.frontend_ir if agent is self.frontend_implementation_agent else None,
+                iteration=iteration, implementation_feedback=implementation_feedback,
             ), accept_patch=accept_patch)
         event = {
             "event": ("direct_repair" if direct_repair else "repair") if repair_context is not None
