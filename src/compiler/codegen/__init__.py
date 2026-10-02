@@ -1,4 +1,5 @@
 """Deterministic source generation namespace."""
 
-from ..exact_file_patcher import *
+from .generator import CodegenResult, DeterministicCodegen
 
+__all__ = ["CodegenResult", "DeterministicCodegen"]
