@@ -18,6 +18,7 @@ from .database_lowering import lower_database
 from .passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
 from .file_planning import GlobalFilePlanner
 from .passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
+from .ir.design import build_design_graph
 from .frontend_react_lowering import FrontendReactLowerer
 from .git_history import GitStageError, ProjectGitHistory
 from .fixture_stage import (
@@ -704,6 +705,12 @@ class Compiler:
                 ok=False, root_id=root_id, states=states,
                 failed_nodes=sorted(failed_requirements), artifacts=artifacts,
             )
+        design_graph = build_design_graph(
+            database_schema=database.schema,
+            backend_ir=design.design_ir,
+            frontend_ir=frontend.frontend_ir,
+        )
+        artifacts["design_graph"] = artifact_store.write_design_graph(design_graph.to_dict())
         if rank < 4:
             checkpoints.save("frontend-ir", backend_routes=backend_glue.route_registry,
                              frontend={"frontend_ir": frontend.frontend_ir,

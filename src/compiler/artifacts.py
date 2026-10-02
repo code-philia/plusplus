@@ -48,6 +48,11 @@ class CompilerArtifactStore:
         write_json_atomic(path, schema)
         return str(path)
 
+    def write_design_graph(self, graph: dict[str, Any]) -> str:
+        path = self.design_root / "design_graph.json"
+        write_json_atomic(path, graph)
+        return str(path)
+
 
     def write_design(self, *, design_ir: dict[str, Any]) -> dict[str, str]:
         requirements = design_ir.get("requirements", [])
