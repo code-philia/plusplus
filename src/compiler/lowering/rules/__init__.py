@@ -1,3 +1,4 @@
-from ...module_lowering import *
-from ...fixture_lowering import *
+﻿"""Deterministic lowering rules."""
 
+from .skeleton import *
+from ...fixture_lowering import *

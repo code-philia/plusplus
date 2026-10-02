@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import copy
@@ -16,7 +16,7 @@ from agents.test_repair import TestFailureAnalysisAgent, TestRepairAgent
 from runtime.jsonio import write_json_atomic
 from core.logging import append_debug_log, write_terminal_log
 
-from .code_binding import CodeTargetResolver
+from .passes.linking.code_binding import CodeTargetResolver
 from .exact_file_patcher import ExactFilePatcher
 from .git_history import ProjectGitHistory
 from .project_build import ProjectBuilder

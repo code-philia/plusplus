@@ -1,4 +1,4 @@
-"""Read-only evidence selection and per-round repair permissions."""
+﻿"""Read-only evidence selection and per-round repair permissions."""
 from __future__ import annotations
 
 import copy
@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .code_binding import CodeTargetResolver
+from .passes.linking.code_binding import CodeTargetResolver
 from .file_context import direct_dependencies, requirement_dependencies
 from .frontend_context import implementation_requirement
 

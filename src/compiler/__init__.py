@@ -1,7 +1,7 @@
-"""Public ARC compiler interface."""
+﻿"""Public ARC compiler interface."""
 
 from .driver import ARCCompiler, Compiler
-from .code_binding import CodeTargetResolver, resolve_requirement_targets
+from .passes.linking.code_binding import CodeTargetResolver, resolve_requirement_targets
 from .exact_file_patcher import ExactFilePatcher, FilePatchResult
 from .models import CompilationRequest
 from .test_runner import TestRunResult, TestRunner, TestSelection

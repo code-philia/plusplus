@@ -12,11 +12,11 @@ from runtime.runtime import AgentRuntime
 from .artifacts import CompilerArtifactStore
 from .checkpoints import CheckpointStore, START_FROM
 from .lowering.backend.legacy import BackendGlueLowerer
-from .code_binding import CodeTargetResolver, CodeBindingLowerer
+from .passes.linking.code_binding import CodeTargetResolver, CodeBindingLowerer
 from .passes.database.pipeline import DatabaseDesignPipeline, database_traceability
 from .lowering.database.legacy import lower_database
 from .passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
-from .file_planning import GlobalFilePlanner
+from .lowering.planning.files import GlobalFilePlanner
 from .passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
 from .ir.design import build_design_graph
 from .passes.linking import LinkingPipeline
@@ -33,14 +33,14 @@ from .preprocessing_stage import RequirementPreprocessor, PreprocessingResult
 from .model_client import Model, ModelConfigurationError, StructuredModel
 from .cost_tracking import stage_checkpoint
 from .models import CompilationRequest, CompilationResult
-from .module_lowering import ModuleSkeletonLowerer
+from .lowering.backend.modules import ModuleSkeletonLowerer
 from .project_build import ProjectBuilder
 from .project_initialization import (
     ProjectInitializer,
     validate_frontend_environment,
 )
-from .skeleton_lowering import TypeLowerer
-from .symbol_planning import GlobalSymbolPlanner
+from .lowering.rules.skeleton import TypeLowerer
+from .lowering.planning.symbols import GlobalSymbolPlanner
 from .tdd_orchestrator import NodeTDDOrchestrator
 from .tdd_progress import TDDProgress, load_tdd_manifest
 from .test_generation import RequirementTestGenerationPass, TestEnvironmentInitializer
