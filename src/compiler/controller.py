@@ -21,6 +21,7 @@ from .passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_
 from .ir.design import build_design_graph
 from .passes.linking import LinkingPipeline
 from .validation.verifier import DesignIRVerifier
+from .lowering.pipeline import LoweringPipeline
 from .frontend_react_lowering import FrontendReactLowerer
 from .git_history import GitStageError, ProjectGitHistory
 from .fixture_stage import (
@@ -718,6 +719,8 @@ class Compiler:
         artifacts["design_verification"] = artifact_store.write_design_verification(verification.to_dict())
         for issue in [*verification.errors, *verification.warnings]:
             await self._log("Compiler", issue, "warning")
+        implementation_ir = LoweringPipeline().lower(design_graph)
+        artifacts["implementation_ir"] = artifact_store.write_implementation_ir(implementation_ir.to_dict())
         if rank < 4:
             checkpoints.save("frontend-ir", backend_routes=backend_glue.route_registry,
                              frontend={"frontend_ir": frontend.frontend_ir,

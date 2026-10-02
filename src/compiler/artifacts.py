@@ -58,6 +58,11 @@ class CompilerArtifactStore:
         write_json_atomic(path, report)
         return str(path)
 
+    def write_implementation_ir(self, implementation_ir: dict[str, Any]) -> str:
+        path = self.root / "implementation_ir.json"
+        write_json_atomic(path, implementation_ir)
+        return str(path)
+
 
     def write_design(self, *, design_ir: dict[str, Any]) -> dict[str, str]:
         requirements = design_ir.get("requirements", [])
