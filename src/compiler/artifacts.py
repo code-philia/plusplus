@@ -91,7 +91,7 @@ class CompilerArtifactStore:
         traceability: dict[str, Any],
     ) -> dict[str, str]:
         """Persist incremental design, including partial results, without the legacy validator."""
-        from .frontend_generation import ui_data_associations
+        from .passes.frontend.semantic import ui_data_associations
         paths: dict[str, str] = {}
         for table in ("components", "data", "ui", "properties", "events", "handlers", "effects", "api_dependencies"):
             path = self.frontend_design_root / f"{table}.json"
