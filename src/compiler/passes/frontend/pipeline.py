@@ -1,6 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from ...frontend_generation import FrontendIRGenerationPass, FrontendIRGenerationResult, frontend_ir_traceability
+from .semantic import FrontendIRGenerationPass, FrontendIRGenerationResult, frontend_ir_traceability
 from ...ir.design.frontend import FrontendDesignIR
 from .decompose_components import DecomposeComponentsPass
 from .discover_pages import DiscoverPagesPass
