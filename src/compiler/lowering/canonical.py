@@ -7,6 +7,7 @@ from ..ir.design.module import DesignModule
 from ..ir.implementation.file import FileIR
 from ..ir.implementation.project import ImplementationIR
 from ..ir.implementation.symbol import SymbolIR
+from targets.react_fastapi import TargetProfile, load_target_profile
 
 
 def _safe(value: str) -> str:
@@ -18,29 +19,33 @@ def _kind(value: object) -> str:
     return str(value).split(".")[-1].lower()
 
 
-def _path(node: IRNode) -> tuple[str, str]:
+def _path(node: IRNode, profile: TargetProfile) -> tuple[str, str]:
     kind = _kind(node.kind)
     name = _safe(node.name or node.id)
     if kind in {"entity", "field", "relation", "database_operation"}:
-        return f"backend/src/db/{name}.py", "python"
+        return f"{profile.backend_root}/db/{name}{profile.backend_extension}", profile.backend_language
     if kind in {"api", "function"}:
-        return f"backend/src/{kind}/{name}.py", "python"
+        return f"{profile.backend_root}/{kind}/{name}{profile.backend_extension}", profile.backend_language
     if kind in {"page", "component", "ui", "event", "handler", "effect"}:
-        return f"frontend/src/{kind}/{name}.tsx", "typescript"
-    return f"shared/src/{name}.ts", "typescript"
+        return f"{profile.frontend_root}/{kind}/{name}{profile.frontend_extension}", profile.frontend_language
+    return f"{profile.shared_root}/{name}.ts", profile.frontend_language
 
 
 class CanonicalDesignLowering:
     """Lower canonical Design IR to a deterministic Implementation IR plan."""
+
+    def __init__(self, profile: TargetProfile | None = None) -> None:
+        self.profile = profile or load_target_profile()
 
     def lower(self, design: DesignModule) -> ImplementationIR:
         implementation = ImplementationIR(metadata={
             "source_level": str(IRLevel.DESIGN),
             "lowering": "canonical",
             "schema_version": 1,
+            "target": self.profile.name,
         })
         for node in sorted(design.nodes.values(), key=lambda item: item.id):
-            path, language = _path(node)
+            path, language = _path(node, self.profile)
             file_id = f"file:{path}"
             symbol_id = f"symbol:{node.id}"
             implementation.files.setdefault(file_id, FileIR(
