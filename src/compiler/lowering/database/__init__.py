@@ -1,3 +1,6 @@
-from ...database_lowering import *
-from ...skeleton_lowering import *
+﻿"""Database Design IR lowering exports."""
+
+from ..canonical import CanonicalDesignLowering
+
+__all__ = ["CanonicalDesignLowering"]
 

@@ -1,2 +1,6 @@
-from ...typescript_format import *
+﻿"""Deterministic TypeScript codegen exports."""
+
+from ..generator import CodegenResult, DeterministicCodegen
+
+__all__ = ["CodegenResult", "DeterministicCodegen"]
 

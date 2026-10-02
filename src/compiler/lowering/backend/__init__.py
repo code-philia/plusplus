@@ -1,2 +1,6 @@
-from ...backend_lowering import *
+﻿"""Backend Design IR lowering exports."""
+
+from ..canonical import CanonicalDesignLowering
+
+__all__ = ["CanonicalDesignLowering"]
 

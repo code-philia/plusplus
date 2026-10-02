@@ -1,3 +1,6 @@
-from ...frontend_lowering import *
-from ...frontend_react_lowering import *
+﻿"""Frontend Design IR lowering exports."""
+
+from ..canonical import CanonicalDesignLowering
+
+__all__ = ["CanonicalDesignLowering"]
 
