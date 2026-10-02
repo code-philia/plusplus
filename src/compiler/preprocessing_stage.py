@@ -6,7 +6,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+
+from .frontend.canonicalize import RequirementShapeError, canonicalize_payload
+from .frontend.loader import RequirementLoadError, RequirementLoader
+from .ir.requirement import RequirementIR
 
 SUPPORTED_NODE_TYPES = {"FOLDER", "ATOMIC"}
 IMAGE_REFERENCE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
@@ -22,26 +25,26 @@ class PreprocessingResult:
     def ok(self) -> bool:
         return not self.errors
 
+    @property
+    def requirement_model(self) -> RequirementIR:
+        return RequirementIR.from_dict(self.requirement_ir)
+
 
 class RequirementPreprocessor:
     """Parse, normalize, validate, and schedule an ARC requirement document."""
 
     def compile(self, requirement_path: Path) -> PreprocessingResult:
-        source_path = requirement_path.expanduser().resolve()
         errors: list[str] = []
         try:
-            source_bytes = source_path.read_bytes()
-            payload = yaml.safe_load(source_bytes.decode("utf-8")) or {}
-        except (OSError, UnicodeError, yaml.YAMLError) as exc:
-            errors.append(_format_error("ARC1001", f"Cannot parse requirement document: {exc}", source=str(source_path)))
+            document = RequirementLoader().load(requirement_path)
+            source_path = document.path
+            source_bytes = document.raw_bytes
+            payload = canonicalize_payload(document.payload)
+        except RequirementLoadError as exc:
+            errors.append(_format_error("ARC1001", f"Cannot parse requirement document: {exc}", source=str(requirement_path)))
             return PreprocessingResult({}, {}, errors)
-
-        if isinstance(payload, dict) and isinstance(payload.get("root"), dict):
-            payload = payload["root"]
-        elif isinstance(payload, dict) and "id" not in payload and isinstance(payload.get("requirement"), dict):
-            payload = payload["requirement"]
-        if not isinstance(payload, dict):
-            errors.append(_format_error("ARC1002", "Requirement document root must be a mapping.", source=str(source_path)))
+        except RequirementShapeError as exc:
+            errors.append(_format_error("ARC1002", str(exc), source=str(requirement_path)))
             return PreprocessingResult({}, {}, errors)
 
         nodes: dict[str, dict[str, Any]] = {}

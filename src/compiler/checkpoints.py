@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from arcbench_agent_runtime.jsonio import write_json_atomic
+from runtime.jsonio import write_json_atomic
 from .git_history import GitStageError, ProjectGitHistory
 from .process_utils import resolve_executable, run_command
 

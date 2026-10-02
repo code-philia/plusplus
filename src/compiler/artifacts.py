@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from arcbench_agent_runtime.jsonio import write_json_atomic
+from runtime.jsonio import write_json_atomic
 
 
 class CompilerArtifactStore:

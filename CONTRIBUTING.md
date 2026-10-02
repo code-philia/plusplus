@@ -16,9 +16,9 @@ Please first check whether a similar issue or pull request already exists.
 
 Useful repository areas:
 
-- `src/compiler/`: compiler passes, IR validation, and deterministic lowering
-- `src/core/`: CLI presentation, configuration, and workflow orchestration
-- `src/arcbench_agent_runtime/`: artifact I/O and traceability runtime
+- `src/compiler/`: frontend, IR, analysis, passes, validation, lowering, codegen, and driver
+- `src/cli/`: CLI presentation and configuration; `src/core/` remains a compatibility layer
+- `src/runtime/`: artifact I/O, event, and traceability runtime
 - `docs/`: current pipeline contracts and stage guides
 - `README.md`: project overview and research context
 

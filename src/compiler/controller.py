@@ -7,20 +7,17 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
-from arcbench_agent_runtime.runtime import AgentRuntime
+from runtime.runtime import AgentRuntime
 
 from .artifacts import CompilerArtifactStore
 from .checkpoints import CheckpointStore, START_FROM
 from .backend_lowering import BackendGlueLowerer
 from .code_binding import CodeTargetResolver, CodeBindingLowerer
-from .database_stage import (
-    DatabaseSchemaPass,
-    database_traceability,
-)
+from .passes.database.pipeline import DatabaseDesignPipeline, database_traceability
 from .database_lowering import lower_database
-from .design_stage import DesignPass, design_traceability
+from .passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
 from .file_planning import GlobalFilePlanner
-from .frontend_generation import FrontendIRGenerationPass, frontend_ir_traceability
+from .passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
 from .frontend_react_lowering import FrontendReactLowerer
 from .git_history import GitStageError, ProjectGitHistory
 from .fixture_stage import (
@@ -267,7 +264,7 @@ class Compiler:
                 artifacts=artifacts,
             )
         if rank < 2:
-            database_stage = DatabaseSchemaPass(model, artifact_store.root)
+            database_stage = DatabaseDesignPipeline(model, artifact_store.root)
             database = database_stage.compile(
                 preprocessing.requirement_ir,
                 preprocessing.dependency_graph,
@@ -353,7 +350,7 @@ class Compiler:
         )
 
         if rank < 3:
-            design_stage = DesignPass(model, artifact_store.root)
+            design_stage = BackendIRGenerationPipeline(model, artifact_store.root)
             await self._log(
                 "Compiler",
                 "Running REQUIREMENT CONTRACT, REQUIREMENT TO API, and full top-down MODULE DECOMPOSITION passes.",
@@ -661,7 +658,7 @@ class Compiler:
                 "Compiler",
                 "Generating frontend IR in three requirement-scheduled passes: UI/data, component assembly, behavior.",
             )
-            frontend = FrontendIRGenerationPass(model, artifact_store.root).compile(
+            frontend = FrontendIRGenerationPipeline(model, artifact_store.root).compile(
                 preprocessing.requirement_ir,
                 preprocessing.dependency_graph,
                 design.design_ir,

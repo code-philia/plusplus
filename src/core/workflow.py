@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from arcbench_agent_runtime.runtime import AgentRuntime
+from runtime.runtime import AgentRuntime
 from compiler import CompilationRequest, Compiler
 from core.config import set_workspace_root
 from core.logging import set_run_id

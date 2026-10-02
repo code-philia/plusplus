@@ -1,0 +1,1 @@
+"""Prompt templates consumed by compiler services."""

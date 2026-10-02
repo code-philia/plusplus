@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from arcbench_agent_runtime.jsonio import write_json_atomic
+from runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 
 from .artifacts import CompilerArtifactStore

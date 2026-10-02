@@ -10,10 +10,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from arc_agents import FrontendImplementationAgent, ImplementationAgent, ImplementationRequest, JsonModel
-from arc_agents.contracts import ProposedPatch
-from arc_agents.test_repair import TestFailureAnalysisAgent, TestRepairAgent
-from arcbench_agent_runtime.jsonio import write_json_atomic
+from agents import FrontendImplementationAgent, ImplementationAgent, ImplementationRequest, JsonModel
+from agents.contracts import ProposedPatch
+from agents.test_repair import TestFailureAnalysisAgent, TestRepairAgent
+from runtime.jsonio import write_json_atomic
 from core.logging import append_debug_log, write_terminal_log
 
 from .code_binding import CodeTargetResolver

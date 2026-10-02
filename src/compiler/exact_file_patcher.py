@@ -6,7 +6,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from arc_agents.contracts import ProposedEdit, ProposedPatch
+from agents.contracts import ProposedEdit, ProposedPatch
 
 
 @dataclass(slots=True)

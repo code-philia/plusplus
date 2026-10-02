@@ -8,12 +8,13 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from core.logging import SynchronousLog
 
 from .model_client import StructuredModel, describe_model_error
 from .trace_payload import format_payload_trace
+from .passes.database import DiscoverEntitiesPass, InferFieldsPass, InferRelationsPass
 
 
 SCHEMA_VERSION = 2
@@ -538,12 +539,18 @@ class DatabaseSchemaPass:
         state = DatabaseSchemaState()
         for node_id in requirements:
             state.ensure_requirement(node_id)
-        passes: list[tuple[str, str, dict[str, Any], str, Callable[..., None]]] = [
-            ("pass1_entities", "arc_database_entities", ENTITY_DECISION_SCHEMA, ENTITY_INSTRUCTIONS, state.apply_entities),
-            ("pass2_fields", "arc_database_fields", FIELD_DECISION_SCHEMA, FIELD_INSTRUCTIONS, state.apply_fields),
-            ("pass3_relationships", "arc_database_relationships", RELATIONSHIP_DECISION_SCHEMA, RELATIONSHIP_INSTRUCTIONS, state.apply_relationships),
+        passes = [
+            DiscoverEntitiesPass(ENTITY_DECISION_SCHEMA, ENTITY_INSTRUCTIONS),
+            InferFieldsPass(FIELD_DECISION_SCHEMA, FIELD_INSTRUCTIONS),
+            InferRelationsPass(RELATIONSHIP_DECISION_SCHEMA, RELATIONSHIP_INSTRUCTIONS),
         ]
-        for phase, schema_name, output_schema, instructions, apply_decision in passes:
+        apply_decisions = {
+            "pass1_entities": state.apply_entities,
+            "pass2_fields": state.apply_fields,
+            "pass3_relationships": state.apply_relationships,
+        }
+        for compiler_pass in passes:
+            phase = compiler_pass.spec.phase
             self._trace(f"PASS_START phase={phase} requirements={len(requirements)}")
             for node_id in requirements:
                 node = nodes.get(node_id)
@@ -551,34 +558,24 @@ class DatabaseSchemaPass:
                     errors.append(_format_error("ARC2101", "Atomic requirement is missing from Requirement IR.", node_id=node_id))
                     states[node_id] = "FAILED"
                     break
-                if phase == "pass3_relationships" and len(state.related_entity_keys(node_id)) < 2:
-                    states[node_id] = "RELATIONSHIPS_RESOLVED"
-                    continue
-                decision = self._run_unit(
-                    phase=phase,
-                    schema_name=schema_name,
-                    output_schema=output_schema,
-                    instructions=instructions,
+                pass_state = compiler_pass.run(
+                    execute=self._run_unit,
+                    apply_decision=apply_decisions[phase],
                     node_id=node_id,
+                    node=node,
                     context=self._context_for(
                         phase, node_id, node, nodes, state, effective_dependencies
                     ),
                     errors=errors,
                     warnings=state.warnings,
+                    state=state,
                 )
-                if decision is None:
-                    states[node_id] = "FAILED"
+                if pass_state == "SKIPPED":
+                    states[node_id] = compiler_pass.spec.success_state
+                    continue
+                states[node_id] = "FAILED" if pass_state == "FAILED" else pass_state
+                if pass_state == "FAILED":
                     break
-                before = len(errors)
-                apply_decision(node_id, decision, errors)
-                if len(errors) != before:
-                    states[node_id] = "FAILED"
-                    break
-                states[node_id] = {
-                    "pass1_entities": "ENTITIES_DISCOVERED",
-                    "pass2_fields": "FIELDS_DISCOVERED",
-                    "pass3_relationships": "RELATIONSHIPS_RESOLVED",
-                }[phase]
                 self._trace(
                     f"DECISION_APPLIED phase={phase} requirement={node_id} "
                     f"state={states[node_id]}"

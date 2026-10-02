@@ -1,0 +1,82 @@
+\section{Introduction}
+
+
+Large language models (LLMs) have substantially reduced the cost of translating natural-language intent into source code \cite{xx, xx}.
+As code models became more capable, research gradually moved beyond isolated functions toward repository-level programming \cite{xx, xx}.
+This shift raises a more fundamental question:
+\textit{can we build a new abstraction in which humans specify requirements while coding agents compile them into executable software systems?}
+Such an abstraction goes beyond conventional code generation.
+A requirement document may contain tens or hundreds of interacting scenarios involving persistent data, user interfaces, business logic, APIs, and cross-component constraints.
+Generating a system from such requirements therefore requires not only synthesizing individual pieces of code, but also deciding \emph{how the system should be decomposed}, \emph{how components should communicate}, and \emph{how data should flow through the resulting architecture}.
+The challenge is particularly fundamental because deterministic software requirements must ultimately be realized through an inherently probabilistic code-generation infrastructure.
+
+Early attempts at natural-language-driven software generation primarily approached the problem from a \emph{multi-agent development} perspective.
+ChatDev and MetaGPT organize multiple role-playing agents into a standardized software-development workflow, where agents communicate across design, coding, and testing stages~\cite{qian2024chatdev, hong2024metagpt}. 
+AgileCoder extends this line of work by adopting Agile development practices, organizing agents into iterative sprints and maintaining a dynamic code dependency graph to support incremental software evolution~\cite{nguyen2025agilecoder}.
+Complementarily, OpenHands provides a general-purpose software-agent platform in which LLM agents interact with editors, command-line tools, browsers, and executable environments to autonomously inspect, modify, execute, and repair software~\cite{wang2025openhands}.
+While these approaches demonstrate that LLM agents can coordinate long-horizon software-development activities, 
+their performance is largely limited by the inherent uncertainty of LLMs and  the complexity of tasks.
+
+To further reduce the complexity of generating an entire repository,
+CodeS formulates the Natural-Language-to-Repository (NL2Repo) problem by introducing a multi-layer sketch that progressively decomposes repository generation into repository-level structure, file-level sketches, and function implementations~\cite{zan2026codes}.
+While increasingly constraining how software is developed and structured, but they still provide limited requirement-derived constraints on what behavior the generated software is expected to exhibit.
+More recently, ARC moves beyond repository generation toward \emph{requirement compilation}, i.e., compiling large multimodal requirement documents containing tens to hundreds of interdependent scenarios into runnable web systems~\cite{kong2026arc}.
+The rationale is to make requirement satisfaction executable 
+by generating tests at multiple abstraction levels for its decomposed software components. 
+These executable tests provide substantially stronger correctness constraints,
+allowing the generated implementations to be repeatedly executed, checked, and repaired against requirements.
+
+While tests provide useful supervision signal to guide code generation, 
+the compiling agent is still given considerable freedom to make architectural decisions (i.e., decompose requirements and modular components). 
+As a result, it is likely that the architectural decision made early in compilation needs to be revisited when a lower-level module is implemented.
+For example, the compiling agent can design (or decompose) a software module $A$ with a missing parameter, but only finding the issue when implementing a lower-level module $B$.
+In this case, the agent could either fail to implement the requirements or 
+revisit previous architectural decisions and propagate the changes across multiple modules.
+Such global backtracking is difficult because it requires the agent to simultaneously reason about a large and evolving software structure.
+Consequently, the effectiveness, stability, and cost of requirement compilation remain strongly coupled to the capability of the underlying code model.
+Even highly capable models do not always make globally consistent architectural decisions at the first attempt.
+
+
+In this work, we present \tool{} (\textbf{R}equirement Compiler with \textbf{EX}plicit Intermediate Representation) progressively lowers complex multimodal requirements into runnable software.
+Our key observation is that \emph{software architecture does not need to be freely invented by an LLM; much of it can be calculated from explicit data-flow constraints}.
+Consider a requirement that retrieves persistent objects, transforms them through backend logic, exposes them through an API, and eventually presents them in a user-interface component.
+Once the required data, its producer, its consumer, and its transformation constraints are made explicit, the possible decomposition of the system is substantially constrained.
+An API must expose particular inputs and outputs; a backend module must consume and produce particular data; a database operation must access particular entities; and a frontend component must eventually receive the corresponding values.
+Rather than asking an LLM to globally design these relationships, a compiler can progressively derive architectural modules while satisfying these data-flow obligations.
+
+Technically, \tool{} first derives a database schema from the requirement document, establishing a canonical vocabulary of persistent entities, attributes, and relationships.
+For each requirement, it then calculates how the required data must be produced, propagated, transformed, and consumed across software components.
+Unresolved data flows are maintained in a compiler-like symbol table as \emph{pending data-flow obligations}.
+Each obligation records data that must still be provided by, transferred between, or returned from architectural modules.
+As compilation proceeds, explicit lowering rules resolve these obligations by calculating modules, interfaces, and connections.
+The backend intermediate representation therefore captures not only individual requirements, but also database tables, architectural modules, APIs together with their input/output contracts and constraints, and inter-module invocation relationships.
+Once a high-level module and its data-flow contracts have been determined, lower-level generation is constrained by those contracts rather than being allowed to arbitrarily redesign the architecture.
+\tool{} applies the same principle to have frontend intermediate representation, 
+which explicitly captures UI elements, properties, events, effects, styles, and data parameters.
+Thus, it can parse multimodal requirements into a hierarchy of UI components, and then progressively attaches required data, events, effects, and presentation constraints to these components.
+
+
+These intermediate representations fundamentally change the role played by the underlying LLM.
+Rather than requiring the model to repeatedly perform unconstrained global architectural synthesis, \tool{} uses the model primarily for localized decisions whose feasible solution spaces have already been restricted by explicit representations and lowering rules.
+Tests remain an essential part of this process: they continue to serve as executable specifications for validating behavioral correctness.
+The two mechanisms are complementary---\emph{intermediate representations constrain the construction process, whereas tests validate the resulting behavior}.
+
+
+We evaluate \tool{} on ARC-Bench, which contains six Web systems with 30--150 requirements each, and compare it against state-of-the-art approaches including ARC and OpenHands.
+We conduct the experiments using both GPT-5.6 and DeepSeek V4 Flash to investigate not only functional correctness but also the sensitivity of requirement compilation to the underlying model.
+Our results show that \tool{} generates systems with a higher average test passing rate (\TODO{XX$\pm$XX\%} vs.\ \TODO{XX$\pm$XX\%}) and substantially lower variation across repeated runs.
+More importantly, the explicit lowering rules and intermediate representations significantly reduce the amount of generation and regeneration required during compilation, decreasing average token consumption by \TODO{XX\%}.
+The constrained compilation process also substantially reduces dependence on high-capability proprietary models: \tool{} remains effective with DeepSeek V4 Flash in settings where existing approaches require considerably stronger models to obtain comparable results.
+Together, these results suggest that explicit architectural and data-flow intermediate representations can transform requirement compilation from unconstrained global generation into structured local compilation.
+
+In summary, this paper makes the following contributions:
+\begin{itemize}[leftmargin=*]
+    \item We formulate a new intermediate-representation-based approach to \emph{requirement compilation}, in which software architecture is progressively calculated under explicit data-flow constraints rather than freely generated by an LLM. This formulation turns many global architectural decisions into constrained local compilation problems.
+    
+    \item We introduce a compiler-like representation of \emph{data-flow obligations} that acts as symbolic compilation state, together with intermediate representations for database design, backend architecture, APIs, frontend components, events, effects, and data parameters. These representations enable explicit lowering rules to systematically resolve cross-module dependencies.
+    
+    \item We implement these ideas in \tool{}, an end-to-end compiler that transforms large multimodal DSL requirement documents into runnable web systems. Its explicit frontend/backend contracts support modular and parallel compilation while executable tests continue to provide behavioral validation.
+    
+    \item We conduct an extensive evaluation on ARC-Bench across six non-trivial Web systems and multiple underlying models. The results demonstrate improvements in functional correctness and run-to-run stability, substantial reductions in token consumption, and reduced dependence on high-capability proprietary code models.
+
+\end{itemize}

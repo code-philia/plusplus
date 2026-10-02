@@ -1,14 +1,14 @@
 """Public ARC compiler interface."""
 
-from .controller import Compiler
+from .driver import ARCCompiler, Compiler
 from .code_binding import CodeTargetResolver, resolve_requirement_targets
 from .exact_file_patcher import ExactFilePatcher, FilePatchResult
 from .models import CompilationRequest
 from .test_runner import TestRunResult, TestRunner, TestSelection
 from .tdd_orchestrator import NodeTDDOrchestrator, NodeTDDPolicy, TDDStageResult
-from arc_agents.contracts import ProposedEdit, ProposedPatch
+from agents.contracts import ProposedEdit, ProposedPatch
 
-__all__ = [
+__all__ = ["ARCCompiler",
     "CodeTargetResolver",
     "CompilationRequest",
     "Compiler",

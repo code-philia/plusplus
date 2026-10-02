@@ -446,6 +446,11 @@ class DesignPassResult:
     def ok(self) -> bool:
         return not self.errors
 
+    @property
+    def backend_ir(self):
+        from .ir.design.backend import BackendDesignIR
+        return BackendDesignIR.from_dict(self.design_ir)
+
 
 @dataclass(slots=True)
 class DecisionResult:
@@ -594,17 +599,6 @@ class DesignPass:
         warnings.extend(self._soft_warnings)
         final_issues = all_issues
         design = state.to_ir()
-        if not final_issues:
-            final_issues = _behavioral_completeness_issues(design)
-            if final_issues:
-                warnings.extend(
-                    "DESIGN_VALIDATION_WARNING: " + issue.message
-                    for issue in final_issues
-                )
-                # A structurally materialized design is still emitted.  The
-                # warnings make the soft-fail explicit without aborting later
-                # lowering/TDD stages.
-                final_issues = []
         errors = [f"{issue.code}: {issue.message}" for issue in final_issues]
         return DesignPassResult(design, states, errors, warnings)
 

@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from core.logging import SynchronousLog
-from arcbench_agent_runtime.jsonio import write_json_atomic
+from runtime.jsonio import write_json_atomic
 
 from .frontend_ir import (
     VISUAL_ANALYSIS_SCHEMA,
