@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import uuid
@@ -51,6 +51,11 @@ class CompilerArtifactStore:
     def write_design_graph(self, graph: dict[str, Any]) -> str:
         path = self.design_root / "design_graph.json"
         write_json_atomic(path, graph)
+        return str(path)
+
+    def write_design_verification(self, report: dict[str, Any]) -> str:
+        path = self.design_root / "verification.json"
+        write_json_atomic(path, report)
         return str(path)
 
 
