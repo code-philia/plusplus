@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from ...design_stage import DesignPass, DesignPassResult, design_traceability
+from .semantic import DesignPass, DesignPassResult, design_traceability
 from ...ir.design.backend import BackendDesignIR
 from .base import BackendPassContext
 from .build_api import BuildAPIPass
@@ -31,4 +31,3 @@ class BackendIRGenerationPipeline(DesignPass):
 
 
 __all__ = ["BackendDesignIR", "BackendIRGenerationPipeline", "design_traceability"]
-

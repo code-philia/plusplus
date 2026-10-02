@@ -1,4 +1,4 @@
-from ...design_stage import _behavioral_completeness_issues
+﻿from .semantic import _behavioral_completeness_issues
 from .base import BackendDesignPass, BackendPassSpec
 
 
