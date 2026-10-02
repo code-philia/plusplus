@@ -1,4 +1,4 @@
-"""Stage snapshots committed with source history; restart on an isolated worktree."""
+﻿"""Stage snapshots committed with source history; restart on an isolated worktree."""
 from __future__ import annotations
 
 import hashlib
@@ -212,7 +212,7 @@ def complete_legacy_manifests(root: Path, snapshot: dict[str, Any]) -> None:
     from .file_planning import GlobalFilePlanner
     from .skeleton_lowering import DatabaseSchemaLowerer, TypeLowerer
     from .module_lowering import ModuleSkeletonLowerer
-    from .backend_lowering import BackendGlueLowerer
+    from .lowering.backend.legacy import BackendGlueLowerer
     from .fixture_lowering import FixtureLowerer, fixture_source_paths
 
     def checked(result: Any) -> Any:

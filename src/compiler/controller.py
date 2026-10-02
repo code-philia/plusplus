@@ -11,10 +11,10 @@ from runtime.runtime import AgentRuntime
 
 from .artifacts import CompilerArtifactStore
 from .checkpoints import CheckpointStore, START_FROM
-from .backend_lowering import BackendGlueLowerer
+from .lowering.backend.legacy import BackendGlueLowerer
 from .code_binding import CodeTargetResolver, CodeBindingLowerer
 from .passes.database.pipeline import DatabaseDesignPipeline, database_traceability
-from .database_lowering import lower_database
+from .lowering.database.legacy import lower_database
 from .passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
 from .file_planning import GlobalFilePlanner
 from .passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
@@ -23,7 +23,7 @@ from .passes.linking import LinkingPipeline
 from .validation.verifier import DesignIRVerifier
 from .lowering.pipeline import LoweringPipeline
 from .codegen import DeterministicCodegen
-from .frontend_react_lowering import FrontendReactLowerer
+from .lowering.frontend.react import FrontendReactLowerer
 from .git_history import GitStageError, ProjectGitHistory
 from .fixture_stage import (
     FixturePass,

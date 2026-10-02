@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import subprocess
 import os
@@ -6,13 +6,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .artifacts import CompilerArtifactStore
-from .backend_lowering import render_database_client
-from .file_planning import GlobalFilePlanner
-from .fixture_lowering import FixtureLowerer, fixture_source_paths
-from .skeleton_lowering import DatabaseSchemaLowerer, TypeLowerer
-from .symbol_planning import GlobalSymbolPlanner
-from .process_utils import resolve_executable
+from ...artifacts import CompilerArtifactStore
+from ..backend.legacy import render_database_client
+from ...file_planning import GlobalFilePlanner
+from ...fixture_lowering import FixtureLowerer, fixture_source_paths
+from ...skeleton_lowering import DatabaseSchemaLowerer, TypeLowerer
+from ...symbol_planning import GlobalSymbolPlanner
+from ...process_utils import resolve_executable
 
 
 @dataclass(slots=True)
