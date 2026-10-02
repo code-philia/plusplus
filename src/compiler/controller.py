@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import inspect
@@ -19,6 +19,7 @@ from .passes.backend.pipeline import BackendIRGenerationPipeline, design_traceab
 from .file_planning import GlobalFilePlanner
 from .passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
 from .ir.design import build_design_graph
+from .passes.linking import LinkingPipeline
 from .frontend_react_lowering import FrontendReactLowerer
 from .git_history import GitStageError, ProjectGitHistory
 from .fixture_stage import (
@@ -710,6 +711,7 @@ class Compiler:
             backend_ir=design.design_ir,
             frontend_ir=frontend.frontend_ir,
         )
+        LinkingPipeline().run(design_graph)
         artifacts["design_graph"] = artifact_store.write_design_graph(design_graph.to_dict())
         if rank < 4:
             checkpoints.save("frontend-ir", backend_routes=backend_glue.route_registry,
