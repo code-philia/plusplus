@@ -27,7 +27,7 @@ from ..passes.database.fixture import (
 from ..frontend.preprocessing import RequirementPreprocessor, PreprocessingResult
 from ..model_client import Model, ModelConfigurationError, StructuredModel
 from runtime.metrics import stage_checkpoint
-from ..models import CompilationRequest, CompilationResult
+from .models import CompilationRequest, CompilationResult
 from runtime.build import ProjectBuilder
 from runtime.project import (
     ProjectInitializer,

@@ -1,4 +1,4 @@
 """Stable schema namespace for compiler artifacts."""
 
-from compiler.models import *
+from compiler.driver.models import *
 

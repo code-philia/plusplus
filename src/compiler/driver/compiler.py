@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..frontend.pipeline import RequirementFrontend
-from ..models import CompilationRequest, CompilationResult
+from .models import CompilationRequest, CompilationResult
 
 
 class ARCCompiler:
