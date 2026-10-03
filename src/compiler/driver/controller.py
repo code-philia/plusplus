@@ -17,7 +17,6 @@ from ..passes.linking.binding_pipeline import CodeBindingPipeline
 from ..passes.database.pipeline import DatabaseDesignPipeline, database_traceability
 from ..lowering.database.pipeline import DatabaseSourcePipeline
 from ..passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
-from ..lowering.planning.files import GlobalFilePlanner
 from ..passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
 from .pipeline import CanonicalCompilerPipeline
 from ..lowering.frontend.pipeline import FrontendSourcePipeline
@@ -25,19 +24,15 @@ from ..git_history import GitStageError, ProjectGitHistory
 from ..fixture_stage import (
     FixturePass,
 )
-from ..fixture_lowering import fixture_source_paths
 from ..preprocessing_stage import RequirementPreprocessor, PreprocessingResult
 from ..model_client import Model, ModelConfigurationError, StructuredModel
 from ..cost_tracking import stage_checkpoint
 from ..models import CompilationRequest, CompilationResult
-from ..lowering.backend.modules import ModuleSkeletonLowerer
 from ..project_build import ProjectBuilder
 from ..project_initialization import (
     ProjectInitializer,
     validate_frontend_environment,
 )
-from ..lowering.rules.skeleton import TypeLowerer
-from ..lowering.planning.symbols import GlobalSymbolPlanner
 from ..tdd_orchestrator import NodeTDDOrchestrator
 from ..tdd_progress import TDDProgress, load_tdd_manifest
 from ..test_generation import RequirementTestGenerationPass, TestEnvironmentInitializer
