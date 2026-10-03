@@ -1,6 +1,4 @@
-"""Public driver construction and canonical compilation pipeline."""
-
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +9,7 @@ from ..ir.implementation import ImplementationIR
 from ..lowering import LoweringPipeline
 from ..passes.linking import LinkingPipeline
 from ..validation.verifier import DesignIRVerifier, VerificationReport
+from targets.react_fastapi import load_target_profile
 from .compiler import ARCCompiler
 
 
@@ -26,8 +25,9 @@ class CanonicalCompilerPipeline:
     """Run the canonical Design IR to codegen pipeline without side effects."""
 
     def __init__(self, *, target: str = "react-fastapi") -> None:
-        self.lowering = LoweringPipeline(target=target)
-        self.codegen = DeterministicCodegen()
+        profile = load_target_profile(target)
+        self.lowering = LoweringPipeline(target=profile.name)
+        self.codegen = DeterministicCodegen(profile)
 
     def run(
         self,

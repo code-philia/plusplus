@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 from ..ir.implementation.project import ImplementationIR
+from targets.react_fastapi import TargetProfile, load_target_profile
 
 
 @dataclass(slots=True)
@@ -17,10 +18,11 @@ class CodegenResult:
 class DeterministicCodegen:
     """Generate stable source skeletons from Implementation IR only."""
 
-    def __init__(self) -> None:
+    def __init__(self, profile: TargetProfile | None = None) -> None:
         from .python.generator import PythonCodegen
         from .typescript.generator import TypeScriptCodegen
 
+        self.profile = profile or load_target_profile()
         self._generators = {
             generator.language: generator
             for generator in (PythonCodegen(), TypeScriptCodegen())

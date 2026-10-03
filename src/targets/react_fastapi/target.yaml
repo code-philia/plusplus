@@ -1,0 +1,16 @@
+﻿name: react-fastapi
+frontend:
+  framework: react
+  language: typescript
+backend:
+  framework: fastapi
+  language: python
+database:
+  orm: sqlalchemy
+paths:
+  backend_root: backend/src
+  frontend_root: frontend/src
+  shared_root: shared/src
+extensions:
+  backend: .py
+  frontend: .tsx

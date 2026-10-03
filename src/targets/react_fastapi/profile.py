@@ -1,6 +1,15 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from .conventions import (
+    BACKEND_FRAMEWORK,
+    BACKEND_LANGUAGE,
+    DATABASE_ORM,
+    FRONTEND_FRAMEWORK,
+    FRONTEND_LANGUAGE,
+)
+from .types import DEFAULT_TYPE_MAPPINGS
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,12 +22,16 @@ class TargetProfile:
     shared_root: str
     backend_extension: str
     frontend_extension: str
+    backend_framework: str = BACKEND_FRAMEWORK
+    frontend_framework: str = FRONTEND_FRAMEWORK
+    database_orm: str = DATABASE_ORM
+    type_mappings: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_TYPE_MAPPINGS))
 
 
 REACT_FASTAPI = TargetProfile(
     name="react-fastapi",
-    backend_language="python",
-    frontend_language="typescript",
+    backend_language=BACKEND_LANGUAGE,
+    frontend_language=FRONTEND_LANGUAGE,
     backend_root="backend/src",
     frontend_root="frontend/src",
     shared_root="shared/src",
