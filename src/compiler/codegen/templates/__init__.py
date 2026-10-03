@@ -1,1 +1,0 @@
-﻿"""Target-neutral deterministic codegen templates namespace."""
