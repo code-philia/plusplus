@@ -448,7 +448,7 @@ class DesignPassResult:
 
     @property
     def backend_ir(self):
-        from .ir.design.backend import BackendDesignIR
+        from ...ir.design.backend import BackendDesignIR
         return BackendDesignIR.from_dict(self.design_ir)
 
 

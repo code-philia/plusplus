@@ -101,7 +101,7 @@ class FrontendIRGenerationResult:
         return self.report["status"] in {"GENERATED", "GENERATED_WITH_WARNINGS"}
     @property
     def frontend_model(self):
-        from .ir.design.frontend import FrontendDesignIR
+        from ...ir.design.frontend import FrontendDesignIR
         return FrontendDesignIR.from_dict(self.frontend_ir)
 
 
