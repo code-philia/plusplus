@@ -517,78 +517,123 @@ class DesignPass:
         dependency_graph: dict[str, Any],
         database_schema: dict[str, Any],
     ) -> DesignPassResult:
+        return self.compile_staged(requirement_ir, dependency_graph, database_schema)
+
+    def compile_staged(
+        self,
+        requirement_ir: dict[str, Any],
+        dependency_graph: dict[str, Any],
+        database_schema: dict[str, Any],
+    ) -> DesignPassResult:
+        """Run backend generation through the explicit Backend Pass protocol."""
+        from .base import BackendPassContext
+        from .build_api import BuildAPIPass
+        from .decompose_api import DecomposeAPIPass
+        from .decompose_func import DecomposeFUNCPass
+        from .resolve_calls import ResolveCallsPass
+
         nodes = requirement_ir.get("nodes", {})
         dependencies = dependency_graph.get("atomic_dependencies", {})
         order = [node for wave in _waves(requirement_ir, dependency_graph) for node in wave]
         state = DesignState()
         all_issues: list[DesignIssue] = []
         warnings: list[str] = []
-        self._soft_warnings = []
         states: dict[str, str] = {}
+        self._soft_warnings = []
 
         for requirement_id in order:
             requirement = _requirement_context(nodes, requirement_id)
             design_context = project_design_context(database_schema, requirement_id, dependencies)
-            model_design_context = _model_design_context(design_context)
-            frozen_api_contracts = _existing_api_contracts(state)
-            contract_result = self._decision(
-                phase="requirement_contract",
-                unit_id=requirement_id,
-                schema_name="arc_requirement_contract",
-                instructions=REQUIREMENT_CONTRACT_INSTRUCTIONS,
-                output_schema=REQUIREMENT_CONTRACT_SCHEMA,
-                context={
-                    "requirement": requirement,
-                    "design_context": model_design_context,
-                    "existing_api_contracts": frozen_api_contracts,
-                    "fixed_template": _requirement_contract_template(requirement_id),
-                },
-                validator=lambda value: _requirement_contract_issues(
-                    value, requirement_id, design_context, requirement
-                ),
-            )
-            if contract_result.value is None:
-                states[requirement_id] = "FAILED"
-                all_issues.extend(contract_result.issues)
-                break
-
-            base = state.clone()
-            contract = _normalize_requirement_contract(contract_result.value)
-            contract, normalized_effect_ids = _normalize_database_backed_session_effects(
-                contract,
-                design_context=design_context,
-            )
-            if normalized_effect_ids:
-                self._trace(
-                    "CONTRACT_EFFECTS_NORMALIZED "
-                    f"requirement={requirement_id} effects={normalized_effect_ids} "
-                    "from=SESSION_WRITE to=CREATE source=database_entities"
-                )
-            contract, completed_effect_ids = _complete_constraint_read_effects(
-                contract,
+            contract_context = BackendPassContext(
+                compiler=self,
                 requirement_id=requirement_id,
+                requirement=requirement,
                 design_context=design_context,
+                state=state,
+                node_states=states,
+                warnings=warnings,
             )
-            if completed_effect_ids:
-                self._trace(
-                    "CONTRACT_EFFECTS_COMPLETED "
-                    f"requirement={requirement_id} effects={completed_effect_ids} "
-                    "source=database_unique_constraints"
+            contract_context = BuildAPIPass().run(None, contract_context)
+            if contract_context.contract is None:
+                states[requirement_id] = "FAILED"
+                all_issues.extend(contract_context.issues)
+                break
+            base = contract_context.state
+            if base is None:
+                states[requirement_id] = "FAILED"
+                all_issues.append(_issue(
+                    "BACKEND_STATE_MISSING",
+                    "Backend contract pass did not produce state.",
+                    "requirement_contract",
+                    "COMPILER",
+                ))
+                break
+            if not contract_context.contract.get("server_state", True):
+                state = base
+                states[requirement_id] = "DESIGN_VALIDATED"
+                continue
+
+            upstream_feedback: list[str] = []
+            seen_failures: set[str] = set()
+            last_trial: DesignState | None = None
+            compiled: DesignState | None = None
+            requirement_issues: list[DesignIssue] = []
+            for reopen_attempt in range(self._reopen_budget + 1):
+                attempt_context = BackendPassContext(
+                    compiler=self,
+                    requirement_id=requirement_id,
+                    requirement=requirement,
+                    design_context=design_context,
+                    state=base,
+                    contract=contract_context.contract,
+                    upstream_feedback=upstream_feedback,
+                    node_states=states,
+                    warnings=warnings,
                 )
-            base.requirement_contracts[requirement_id] = contract
-            if not contract.get("server_state", True):
-                compiled, issues = base, []
-            else:
-                compiled, issues = self._compile_requirement(
-                    base,
-                    requirement_id,
-                    requirement,
-                    contract,
-                    design_context,
+                attempt_context = DecomposeAPIPass().run(None, attempt_context)
+                if attempt_context.issues:
+                    requirement_issues = attempt_context.issues
+                    break
+                last_trial = attempt_context.trial
+                attempt_context = DecomposeFUNCPass().run(None, attempt_context)
+                if attempt_context.completed:
+                    compiled = attempt_context.state
+                    requirement_issues = []
+                    break
+                requirement_issues = attempt_context.issues
+                if not attempt_context.retry:
+                    break
+                fingerprint = _hash({
+                    "decision": attempt_context.decision,
+                    "issues": [issue.as_dict() for issue in requirement_issues],
+                })
+                if fingerprint in seen_failures:
+                    self._soft_warnings.append(
+                        f"DESIGN_VALIDATION_WARNING requirement={requirement_id}: "
+                        "repeated upstream conflicts; keeping the latest materialized design."
+                    )
+                    compiled = last_trial or base
+                    requirement_issues = []
+                    break
+                seen_failures.add(fingerprint)
+                upstream_feedback = [issue.feedback() for issue in requirement_issues]
+                self._trace(
+                    f"UPSTREAM_REOPEN phase=requirement_api requirement={requirement_id} "
+                    f"attempt={reopen_attempt + 1}/{self._reopen_budget + 1} "
+                    f"feedback={'; '.join(upstream_feedback)}"
                 )
             if compiled is None:
+                if last_trial is not None and not requirement_issues:
+                    compiled = last_trial
+                elif last_trial is not None and not any(
+                    issue.repair_action == REOPEN_PARENT for issue in requirement_issues
+                ):
+                    compiled = None
+                elif last_trial is not None:
+                    compiled = last_trial
+            if compiled is None:
                 states[requirement_id] = "FAILED"
-                all_issues.extend(issues)
+                all_issues.extend(requirement_issues)
                 break
             state = compiled
             collapsed, collapse_warnings = _collapse_passthrough_modules(state, requirement_id)
@@ -597,109 +642,17 @@ class DesignPass:
             states[requirement_id] = "DESIGN_VALIDATED"
 
         warnings.extend(self._soft_warnings)
-        final_issues = all_issues
-        design = state.to_ir()
-        errors = [f"{issue.code}: {issue.message}" for issue in final_issues]
-        return DesignPassResult(design, states, errors, warnings)
-
-
-    def _compile_requirement(
-        self,
-        base: DesignState,
-        requirement_id: str,
-        requirement: dict[str, Any],
-        contract: dict[str, Any],
-        design_context: dict[str, Any],
-    ) -> tuple[DesignState | None, list[DesignIssue]]:
-        upstream_feedback: list[str] = []
-        seen_failures: set[str] = set()
-        last_issues: list[DesignIssue] = []
-        last_trial: DesignState | None = None
-        existing_apis = _existing_api_contracts(base)
-        for reopen_attempt in range(self._reopen_budget + 1):
-            context = {
-                "requirement": requirement,
-                "fixed_requirement_contract": contract,
-                "existing_api_contracts": existing_apis,
-                "fixed_template": _api_template(),
-            }
-            if upstream_feedback:
-                context["upstream_validation_feedback"] = upstream_feedback
-            result = self._decision(
-                phase="requirement_api",
-                unit_id=requirement_id,
-                schema_name="arc_requirement_api",
-                instructions=API_DECOMPOSITION_INSTRUCTIONS,
-                output_schema=_allocation_output_schema(
-                    API_DECOMPOSITION_SCHEMA,
-                    contract.get("obligations", []),
-                ),
-                context=context,
-                validator=lambda value: _api_plan_issues(
-                    value, requirement_id, contract, existing_apis
-                ),
-            )
-            if result.value is None:
-                return None, result.issues
-            for decided in result.value.get("modules", []):
-                self._trace(
-                    "API_REUSE_DECISION "
-                    f"requirement={requirement_id} api={decided.get('name', '')} "
-                    f"decision={decided.get('reuse_decision', '')} "
-                    f"target={decided.get('reuse_target_module_id') or '-'}"
-                )
-            trial = base.clone()
-            last_trial = trial
-            api_ids, issues = _materialize_apis(trial, requirement_id, contract, result.value)
-            if issues:
-                return None, issues
-            failure: list[DesignIssue] = []
-            for api_id in api_ids:
-                expanded, child_issues = self._expand_module(
-                    trial,
-                    requirement_id,
-                    requirement,
-                    api_id,
-                    contract,
-                    design_context,
-                    depth=0,
-                )
-                if expanded is None:
-                    failure = child_issues
-                    break
-                trial = expanded
-            if not failure:
-                completeness = _behavioral_completeness_issues(
-                    trial.to_ir(),
-                    requirement_ids={requirement_id},
-                )
-                if not completeness:
-                    return trial, []
-                for issue in completeness:
-                    issue.repair_action = REOPEN_PARENT
-                failure = completeness
-            last_issues = failure
-            if not any(issue.repair_action == REOPEN_PARENT for issue in failure):
-                return None, failure
-            fingerprint = _hash({
-                "decision": result.value,
-                "issues": [issue.as_dict() for issue in failure],
-            })
-            if fingerprint in seen_failures:
-                self._soft_warnings.append(
-                    f"DESIGN_VALIDATION_WARNING requirement={requirement_id}: "
-                    "repeated upstream conflicts; keeping the latest materialized design."
-                )
-                return last_trial or base, []
-            seen_failures.add(fingerprint)
-            upstream_feedback = [issue.feedback() for issue in failure]
-            self._trace(f"UPSTREAM_REOPEN phase=requirement_api requirement={requirement_id} attempt={reopen_attempt + 1}/{self._reopen_budget + 1} feedback={'; '.join(upstream_feedback)}")
-        self._soft_warnings.append(
-            f"DESIGN_VALIDATION_WARNING requirement={requirement_id}: "
-            f"upstream repair budget exhausted; keeping the latest materialized design. "
-            f"issues={'; '.join(issue.message for issue in last_issues)}"
+        final_context = BackendPassContext(
+            compiler=self,
+            state=state,
+            issues=all_issues,
+            warnings=warnings,
+            node_states=states,
         )
-        return last_trial or base, []
+        final_context = ResolveCallsPass().run(None, final_context)
+        if final_context.result is None:
+            return DesignPassResult(state.to_ir(), states, [], warnings)
+        return final_context.result
 
     def _decision(
         self,
