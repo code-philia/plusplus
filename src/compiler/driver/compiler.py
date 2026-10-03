@@ -37,7 +37,7 @@ class ARCCompiler:
             await self._log_frontend_errors(frontend.preprocessing.errors)
             return CompilationResult(ok=False, artifacts={})
         if self._controller is None:
-            from .legacy import CompilerController
+            from .controller import CompilerController
 
             self._controller = CompilerController(self.runtime, self.log_cb, self.model, target=self.target)
         return await self._controller.compile(request)
