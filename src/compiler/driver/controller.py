@@ -14,7 +14,7 @@ from ..checkpoints import CheckpointStore, START_FROM
 from ..lowering.backend.pipeline import BackendSourcePipeline
 from ..passes.linking.code_binding import CodeTargetResolver, CodeBindingLowerer
 from ..passes.database.pipeline import DatabaseDesignPipeline, database_traceability
-from ..lowering.database.lower import lower_database
+from ..lowering.database.pipeline import DatabaseSourcePipeline
 from ..passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
 from ..lowering.planning.files import GlobalFilePlanner
 from ..passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
@@ -320,8 +320,12 @@ class CompilerController:
             fixture_ir = fixture_result.fixture_ir
             artifacts["fixture_ir"] = artifact_store.write_fixture_ir(fixture_ir)
 
-            lowered_database = lower_database(
-                request.output_dir, artifact_store, database.schema, fixture_ir, project_manifest,
+            lowered_database = DatabaseSourcePipeline().run(
+                output_dir=request.output_dir,
+                artifact_store=artifact_store,
+                schema=database.schema,
+                fixture_ir=fixture_ir,
+                project_manifest=project_manifest,
             )
             artifacts.update(lowered_database.artifacts)
             for warning in lowered_database.warnings:
