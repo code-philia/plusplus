@@ -5,7 +5,7 @@ from .passes.linking.code_binding import CodeTargetResolver, resolve_requirement
 from .exact_file_patcher import ExactFilePatcher, FilePatchResult
 from .models import CompilationRequest
 from .test_runner import TestRunResult, TestRunner, TestSelection
-from .tdd_orchestrator import NodeTDDOrchestrator, NodeTDDPolicy, TDDStageResult
+from synthesis.tdd.orchestrator import NodeTDDOrchestrator, NodeTDDPolicy, TDDStageResult
 from agents.contracts import ProposedEdit, ProposedPatch
 
 __all__ = ["ARCCompiler",

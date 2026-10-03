@@ -15,13 +15,13 @@ from typing import Any, Mapping
 from runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 
-from .artifacts import CompilerArtifactStore
-from .passes.linking.code_binding import CODE_BINDING_READY, CodeTargetResolver
-from .passes.database.semantic import schema_for_requirement
-from .model_client import StructuredModel, describe_model_error
-from .project_initialization import DependencyCatalog, test_workspace_spec
-from .process_utils import resolve_executable, run_command
-from .trace_payload import format_payload_trace
+from compiler.artifacts import CompilerArtifactStore
+from compiler.passes.linking.code_binding import CODE_BINDING_READY, CodeTargetResolver
+from compiler.passes.database.semantic import schema_for_requirement
+from compiler.model_client import StructuredModel, describe_model_error
+from compiler.project_initialization import DependencyCatalog, test_workspace_spec
+from compiler.process_utils import resolve_executable, run_command
+from compiler.trace_payload import format_payload_trace
 
 
 TEST_ENVIRONMENT_READY = "TEST_ENVIRONMENT_READY"

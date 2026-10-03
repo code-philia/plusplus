@@ -17,7 +17,7 @@ from .process_utils import (
     resolve_executable,
     terminate_process_tree,
 )
-from .test_generation import TEST_ENVIRONMENT_READY, TEST_LAYERS, TESTS_FROZEN
+from synthesis.testgen.generation import TEST_ENVIRONMENT_READY, TEST_LAYERS, TESTS_FROZEN
 
 
 @dataclass(frozen=True, slots=True)

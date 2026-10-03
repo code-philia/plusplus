@@ -7,9 +7,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .passes.linking.code_binding import CodeTargetResolver
-from .analysis.file_selection import direct_dependencies, requirement_dependencies
-from .frontend.context import implementation_requirement
+from compiler.passes.linking.code_binding import CodeTargetResolver
+from compiler.analysis.file_selection import direct_dependencies, requirement_dependencies
+from compiler.frontend.context import implementation_requirement
 
 
 class RepairContextBuilder:

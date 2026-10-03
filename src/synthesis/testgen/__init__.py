@@ -1,3 +1,2 @@
-from compiler.test_generation import *
+from .generation import *
 from compiler.test_runner import *
-

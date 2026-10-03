@@ -1,2 +1,2 @@
-from ..test_generation import *
+from synthesis.testgen.generation import *
 
