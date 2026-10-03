@@ -19,13 +19,13 @@ from openai import OpenAI
 from core.logging import SynchronousLog
 from runtime.jsonio import write_json_atomic
 
-from .passes.frontend.schema import (
+from ..passes.frontend.schema import (
     VISUAL_ANALYSIS_SCHEMA,
     FrontendDesignErrorCode,
     FrontendDesignIssue,
 )
-from .trace_payload import format_payload_trace
-from .model_client import (
+from ..trace_payload import format_payload_trace
+from ..model_client import (
     completion_request_kwargs,
     describe_model_error,
     record_model_usage,
