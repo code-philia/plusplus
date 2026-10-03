@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..preprocessing_stage import PreprocessingResult, RequirementPreprocessor
+from .preprocessing import PreprocessingResult, RequirementPreprocessor
 from .canonicalize import RequirementShapeError, canonicalize_payload
 from .loader import RequirementLoadError, RequirementLoader
 from .requirement_graph import RequirementGraph

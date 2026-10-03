@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any
 
 
-from .frontend.canonicalize import RequirementShapeError, canonicalize_payload
-from .frontend.loader import RequirementLoadError, RequirementLoader
-from .ir.requirement import RequirementIR
+from .canonicalize import RequirementShapeError, canonicalize_payload
+from .loader import RequirementLoadError, RequirementLoader
+from ..ir.requirement import RequirementIR
 
 SUPPORTED_NODE_TYPES = {"FOLDER", "ATOMIC"}
 IMAGE_REFERENCE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")

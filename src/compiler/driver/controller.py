@@ -24,7 +24,7 @@ from ..git_history import GitStageError, ProjectGitHistory
 from ..fixture_stage import (
     FixturePass,
 )
-from ..preprocessing_stage import RequirementPreprocessor, PreprocessingResult
+from ..frontend.preprocessing import RequirementPreprocessor, PreprocessingResult
 from ..model_client import Model, ModelConfigurationError, StructuredModel
 from ..cost_tracking import stage_checkpoint
 from ..models import CompilationRequest, CompilationResult
