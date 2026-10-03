@@ -18,7 +18,7 @@ from core.logging import append_debug_log, write_terminal_log
 
 from compiler.passes.linking.code_binding import CodeTargetResolver
 from synthesis.tdd.patching import ExactFilePatcher
-from compiler.git_history import ProjectGitHistory
+from runtime.history import ProjectGitHistory
 from compiler.project_build import ProjectBuilder
 from synthesis.tdd.repair_context import RepairContextBuilder
 from synthesis.testgen.generation import TEST_LAYERS, _format_model_log

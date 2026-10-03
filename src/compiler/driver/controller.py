@@ -20,7 +20,7 @@ from ..passes.backend.pipeline import BackendIRGenerationPipeline, design_tracea
 from ..passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
 from .pipeline import CanonicalCompilerPipeline
 from ..lowering.frontend.pipeline import FrontendSourcePipeline
-from ..git_history import GitStageError, ProjectGitHistory
+from runtime.history import GitStageError, ProjectGitHistory
 from ..passes.database.fixture import (
     FixturePass,
 )

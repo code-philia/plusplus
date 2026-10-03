@@ -18,7 +18,7 @@ from core.cli import (
 )
 from core.workflow import ARCWorkflowManager
 from compiler.checkpoints import START_FROM, prepare_restart, install_restart_dependencies
-from compiler.git_history import GitStageError
+from runtime.history import GitStageError
 
 
 def _get_repo_root() -> str:

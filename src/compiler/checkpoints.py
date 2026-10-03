@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from runtime.jsonio import write_json_atomic
-from .git_history import GitStageError, ProjectGitHistory
+from runtime.history import GitStageError, ProjectGitHistory
 from runtime.process import resolve_executable, run_command
 
 

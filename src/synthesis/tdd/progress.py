@@ -10,7 +10,7 @@ from typing import Any
 
 from runtime.jsonio import write_json_atomic
 
-from compiler.git_history import ProjectGitHistory
+from runtime.history import ProjectGitHistory
 
 
 class TDDProgress:
