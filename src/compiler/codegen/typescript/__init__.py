@@ -1,6 +1,3 @@
-﻿"""Deterministic TypeScript codegen exports."""
+from .generator import TypeScriptCodegen
 
-from ..generator import CodegenResult, DeterministicCodegen
-
-__all__ = ["CodegenResult", "DeterministicCodegen"]
-
+__all__ = ["TypeScriptCodegen"]
