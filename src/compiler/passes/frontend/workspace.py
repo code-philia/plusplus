@@ -1,4 +1,4 @@
-"""Compiler-owned IDs, atomic local edits and lightweight frontend graph diagnostics."""
+﻿"""Compiler-owned IDs, atomic local edits and lightweight frontend graph diagnostics."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import copy
 import json
 from typing import Any
 
-from .frontend_generation_contracts import ENTITY_FIELDS, TABLES
+from .contracts import ENTITY_FIELDS, TABLES
 
 
 DEFAULTS: dict[str, dict[str, Any]] = {

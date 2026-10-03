@@ -1,4 +1,4 @@
-"""Lower the seven-entity frontend IR without projecting it into Thin Frontend IR.
+﻿"""Lower the seven-entity frontend IR without projecting it into Thin Frontend IR.
 
 The compiler emits React structure, types and explicit unimplemented behavior stubs.
 No model calls or interpretation of prose occurs during lowering.
@@ -12,7 +12,7 @@ from typing import Any
 from pathlib import Path
 
 from ...design_projection import project_api_contracts
-from ...frontend_workspace import references
+from ...passes.frontend.workspace import references
 from ...typescript_format import format_typescript
 
 
@@ -319,7 +319,7 @@ class FrontendReactLowerer:
     @staticmethod
     def _brief(value: str, limit: int = 160) -> str:
         text = " ".join(value.split())
-        return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
+        return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "鈥?
 
     def _contract_comment(self, row: dict[str, Any]) -> str:
         """Preserve deterministic design facts beside the generated declaration."""

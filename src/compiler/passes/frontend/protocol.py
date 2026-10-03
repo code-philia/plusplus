@@ -1,12 +1,12 @@
-"""Canonical model projection and lightweight reference checks."""
+﻿"""Canonical model projection and lightweight reference checks."""
 from __future__ import annotations
 
 import copy
 from difflib import SequenceMatcher
 from typing import Any
 
-from .frontend_generation_contracts import ShapeError
-from .frontend_workspace import REF_FIELDS
+from .contracts import ShapeError
+from .workspace import REF_FIELDS
 
 
 def check_request_targets(raw: Any, api_ids: set[str]) -> list[ShapeError]:

@@ -15,13 +15,13 @@ from core.logging import SynchronousLog
 from runtime.jsonio import write_json_atomic
 
 from ...design_projection import project_api_contracts
-from ...frontend_generation_contracts import (
+from .contracts import (
     BEHAVIOR_INSTRUCTIONS, REQUIREMENT_ASSEMBLY_INSTRUCTIONS,
     UI_INSTRUCTIONS, ShapeError, BatchValidationError, collect_shape_errors,
     normalize_patch, patch_schema, protocol_examples,
 )
-from ...frontend_workspace import FrontendWorkspace, references
-from ...frontend_protocol import project_context, check_references, check_request_targets
+from .workspace import FrontendWorkspace, references
+from .protocol import project_context, check_references, check_request_targets
 from ...model_client import StructuredModel, describe_model_error
 from ...visual_reference import ResolvedVisualReference, VisualModel, VisualStructuredModel
 
