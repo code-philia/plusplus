@@ -28,7 +28,7 @@ from ..frontend.preprocessing import RequirementPreprocessor, PreprocessingResul
 from ..model_client import Model, ModelConfigurationError, StructuredModel
 from ..cost_tracking import stage_checkpoint
 from ..models import CompilationRequest, CompilationResult
-from ..project_build import ProjectBuilder
+from runtime.build import ProjectBuilder
 from ..project_initialization import (
     ProjectInitializer,
     validate_frontend_environment,
