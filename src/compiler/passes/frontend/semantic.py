@@ -168,21 +168,21 @@ class FrontendIRGenerationPass:
                               "part": index + 1, "parts": len(fragments), "has_visual": bool(visuals),
                               "visual": visuals[0] if visuals else None,
                               "visuals": visuals})
-        from .passes.frontend import (
-            DecomposeComponentsPass,
-            DiscoverPagesPass,
-            InferBehaviorPass,
-            InferDataPass,
-        )
+        from .base import FrontendPassContext
+        from .decompose_components import DecomposeComponentsPass
+        from .discover_pages import DiscoverPagesPass
+        from .infer_behavior import InferBehaviorPass
+        from .infer_data import InferDataPass
         self.failed_ui: set[str] = set()
         self.failed_assemble: set[str] = set()
+        pass_context = FrontendPassContext(compiler=self, tasks=tasks, module=self.workspace)
         for compiler_pass in (
             DiscoverPagesPass(),
             DecomposeComponentsPass(),
             InferDataPass(),
             InferBehaviorPass(),
         ):
-            compiler_pass.run(self, tasks)
+            pass_context = compiler_pass.run(self.workspace, pass_context)
 
         self.warnings.extend(self.workspace.inspect(set(self.apis)))
         if self.failures:

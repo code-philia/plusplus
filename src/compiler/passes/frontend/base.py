@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,13 +12,36 @@ class FrontendPassSpec:
     output_level: str = "design"
 
 
+@dataclass(slots=True)
+class FrontendPassContext:
+    compiler: Any
+    tasks: list[dict[str, Any]] = field(default_factory=list)
+    module: Any = None
+    results: dict[str, Any] = field(default_factory=dict)
+
+
 class FrontendDesignPass:
     spec: FrontendPassSpec
 
-    def run(self, compiler, tasks):
+    @property
+    def input_level(self) -> str:
+        return self.spec.input_level
+
+    @property
+    def output_level(self) -> str:
+        return self.spec.output_level
+
+    def run(self, module: Any, context: FrontendPassContext) -> FrontendPassContext:
+        context.module = module
         if self.spec.phase == "data":
-            return compiler._run_frontend_data_phase(tasks)
-        return compiler._run_frontend_phase(self.spec.phase, tasks)
+            context.compiler._run_frontend_data_phase(context.tasks)
+        else:
+            context.compiler._run_frontend_phase(self.spec.phase, context.tasks)
+        context.results[self.spec.name] = {
+            "phase": self.spec.phase,
+            "status": "COMPLETED",
+        }
+        return context
 
 
-__all__ = ["FrontendDesignPass", "FrontendPassSpec"]
+__all__ = ["FrontendDesignPass", "FrontendPassContext", "FrontendPassSpec"]

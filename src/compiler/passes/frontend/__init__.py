@@ -1,6 +1,6 @@
 """Frontend Design IR generation passes."""
 
-from .base import FrontendDesignPass, FrontendPassSpec
+from .base import FrontendDesignPass, FrontendPassContext, FrontendPassSpec
 from .decompose_components import DecomposeComponentsPass
 from .discover_pages import DiscoverPagesPass
 from .infer_behavior import InferBehaviorPass
