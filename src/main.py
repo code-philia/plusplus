@@ -17,7 +17,7 @@ from core.cli import (
     print_compilation_summary,
 )
 from core.workflow import ARCWorkflowManager
-from compiler.checkpoints import START_FROM, prepare_restart, install_restart_dependencies
+from compiler.driver.checkpoints import START_FROM, prepare_restart, install_restart_dependencies
 from runtime.history import GitStageError
 
 

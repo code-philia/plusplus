@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ...artifacts import CompilerArtifactStore
+from compiler.driver.artifacts import CompilerArtifactStore
 from ..backend.lower import render_database_client
 from ...lowering.planning.files import GlobalFilePlanner
 from .fixtures import FixtureLowerer, fixture_source_paths

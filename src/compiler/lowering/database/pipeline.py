@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ...artifacts import CompilerArtifactStore
+from compiler.driver.artifacts import CompilerArtifactStore
 from .lower import DatabaseLoweringResult, lower_database
 
 

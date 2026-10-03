@@ -9,8 +9,8 @@ from typing import Any, Awaitable, Callable
 
 from runtime.runtime import AgentRuntime
 
-from ..artifacts import CompilerArtifactStore
-from ..checkpoints import CheckpointStore, START_FROM
+from .artifacts import CompilerArtifactStore
+from .checkpoints import CheckpointStore, START_FROM
 from ..lowering.backend.pipeline import BackendSourcePipeline
 from ..passes.linking.code_binding import CodeTargetResolver
 from ..passes.linking.binding_pipeline import CodeBindingPipeline
