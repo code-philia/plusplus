@@ -12,7 +12,8 @@ from runtime.runtime import AgentRuntime
 from ..artifacts import CompilerArtifactStore
 from ..checkpoints import CheckpointStore, START_FROM
 from ..lowering.backend.pipeline import BackendSourcePipeline
-from ..passes.linking.code_binding import CodeTargetResolver, CodeBindingLowerer
+from ..passes.linking.code_binding import CodeTargetResolver
+from ..passes.linking.binding_pipeline import CodeBindingPipeline
 from ..passes.database.pipeline import DatabaseDesignPipeline, database_traceability
 from ..lowering.database.pipeline import DatabaseSourcePipeline
 from ..passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
@@ -644,29 +645,20 @@ class CompilerController:
             model = model or self._model or Model.from_env()
             if hasattr(model, "set_usage_path"):
                 model.set_usage_path(artifact_store.root / "model_usage.jsonl")
-            def checked(result):
-                if not result.ok:
-                    raise ValueError("; ".join(result.errors))
-                return result
-            symbols = checked(GlobalSymbolPlanner().plan(design_ir, database_schema, project_manifest))
-            files = checked(GlobalFilePlanner(request.output_dir).plan(
-                design_ir, symbols.registry, project_manifest, fixture_paths=fixture_source_paths(fixture_ir)))
-            types = checked(TypeLowerer().lower(symbols.registry, files.registry))
-            modules = {kind: checked(ModuleSkeletonLowerer().lower(
-                kind, design_ir, symbols.registry, files.registry)).manifest for kind in ("DB", "FUNC", "API")}
             report_path = request.output_dir / ".arc/lowering/frontend/lowering.json"
             if not report_path.is_file():
                 report_path = request.output_dir / ".arc/code/frontend/lowering.json"
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            bindings = checked(CodeBindingLowerer().lower(
-                output_root=request.output_dir, requirement_ir=preprocessing.requirement_ir,
-                dependency_graph=preprocessing.dependency_graph, design_ir=design_ir, frontend_ir=frontend_ir,
-                backend_symbol_registry=symbols.registry, backend_type_manifest=types.manifest,
-                backend_module_manifests=modules, backend_route_registry=backend_routes,
-                frontend_symbol_registry={"symbols": []},
-                frontend_file_registry={"ui_locations": [], "store_locations": [], "api_client_locations": []},
-                frontend_route_registry={"routes": []}, frontend_lowering_report=report,
-            ))
+            bindings = CodeBindingPipeline(request.output_dir).run(
+                requirement_ir=preprocessing.requirement_ir,
+                dependency_graph=preprocessing.dependency_graph,
+                database_schema=database_schema,
+                design_ir=design_ir,
+                frontend_ir=frontend_ir,
+                fixture_ir=fixture_ir,
+                project_manifest=project_manifest,
+                backend_routes=backend_routes,
+                frontend_lowering_report_path=report_path,
+            )
         except (ModelConfigurationError, OSError, ValueError, KeyError) as exc:
             await self._log("Compiler", f"TDD handoff failed: {exc}", "error")
             return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
