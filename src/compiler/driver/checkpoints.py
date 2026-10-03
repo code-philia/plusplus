@@ -208,11 +208,11 @@ def complete_legacy_manifests(root: Path, snapshot: dict[str, Any]) -> None:
     """Rebuild missing planning metadata deterministically, without model calls or source writes."""
     if snapshot["stage"] in {"initialized", "database"}:
         return
-    from .lowering.planning.symbols import GlobalSymbolPlanner
-    from .lowering.planning.files import GlobalFilePlanner
-    from .lowering.rules.skeleton import DatabaseSchemaLowerer, TypeLowerer
-    from .lowering.backend.modules import ModuleSkeletonLowerer
-    from .lowering.backend.lower import BackendGlueLowerer
+    from targets.react_fastapi.lowering.planning.symbols import GlobalSymbolPlanner
+    from targets.react_fastapi.lowering.planning.files import GlobalFilePlanner
+    from targets.react_fastapi.lowering.rules.skeleton import DatabaseSchemaLowerer, TypeLowerer
+    from targets.react_fastapi.lowering.backend.modules import ModuleSkeletonLowerer
+    from targets.react_fastapi.lowering.backend.lower import BackendGlueLowerer
     from .lowering.database.fixtures import FixtureLowerer, fixture_source_paths
 
     def checked(result: Any) -> Any:
