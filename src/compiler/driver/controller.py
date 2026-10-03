@@ -18,11 +18,7 @@ from ..lowering.database.lower import lower_database
 from ..passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
 from ..lowering.planning.files import GlobalFilePlanner
 from ..passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
-from ..ir.design import build_design_graph
-from ..passes.linking import LinkingPipeline
-from ..validation.verifier import DesignIRVerifier
-from ..lowering.pipeline import LoweringPipeline
-from ..codegen import DeterministicCodegen
+from .pipeline import CanonicalCompilerPipeline
 from ..lowering.frontend.react import FrontendReactLowerer
 from ..git_history import GitStageError, ProjectGitHistory
 from ..fixture_stage import (
@@ -710,20 +706,21 @@ class CompilerController:
                 ok=False, root_id=root_id, states=states,
                 failed_nodes=sorted(failed_requirements), artifacts=artifacts,
             )
-        design_graph = build_design_graph(
+        canonical = CanonicalCompilerPipeline(target=self.target).run(
             database_schema=database.schema,
             backend_ir=design.design_ir,
             frontend_ir=frontend.frontend_ir,
         )
-        LinkingPipeline().run(design_graph)
+        design_graph = canonical.design_graph
         artifacts["design_graph"] = artifact_store.write_design_graph(design_graph.to_dict())
-        verification = DesignIRVerifier().verify(design_graph)
-        artifacts["design_verification"] = artifact_store.write_design_verification(verification.to_dict())
-        for issue in [*verification.errors, *verification.warnings]:
+        artifacts["design_verification"] = artifact_store.write_design_verification(
+            canonical.verification.to_dict()
+        )
+        for issue in [*canonical.verification.errors, *canonical.verification.warnings]:
             await self._log("Compiler", issue, "warning")
-        implementation_ir = LoweringPipeline().lower(design_graph)
+        implementation_ir = canonical.implementation_ir
         artifacts["implementation_ir"] = artifact_store.write_implementation_ir(implementation_ir.to_dict())
-        codegen = DeterministicCodegen().generate(implementation_ir)
+        codegen = canonical.codegen
         artifacts["codegen_plan"] = artifact_store.write_codegen_plan(codegen.to_dict())
         if rank < 4:
             checkpoints.save("frontend-ir", backend_routes=backend_glue.route_registry,
