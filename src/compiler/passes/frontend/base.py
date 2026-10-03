@@ -33,10 +33,11 @@ class FrontendDesignPass:
 
     def run(self, module: Any, context: FrontendPassContext) -> FrontendPassContext:
         context.module = module
+        from .execution import run_frontend_data_phase, run_frontend_phase
         if self.spec.phase == "data":
-            context.compiler._run_frontend_data_phase(context.tasks)
+            run_frontend_data_phase(context.compiler, context.tasks)
         else:
-            context.compiler._run_frontend_phase(self.spec.phase, context.tasks)
+            run_frontend_phase(context.compiler, self.spec.phase, context.tasks)
         context.results[self.spec.name] = {
             "phase": self.spec.phase,
             "status": "COMPLETED",

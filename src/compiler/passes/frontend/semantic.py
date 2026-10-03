@@ -203,52 +203,6 @@ class FrontendIRGenerationPass:
         self._refresh_traceability(status)
         return FrontendIRGenerationResult(self.workspace.export(), report, self.batches, self.traceability)
 
-    def _run_frontend_phase(self, phase: str, tasks: list[dict[str, Any]]) -> None:
-        """Run exactly one frontend design phase over the prepared task list."""
-        if phase == "ui":
-            for task in tasks:
-                if not self._requirement_task("ui", task):
-                    self.failed_ui.add(task["id"])
-            return
-        for task in tasks:
-            rid = task["id"]
-            if self.traceability[rid]["mode"] == "NONE":
-                continue
-            if rid in self.failed_ui:
-                self.warnings.append(f"{rid}: UI task failed; {phase} uses the committed IR where available.")
-            if phase == "behavior" and rid in self.failed_assemble:
-                self.warnings.append(f"{rid}: assembly task failed; behavior uses the committed component structure.")
-            if self.traceability[rid]["mode"] == "SUMMARY":
-                if phase == "assemble":
-                    linked = self.traceability[rid].get("ui_ids", [])
-                    components = {self.workspace.owner(eid) for eid in linked}
-                    for child in self.nodes:
-                        if self.nodes[child].get("parent_id") == rid:
-                            components.update(self.traceability[child].get("component_ids", []))
-                    self.workspace.apply_requirement_batch(
-                        {"creates": [], "updates": [], "associations": [{"id": cid} for cid in sorted(components)[:8]]},
-                        [rid], set(), phase)
-                    self._refresh_traceability()
-                    continue
-                if phase == "behavior" and not self._has_behavior_scope(rid):
-                    continue
-            component_roots = {c["ui_root_id"] for c in self.workspace.tables["components"].values()}
-            linked_ui = set(self.traceability[rid].get("ui_ids", [])) - component_roots
-            if phase == "assemble" and not linked_ui:
-                continue
-            if phase == "behavior" and not self._has_behavior_scope(rid):
-                continue
-            if not self._requirement_task(phase, task) and phase == "assemble":
-                self.failed_assemble.add(rid)
-
-    def _run_frontend_data_phase(self, tasks: list[dict[str, Any]]) -> None:
-        """Finalize data bindings from the committed UI/data IR.
-
-        Data entities are intentionally created by the UI contract pass. This
-        pass only refreshes the derived associations consumed by behavior and
-        traceability, so it cannot duplicate model calls or mutate ownership.
-        """
-        self._refresh_traceability()
     def _has_behavior_scope(self, rid: str) -> bool:
         """Return true only when the committed IR gives behavior a real target.
 
