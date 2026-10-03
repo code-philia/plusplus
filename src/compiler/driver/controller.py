@@ -36,7 +36,7 @@ from ..project_initialization import (
 from synthesis.tdd.orchestrator import NodeTDDOrchestrator
 from synthesis.tdd.progress import TDDProgress, load_tdd_manifest
 from synthesis.testgen.generation import RequirementTestGenerationPass, TestEnvironmentInitializer
-from ..test_runner import TestRunner
+from synthesis.tdd.runner import TestRunner
 from ..frontend.visual_reference import (
     VisualReferenceAnalyzer, VisualReferenceAnalysisResult, VisualReferenceResolver,
 )

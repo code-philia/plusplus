@@ -1,2 +1,2 @@
 from .generation import *
-from compiler.test_runner import *
+from synthesis.tdd.runner import *

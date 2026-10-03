@@ -17,12 +17,12 @@ from runtime.jsonio import write_json_atomic
 from core.logging import append_debug_log, write_terminal_log
 
 from compiler.passes.linking.code_binding import CodeTargetResolver
-from compiler.exact_file_patcher import ExactFilePatcher
+from synthesis.tdd.patching import ExactFilePatcher
 from compiler.git_history import ProjectGitHistory
 from compiler.project_build import ProjectBuilder
 from synthesis.tdd.repair_context import RepairContextBuilder
 from synthesis.testgen.generation import TEST_LAYERS, _format_model_log
-from compiler.test_runner import TestRunResult, TestRunner, TestSelection
+from synthesis.tdd.runner import TestRunResult, TestRunner, TestSelection
 
 
 @dataclass(frozen=True, slots=True)
