@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import inspect
 from pathlib import Path
@@ -21,7 +21,7 @@ class ARCCompiler:
         self.model = model
         self.target = target
         self.frontend = RequirementFrontend()
-        self._legacy_compiler: Any | None = None
+        self._controller: Any | None = None
 
     async def _log_frontend_errors(self, errors: list[str]) -> None:
         for error in errors:
@@ -36,11 +36,11 @@ class ARCCompiler:
         if not frontend.ok:
             await self._log_frontend_errors(frontend.preprocessing.errors)
             return CompilationResult(ok=False, artifacts={})
-        if self._legacy_compiler is None:
-            from ..controller import Compiler as LegacyCompiler
+        if self._controller is None:
+            from .legacy import CompilerController
 
-            self._legacy_compiler = LegacyCompiler(self.runtime, self.log_cb, self.model)
-        return await self._legacy_compiler.compile(request)
+            self._controller = CompilerController(self.runtime, self.log_cb, self.model, target=self.target)
+        return await self._controller.compile(request)
 
 
 Compiler = ARCCompiler

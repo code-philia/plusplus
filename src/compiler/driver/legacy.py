@@ -9,43 +9,43 @@ from typing import Any, Awaitable, Callable
 
 from runtime.runtime import AgentRuntime
 
-from .artifacts import CompilerArtifactStore
-from .checkpoints import CheckpointStore, START_FROM
-from .lowering.backend.legacy import BackendGlueLowerer
-from .passes.linking.code_binding import CodeTargetResolver, CodeBindingLowerer
-from .passes.database.pipeline import DatabaseDesignPipeline, database_traceability
-from .lowering.database.legacy import lower_database
-from .passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
-from .lowering.planning.files import GlobalFilePlanner
-from .passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
-from .ir.design import build_design_graph
-from .passes.linking import LinkingPipeline
-from .validation.verifier import DesignIRVerifier
-from .lowering.pipeline import LoweringPipeline
-from .codegen import DeterministicCodegen
-from .lowering.frontend.react import FrontendReactLowerer
-from .git_history import GitStageError, ProjectGitHistory
-from .fixture_stage import (
+from ..artifacts import CompilerArtifactStore
+from ..checkpoints import CheckpointStore, START_FROM
+from ..lowering.backend.legacy import BackendGlueLowerer
+from ..passes.linking.code_binding import CodeTargetResolver, CodeBindingLowerer
+from ..passes.database.pipeline import DatabaseDesignPipeline, database_traceability
+from ..lowering.database.legacy import lower_database
+from ..passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
+from ..lowering.planning.files import GlobalFilePlanner
+from ..passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
+from ..ir.design import build_design_graph
+from ..passes.linking import LinkingPipeline
+from ..validation.verifier import DesignIRVerifier
+from ..lowering.pipeline import LoweringPipeline
+from ..codegen import DeterministicCodegen
+from ..lowering.frontend.react import FrontendReactLowerer
+from ..git_history import GitStageError, ProjectGitHistory
+from ..fixture_stage import (
     FixturePass,
 )
-from .fixture_lowering import fixture_source_paths
-from .preprocessing_stage import RequirementPreprocessor, PreprocessingResult
-from .model_client import Model, ModelConfigurationError, StructuredModel
-from .cost_tracking import stage_checkpoint
-from .models import CompilationRequest, CompilationResult
-from .lowering.backend.modules import ModuleSkeletonLowerer
-from .project_build import ProjectBuilder
-from .project_initialization import (
+from ..fixture_lowering import fixture_source_paths
+from ..preprocessing_stage import RequirementPreprocessor, PreprocessingResult
+from ..model_client import Model, ModelConfigurationError, StructuredModel
+from ..cost_tracking import stage_checkpoint
+from ..models import CompilationRequest, CompilationResult
+from ..lowering.backend.modules import ModuleSkeletonLowerer
+from ..project_build import ProjectBuilder
+from ..project_initialization import (
     ProjectInitializer,
     validate_frontend_environment,
 )
-from .lowering.rules.skeleton import TypeLowerer
-from .lowering.planning.symbols import GlobalSymbolPlanner
-from .tdd_orchestrator import NodeTDDOrchestrator
-from .tdd_progress import TDDProgress, load_tdd_manifest
-from .test_generation import RequirementTestGenerationPass, TestEnvironmentInitializer
-from .test_runner import TestRunner
-from .visual_reference import (
+from ..lowering.rules.skeleton import TypeLowerer
+from ..lowering.planning.symbols import GlobalSymbolPlanner
+from ..tdd_orchestrator import NodeTDDOrchestrator
+from ..tdd_progress import TDDProgress, load_tdd_manifest
+from ..test_generation import RequirementTestGenerationPass, TestEnvironmentInitializer
+from ..test_runner import TestRunner
+from ..visual_reference import (
     VisualReferenceAnalyzer, VisualReferenceAnalysisResult, VisualReferenceResolver,
 )
 
@@ -84,7 +84,7 @@ def _tdd_postorder(requirement_ir: dict[str, Any]) -> list[str]:
     return order
 
 
-class Compiler:
+class CompilerController:
     """Compile requirements through deterministic, validated passes."""
 
     def __init__(
@@ -97,6 +97,7 @@ class Compiler:
         self._log_cb = log_cb
         self._preprocessor = RequirementPreprocessor()
         self._model = model
+        self._target = target
 
     async def compile(self, request: CompilationRequest) -> CompilationResult:
         visual_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="arc-visual-analysis")
@@ -1095,3 +1096,7 @@ class Compiler:
         result = self._log_cb(agent_name, message, status, node_id)
         if inspect.isawaitable(result):
             await result
+
+Compiler = CompilerController
+
+__all__ = ["Compiler", "CompilerController"]
