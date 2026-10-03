@@ -14,7 +14,7 @@ from typing import Any, Callable
 from core.logging import SynchronousLog
 from runtime.jsonio import write_json_atomic
 
-from ...design_projection import project_api_contracts
+from ...ir.design.projection import project_api_contracts
 from .contracts import (
     BEHAVIOR_INSTRUCTIONS, REQUIREMENT_ASSEMBLY_INSTRUCTIONS,
     UI_INSTRUCTIONS, ShapeError, BatchValidationError, collect_shape_errors,

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from pathlib import Path
 
-from ...design_projection import project_api_contracts
+from ...ir.design.projection import project_api_contracts
 from ...passes.frontend.workspace import references
 from ...typescript_format import format_typescript
 
