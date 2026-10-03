@@ -273,7 +273,7 @@ class ImplementationAgent:
             self._trace(file_selection_log(request.requirement_id, "implementation", editable_files, "current_targets"))
             self._trace(file_selection_log(request.requirement_id, "implementation", related_files,
                                            "direct_dependencies_types_imports_support_and_failure_evidence"))
-        from compiler.frontend_context import implementation_requirement
+        from compiler.frontend.context import implementation_requirement
         requirement, missing_visuals = implementation_requirement(
             request.requirement, self.output_root, frontend=request.frontend_ir is not None)
         if missing_visuals and self._trace:

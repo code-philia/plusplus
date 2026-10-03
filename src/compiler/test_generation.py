@@ -1268,7 +1268,7 @@ def _project_frontend_subgraph(
     required_layers: list[str],
 ) -> dict[str, Any]:
     if "root_component_id" in frontend_ir:
-        from .frontend_context import frontend_subgraph
+        from .frontend.context import frontend_subgraph
         return frontend_subgraph(frontend_ir, requirement_id,
                                  {str(row.get("module_id", "")) for row in owned_targets})
     owned_ids = {

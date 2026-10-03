@@ -9,7 +9,7 @@ from typing import Any
 
 from .passes.linking.code_binding import CodeTargetResolver
 from .file_context import direct_dependencies, requirement_dependencies
-from .frontend_context import implementation_requirement
+from .frontend.context import implementation_requirement
 
 
 class RepairContextBuilder:

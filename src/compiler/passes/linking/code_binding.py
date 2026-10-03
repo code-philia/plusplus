@@ -150,7 +150,7 @@ class CodeBindingLowerer:
         frontend_items: dict[str, dict[str, Any]] = {}
         if "root_component_id" in frontend_ir:
             locations = {row["entity_id"]: row for row in (frontend_lowering_report or {}).get("bindings", [])}
-            from ...frontend_context import component_requirement_owners
+            from ...frontend.context import component_requirement_owners
             component_owners = component_requirement_owners(frontend_ir)
             for component in frontend_ir.get("components", []):
                 cid = component["id"]
