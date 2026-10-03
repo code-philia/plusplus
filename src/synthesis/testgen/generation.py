@@ -21,7 +21,7 @@ from compiler.passes.database.semantic import schema_for_requirement
 from compiler.model_client import StructuredModel, describe_model_error
 from runtime.project import DependencyCatalog, test_workspace_spec
 from runtime.process import resolve_executable, run_command
-from compiler.trace_payload import format_payload_trace
+from runtime.tracing import format_payload_trace
 
 
 TEST_ENVIRONMENT_READY = "TEST_ENVIRONMENT_READY"

@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterable
 from core.logging import SynchronousLog
 
 from ...model_client import StructuredModel, describe_model_error
-from ...trace_payload import format_payload_trace
+from runtime.tracing import format_payload_trace
 
 
 PRIMITIVE_TYPES = {"string", "integer", "number", "boolean", "date", "datetime", "uuid", "json"}
