@@ -212,7 +212,7 @@ def complete_legacy_manifests(root: Path, snapshot: dict[str, Any]) -> None:
     from .lowering.planning.files import GlobalFilePlanner
     from .lowering.rules.skeleton import DatabaseSchemaLowerer, TypeLowerer
     from .lowering.backend.modules import ModuleSkeletonLowerer
-    from .lowering.backend.legacy import BackendGlueLowerer
+    from .lowering.backend.lower import BackendGlueLowerer
     from .fixture_lowering import FixtureLowerer, fixture_source_paths
 
     def checked(result: Any) -> Any:

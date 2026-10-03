@@ -11,10 +11,10 @@ from runtime.runtime import AgentRuntime
 
 from ..artifacts import CompilerArtifactStore
 from ..checkpoints import CheckpointStore, START_FROM
-from ..lowering.backend.legacy import BackendGlueLowerer
+from ..lowering.backend.lower import BackendGlueLowerer
 from ..passes.linking.code_binding import CodeTargetResolver, CodeBindingLowerer
 from ..passes.database.pipeline import DatabaseDesignPipeline, database_traceability
-from ..lowering.database.legacy import lower_database
+from ..lowering.database.lower import lower_database
 from ..passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
 from ..lowering.planning.files import GlobalFilePlanner
 from ..passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability

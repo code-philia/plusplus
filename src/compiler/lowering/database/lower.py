@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ...artifacts import CompilerArtifactStore
-from ..backend.legacy import render_database_client
+from ..backend.lower import render_database_client
 from ...lowering.planning.files import GlobalFilePlanner
 from ...fixture_lowering import FixtureLowerer, fixture_source_paths
 from ...lowering.rules.skeleton import DatabaseSchemaLowerer, TypeLowerer
