@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ...fixture_lowering import fixture_source_paths
+from ...lowering.database.fixtures import fixture_source_paths
 from ...lowering.backend.modules import ModuleSkeletonLowerer
 from ...lowering.planning.files import GlobalFilePlanner
 from ...lowering.planning.symbols import GlobalSymbolPlanner

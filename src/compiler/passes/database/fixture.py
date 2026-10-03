@@ -14,8 +14,8 @@ from typing import Any
 
 from core.logging import SynchronousLog
 
-from .passes.database.semantic import schema_for_requirement
-from .model_client import StructuredModel, describe_model_error
+from .semantic import schema_for_requirement
+from ...model_client import StructuredModel, describe_model_error
 
 
 FIXTURE_IR_SCHEMA_VERSION = 1

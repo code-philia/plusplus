@@ -9,7 +9,7 @@ from ..planning.files import GlobalFilePlanner
 from ..planning.symbols import GlobalSymbolPlanner
 from ..rules.skeleton import TypeLowerer
 from .lower import BackendGlueLowerer
-from ...fixture_lowering import fixture_source_paths
+from ..database.fixtures import fixture_source_paths
 
 
 @dataclass(slots=True)

@@ -21,7 +21,7 @@ from ..passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir
 from .pipeline import CanonicalCompilerPipeline
 from ..lowering.frontend.pipeline import FrontendSourcePipeline
 from ..git_history import GitStageError, ProjectGitHistory
-from ..fixture_stage import (
+from ..passes.database.fixture import (
     FixturePass,
 )
 from ..frontend.preprocessing import RequirementPreprocessor, PreprocessingResult
