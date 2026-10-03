@@ -19,7 +19,7 @@ from ..passes.backend.pipeline import BackendIRGenerationPipeline, design_tracea
 from ..lowering.planning.files import GlobalFilePlanner
 from ..passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
 from .pipeline import CanonicalCompilerPipeline
-from ..lowering.frontend.react import FrontendReactLowerer
+from ..lowering.frontend.pipeline import FrontendSourcePipeline
 from ..git_history import GitStageError, ProjectGitHistory
 from ..fixture_stage import (
     FixturePass,
@@ -575,8 +575,11 @@ class CompilerController:
                                        "report": {"status": frontend.report["status"], "warnings": [], "failed_tasks": []}})
         self._runtime.events.mark_phase_started("FRONTEND_LOWERING", "Lowering frontend IR to React.")
         await self._log("Compiler", "Deterministically lowering React components, types, wiring and behavior placeholders; no model calls.")
-        lowered_frontend = FrontendReactLowerer(request.output_dir).lower(
-            frontend.frontend_ir, design.design_ir, backend_glue.route_registry, request.web_port,
+        lowered_frontend = FrontendSourcePipeline(request.output_dir).run(
+            frontend_ir=frontend.frontend_ir,
+            backend_design_ir=design.design_ir,
+            backend_routes=backend_glue.route_registry,
+            backend_port=request.web_port,
         )
         artifacts.update(artifact_store.write_frontend_lowering(
             report=lowered_frontend.report, sources=lowered_frontend.sources, batches=lowered_frontend.batches,
