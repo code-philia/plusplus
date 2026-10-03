@@ -550,7 +550,7 @@ class CompilerController:
                 ok=False, root_id=root_id, states=states,
                 failed_nodes=sorted(failed_requirements), artifacts=artifacts,
             )
-        canonical = CanonicalCompilerPipeline(target=self.target).run(
+        canonical = CanonicalCompilerPipeline(target=self._target).run(
             database_schema=database.schema,
             backend_ir=design.design_ir,
             frontend_ir=frontend.frontend_ir,
