@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 from runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 
-from .integration_runner import integration_runner_source
+from .integration import integration_runner_source
 from runtime.process import process_group_kwargs, resolve_executable, terminate_process_tree
 
 
