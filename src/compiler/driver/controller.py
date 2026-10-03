@@ -12,7 +12,7 @@ from runtime.runtime import AgentRuntime
 from .artifacts import CompilerArtifactStore
 from .checkpoints import CheckpointStore, START_FROM
 from targets.react_fastapi.lowering.backend.pipeline import BackendSourcePipeline
-from ..passes.linking.code_binding import CodeTargetResolver
+from ..passes.linking.binding import CodeTargetResolver
 from ..passes.linking.binding_pipeline import CodeBindingPipeline
 from ..passes.database.pipeline import DatabaseDesignPipeline, database_traceability
 from targets.react_fastapi.lowering.database.pipeline import DatabaseSourcePipeline

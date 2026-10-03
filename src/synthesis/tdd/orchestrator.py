@@ -16,7 +16,7 @@ from agents.test_repair import TestFailureAnalysisAgent, TestRepairAgent
 from runtime.jsonio import write_json_atomic
 from core.logging import append_debug_log, write_terminal_log
 
-from compiler.passes.linking.code_binding import CodeTargetResolver
+from compiler.passes.linking.binding import CodeTargetResolver
 from synthesis.tdd.patching import ExactFilePatcher
 from runtime.history import ProjectGitHistory
 from runtime.build import ProjectBuilder

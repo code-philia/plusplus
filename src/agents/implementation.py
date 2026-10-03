@@ -184,7 +184,7 @@ class ImplementationAgent:
         )
 
     def _context(self, request: ImplementationRequest) -> tuple[dict[str, Any], dict[str, str]]:
-        from compiler.code_binding import CodeTargetResolver
+        from compiler.passes.linking.binding import CodeTargetResolver
         from compiler.analysis.file_selection import requirement_dependencies, file_selection_log
 
         resolved = CodeTargetResolver(request.code_binding_registry).resolve_requirement_targets(

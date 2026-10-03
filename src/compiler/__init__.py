@@ -1,7 +1,7 @@
 ﻿"""Public ARC compiler interface."""
 
 from .driver import ARCCompiler, Compiler
-from .passes.linking.code_binding import CodeTargetResolver, resolve_requirement_targets
+from .passes.linking.binding import CodeTargetResolver, resolve_requirement_targets
 from synthesis.tdd.patching import ExactFilePatcher, FilePatchResult
 from .driver.models import CompilationRequest
 from synthesis.tdd.runner import TestRunResult, TestRunner, TestSelection

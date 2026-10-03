@@ -9,7 +9,7 @@ from targets.react_fastapi.lowering.backend.modules import ModuleSkeletonLowerer
 from targets.react_fastapi.lowering.planning.files import GlobalFilePlanner
 from targets.react_fastapi.lowering.planning.symbols import GlobalSymbolPlanner
 from targets.react_fastapi.lowering.rules.skeleton import TypeLowerer
-from .code_binding import CodeBindingLowerer, CodeBindingResult
+from .binding import CodeBindingLowerer, CodeBindingResult
 
 
 class CodeBindingPipeline:

@@ -16,7 +16,7 @@ from runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 
 from compiler.driver.artifacts import CompilerArtifactStore
-from compiler.passes.linking.code_binding import CODE_BINDING_READY, CodeTargetResolver
+from compiler.passes.linking.binding import CODE_BINDING_READY, CodeTargetResolver
 from compiler.passes.database.semantic import schema_for_requirement
 from compiler.services.model import StructuredModel, describe_model_error
 from runtime.project import DependencyCatalog, test_workspace_spec
