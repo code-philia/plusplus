@@ -36,10 +36,6 @@ include = [
   "synthesis.*",
   "targets",
   "targets.*",
-  "tools",
-  "tools.*",
-  "schemas",
-  "schemas.*",
   "cli",
   "cli.*",
 ]
