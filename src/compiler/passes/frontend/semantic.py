@@ -22,7 +22,7 @@ from .contracts import (
 )
 from .workspace import FrontendWorkspace, references
 from .protocol import project_context, check_references, check_request_targets
-from ...model_client import StructuredModel, describe_model_error
+from ...services.model import StructuredModel, describe_model_error
 from ...frontend.visual_reference import ResolvedVisualReference, VisualModel, VisualStructuredModel
 
 

@@ -14,7 +14,7 @@ from typing import Any, Callable, Iterable
 
 from core.logging import SynchronousLog
 
-from ...model_client import StructuredModel, describe_model_error
+from ...services.model import StructuredModel, describe_model_error
 from runtime.tracing import format_payload_trace
 
 

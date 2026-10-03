@@ -25,7 +25,7 @@ from ..passes.database.fixture import (
     FixturePass,
 )
 from ..frontend.preprocessing import RequirementPreprocessor, PreprocessingResult
-from ..model_client import Model, ModelConfigurationError, StructuredModel
+from ..services.model import Model, ModelConfigurationError, StructuredModel
 from runtime.metrics import stage_checkpoint
 from .models import CompilationRequest, CompilationResult
 from runtime.build import ProjectBuilder

@@ -25,7 +25,7 @@ from ..passes.frontend.schema import (
     FrontendDesignIssue,
 )
 from runtime.tracing import format_payload_trace
-from ..model_client import (
+from ..services.model import (
     completion_request_kwargs,
     describe_model_error,
     record_model_usage,

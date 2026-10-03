@@ -18,7 +18,7 @@ from core.logging import SynchronousLog
 from compiler.driver.artifacts import CompilerArtifactStore
 from compiler.passes.linking.code_binding import CODE_BINDING_READY, CodeTargetResolver
 from compiler.passes.database.semantic import schema_for_requirement
-from compiler.model_client import StructuredModel, describe_model_error
+from compiler.services.model import StructuredModel, describe_model_error
 from runtime.project import DependencyCatalog, test_workspace_spec
 from runtime.process import resolve_executable, run_command
 from runtime.tracing import format_payload_trace

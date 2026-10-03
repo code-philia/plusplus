@@ -12,7 +12,7 @@ from typing import Any
 
 from core.logging import SynchronousLog
 
-from ...model_client import StructuredModel, describe_model_error
+from ...services.model import StructuredModel, describe_model_error
 from runtime.tracing import format_payload_trace
 from .discover_entities import DiscoverEntitiesPass
 from .infer_fields import InferFieldsPass
