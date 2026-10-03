@@ -26,7 +26,7 @@ class CanonicalCompilerPipeline:
 
     def __init__(self, *, target: str = "react-fastapi") -> None:
         profile = load_target_profile(target)
-        self.lowering = LoweringPipeline(target=profile.name)
+        self.lowering = LoweringPipeline(target=profile)
         self.codegen = DeterministicCodegen(profile)
 
     def run(
