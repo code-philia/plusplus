@@ -11,15 +11,15 @@ from runtime.runtime import AgentRuntime
 
 from .artifacts import CompilerArtifactStore
 from .checkpoints import CheckpointStore, START_FROM
-from ..lowering.backend.pipeline import BackendSourcePipeline
+from targets.react_fastapi.lowering.backend.pipeline import BackendSourcePipeline
 from ..passes.linking.code_binding import CodeTargetResolver
 from ..passes.linking.binding_pipeline import CodeBindingPipeline
 from ..passes.database.pipeline import DatabaseDesignPipeline, database_traceability
-from ..lowering.database.pipeline import DatabaseSourcePipeline
+from targets.react_fastapi.lowering.database.pipeline import DatabaseSourcePipeline
 from ..passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
 from ..passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
 from .pipeline import CanonicalCompilerPipeline
-from ..lowering.frontend.pipeline import FrontendSourcePipeline
+from targets.react_fastapi.lowering.frontend.pipeline import FrontendSourcePipeline
 from runtime.history import GitStageError, ProjectGitHistory
 from ..passes.database.fixture import (
     FixturePass,

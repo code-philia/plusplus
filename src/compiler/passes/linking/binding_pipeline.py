@@ -4,11 +4,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ...lowering.database.fixtures import fixture_source_paths
-from ...lowering.backend.modules import ModuleSkeletonLowerer
-from ...lowering.planning.files import GlobalFilePlanner
-from ...lowering.planning.symbols import GlobalSymbolPlanner
-from ...lowering.rules.skeleton import TypeLowerer
+from targets.react_fastapi.lowering.database.fixtures import fixture_source_paths
+from targets.react_fastapi.lowering.backend.modules import ModuleSkeletonLowerer
+from targets.react_fastapi.lowering.planning.files import GlobalFilePlanner
+from targets.react_fastapi.lowering.planning.symbols import GlobalSymbolPlanner
+from targets.react_fastapi.lowering.rules.skeleton import TypeLowerer
 from .code_binding import CodeBindingLowerer, CodeBindingResult
 
 

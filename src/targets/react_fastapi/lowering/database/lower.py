@@ -8,10 +8,10 @@ from typing import Any
 
 from compiler.driver.artifacts import CompilerArtifactStore
 from ..backend.lower import render_database_client
-from ...lowering.planning.files import GlobalFilePlanner
+from ..planning.files import GlobalFilePlanner
 from .fixtures import FixtureLowerer, fixture_source_paths
-from ...lowering.rules.skeleton import DatabaseSchemaLowerer, TypeLowerer
-from ...lowering.planning.symbols import GlobalSymbolPlanner
+from ..rules.skeleton import DatabaseSchemaLowerer, TypeLowerer
+from ..planning.symbols import GlobalSymbolPlanner
 from runtime.process import resolve_executable
 
 
