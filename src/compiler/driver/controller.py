@@ -12,7 +12,7 @@ from targets import load_target_definition
 
 from .artifacts import CompilerArtifactStore
 from .checkpoints import CheckpointStore, START_FROM
-from ..passes.linking.binding import CodeTargetResolver
+from ..passes.linking.binding.resolver import CodeTargetResolver
 from ..passes.linking.binding_pipeline import CodeBindingPipeline
 from ..passes.database.pipeline import DatabaseDesignPipeline, database_traceability
 from ..passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability

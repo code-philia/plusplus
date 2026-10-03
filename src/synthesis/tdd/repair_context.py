@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from compiler.passes.linking.binding import CodeTargetResolver
+from compiler.passes.linking.binding.resolver import CodeTargetResolver
 from compiler.analysis.file_selection import direct_dependencies, requirement_dependencies
 from compiler.frontend.context import implementation_requirement
 
