@@ -12,7 +12,7 @@ from typing import Any, Mapping
 
 from core.logging import SynchronousLog
 
-from compiler.process_utils import (
+from runtime.process import (
     process_group_kwargs,
     resolve_executable,
     terminate_process_tree,

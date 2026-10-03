@@ -12,7 +12,7 @@ from ...lowering.planning.files import GlobalFilePlanner
 from .fixtures import FixtureLowerer, fixture_source_paths
 from ...lowering.rules.skeleton import DatabaseSchemaLowerer, TypeLowerer
 from ...lowering.planning.symbols import GlobalSymbolPlanner
-from ...process_utils import resolve_executable
+from runtime.process import resolve_executable
 
 
 @dataclass(slots=True)

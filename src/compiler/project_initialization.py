@@ -13,7 +13,7 @@ from runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 
 from .integration_runner import integration_runner_source
-from .process_utils import process_group_kwargs, resolve_executable, terminate_process_tree
+from runtime.process import process_group_kwargs, resolve_executable, terminate_process_tree
 
 
 PROJECT_STATUS = "PROJECT_INITIALIZED"

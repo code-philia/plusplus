@@ -4,7 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from .process_utils import resolve_executable, run_command
+from runtime.process import resolve_executable, run_command
 
 
 class GitStageError(RuntimeError):

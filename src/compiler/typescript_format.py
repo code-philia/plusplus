@@ -6,7 +6,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from .process_utils import resolve_executable
+from runtime.process import resolve_executable
 
 
 FORMAT_SCRIPT = r"""

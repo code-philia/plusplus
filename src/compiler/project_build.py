@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
-from .process_utils import resolve_executable, run_command
+from runtime.process import resolve_executable, run_command
 
 
 @dataclass(slots=True)

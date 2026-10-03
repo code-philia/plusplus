@@ -20,7 +20,7 @@ from compiler.passes.linking.code_binding import CODE_BINDING_READY, CodeTargetR
 from compiler.passes.database.semantic import schema_for_requirement
 from compiler.model_client import StructuredModel, describe_model_error
 from compiler.project_initialization import DependencyCatalog, test_workspace_spec
-from compiler.process_utils import resolve_executable, run_command
+from runtime.process import resolve_executable, run_command
 from compiler.trace_payload import format_payload_trace
 
 

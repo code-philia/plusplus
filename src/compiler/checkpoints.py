@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from runtime.jsonio import write_json_atomic
 from .git_history import GitStageError, ProjectGitHistory
-from .process_utils import resolve_executable, run_command
+from runtime.process import resolve_executable, run_command
 
 
 START_FROM = ("zero", "initialized", "database", "backend-ir", "frontend-ir", "lowered")
