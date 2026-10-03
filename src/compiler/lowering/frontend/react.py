@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ...ir.design.projection import project_api_contracts
 from ...passes.frontend.workspace import references
-from ...typescript_format import format_typescript
+from runtime.formatting import format_typescript
 
 
 def js(value: Any) -> str:
