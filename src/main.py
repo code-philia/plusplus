@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from core.cli import (
+from cli.cli import (
     cli_log,
     init_debug_logger,
     print_cli_banner,
@@ -216,7 +216,7 @@ def build_doctor_parser(subparsers) -> None:
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Execute doctor subcommand."""
     _ensure_dotenv_loaded()
-    from core.config import print_health_check
+    from cli.config import print_health_check
     return print_health_check()
 
 
@@ -234,7 +234,7 @@ def build_config_parser(subparsers) -> None:
 
 def cmd_config(args: argparse.Namespace) -> int:
     """Execute config subcommand."""
-    from core.config import interactive_config_setup
+    from cli.config import interactive_config_setup
     return interactive_config_setup()
 
 

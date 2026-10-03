@@ -1,5 +1,4 @@
 """CLI package facade."""
 
-from core.cli import *
-from core.config import *
-
+from .cli import *
+from .config import *

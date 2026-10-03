@@ -7,7 +7,7 @@ from typing import Awaitable, Callable
 
 from runtime.runtime import AgentRuntime
 from compiler import CompilationRequest, Compiler
-from core.config import set_workspace_root
+from cli.config import set_workspace_root
 from core.logging import set_run_id
 
 
