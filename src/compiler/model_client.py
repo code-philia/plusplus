@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from .cost_tracking import record_usage as record_cost_usage
+from runtime.metrics import record_usage as record_cost_usage
 
 
 CONTEXT_SEGMENTS_KEY = "context_segments"
