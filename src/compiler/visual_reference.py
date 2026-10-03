@@ -19,7 +19,7 @@ from openai import OpenAI
 from core.logging import SynchronousLog
 from runtime.jsonio import write_json_atomic
 
-from .frontend_ir import (
+from .passes.frontend.schema import (
     VISUAL_ANALYSIS_SCHEMA,
     FrontendDesignErrorCode,
     FrontendDesignIssue,
