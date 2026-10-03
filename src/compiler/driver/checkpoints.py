@@ -213,7 +213,7 @@ def complete_legacy_manifests(root: Path, snapshot: dict[str, Any]) -> None:
     from targets.react_fastapi.lowering.rules.skeleton import DatabaseSchemaLowerer, TypeLowerer
     from targets.react_fastapi.lowering.backend.modules import ModuleSkeletonLowerer
     from targets.react_fastapi.lowering.backend.lower import BackendGlueLowerer
-    from .lowering.database.fixtures import FixtureLowerer, fixture_source_paths
+    from targets.react_fastapi.lowering.database.fixtures import FixtureLowerer, fixture_source_paths
 
     def checked(result: Any) -> Any:
         if not result.ok:
