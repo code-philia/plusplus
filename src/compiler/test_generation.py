@@ -648,7 +648,7 @@ class RequirementTestGenerationPass:
             ),
         )
         artifacts: dict[str, str] = {}
-        from .file_context import file_selection_log
+        from .analysis.file_selection import file_selection_log
         self._trace(file_selection_log(requirement_id, "test_generation", context_pack["source_files"],
                                        "direct_requirement_and_child_modules_types_support_and_schema"))
         decision, sources, errors = self._generate_and_validate(

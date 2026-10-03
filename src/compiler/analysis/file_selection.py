@@ -19,7 +19,7 @@ def requirement_dependencies(
     """Scope component callees to the requirement's UI/behavior, not all of App."""
     if frontend_ir is None or "root_component_id" not in frontend_ir:
         return direct_dependencies(targets, candidates)
-    from .passes.frontend.workspace import references
+    from ..passes.frontend.workspace import references
 
     component_ids = {row["id"] for row in frontend_ir.get("components", [])}
     target_ids = {row["module_id"] for row in targets}

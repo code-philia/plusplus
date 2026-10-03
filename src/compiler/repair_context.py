@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .passes.linking.code_binding import CodeTargetResolver
-from .file_context import direct_dependencies, requirement_dependencies
+from .analysis.file_selection import direct_dependencies, requirement_dependencies
 from .frontend.context import implementation_requirement
 
 
