@@ -37,14 +37,24 @@ class CanonicalDesignLowering:
     def __init__(self, profile: TargetProfile | None = None) -> None:
         self.profile = profile or load_target_profile()
 
-    def lower(self, design: DesignModule) -> ImplementationIR:
-        implementation = ImplementationIR(metadata={
+    def create_implementation(self) -> ImplementationIR:
+        return ImplementationIR(metadata={
             "source_level": str(IRLevel.DESIGN),
             "lowering": "canonical",
             "schema_version": 1,
             "target": self.profile.name,
         })
+
+    def lower_nodes(
+        self,
+        design: DesignModule,
+        implementation: ImplementationIR,
+        kinds: set[str] | None = None,
+    ) -> None:
+        allowed = {str(kind).split(".")[-1].lower() for kind in kinds} if kinds else None
         for node in sorted(design.nodes.values(), key=lambda item: item.id):
+            if allowed is not None and _kind(node.kind) not in allowed:
+                continue
             path, language = _path(node, self.profile)
             file_id = f"file:{path}"
             symbol_id = f"symbol:{node.id}"
@@ -64,11 +74,21 @@ class CanonicalDesignLowering:
                 requirement_ids=list(node.requirement_ids),
                 attributes={"design_node_id": node.id, "file_id": file_id},
             )
-            implementation.files[file_id].symbols.append(Reference(symbol_id))
-            implementation.edges.extend(
-                edge for edge in design.outgoing(node.id)
-                if edge.target_id in design.nodes
-            )
+            reference = Reference(symbol_id)
+            if reference not in implementation.files[file_id].symbols:
+                implementation.files[file_id].symbols.append(reference)
+
+    def lower_edges(self, design: DesignModule, implementation: ImplementationIR) -> None:
+        implementation.edges.extend(
+            edge for edge in design.edges
+            if edge.source_id in design.nodes and edge.target_id in design.nodes
+            and edge not in implementation.edges
+        )
+
+    def lower(self, design: DesignModule) -> ImplementationIR:
+        implementation = self.create_implementation()
+        self.lower_nodes(design, implementation)
+        self.lower_edges(design, implementation)
         return implementation
 
 

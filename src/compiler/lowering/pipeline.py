@@ -2,21 +2,33 @@ from __future__ import annotations
 
 from ..ir.design.module import DesignModule
 from ..ir.implementation.project import ImplementationIR
+from .backend.passes import BackendLoweringPass
 from .canonical import CanonicalDesignLowering
+from .context import LoweringContext
+from .database.passes import DatabaseLoweringPass
+from .frontend.passes import FrontendLoweringPass
 from targets.react_fastapi import load_target_profile
 
 
 class LoweringPipeline:
-    """Canonical Design IR to Implementation IR lowering entry point."""
+    """Lower canonical Design IR through domain-specific lowering passes."""
+
+    pass_pipeline = (DatabaseLoweringPass, BackendLoweringPass, FrontendLoweringPass)
 
     def __init__(self, target: str = "react-fastapi") -> None:
-        profile = load_target_profile(target)
-        self.backend = CanonicalDesignLowering(profile)
-        self.database = CanonicalDesignLowering(profile)
-        self.frontend = CanonicalDesignLowering(profile)
+        self.lowerer = CanonicalDesignLowering(load_target_profile(target))
 
     def lower(self, design: DesignModule) -> ImplementationIR:
-        return self.backend.lower(design)
+        context = LoweringContext(
+            design=design,
+            implementation=self.lowerer.create_implementation(),
+            lowerer=self.lowerer,
+        )
+        for pass_type in self.pass_pipeline:
+            context = pass_type().run(context)
+        self.lowerer.lower_edges(design, context.implementation)
+        context.results["resolve_edges"] = {"status": "COMPLETED", "edge_count": len(context.implementation.edges)}
+        return context.implementation
 
 
 __all__ = ["LoweringPipeline"]

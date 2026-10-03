@@ -1,6 +1,6 @@
-﻿"""Frontend Design IR lowering exports."""
+"""Frontend Design IR lowering exports."""
 
+from .passes import FrontendLoweringPass
 from ..canonical import CanonicalDesignLowering
 
-__all__ = ["CanonicalDesignLowering"]
-
+__all__ = ["FrontendLoweringPass", "CanonicalDesignLowering"]
