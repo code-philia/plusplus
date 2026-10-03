@@ -8,18 +8,16 @@ from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
 from runtime.runtime import AgentRuntime
+from targets import load_target_definition
 
 from .artifacts import CompilerArtifactStore
 from .checkpoints import CheckpointStore, START_FROM
-from targets.react_fastapi.lowering.backend.pipeline import BackendSourcePipeline
 from ..passes.linking.binding import CodeTargetResolver
 from ..passes.linking.binding_pipeline import CodeBindingPipeline
 from ..passes.database.pipeline import DatabaseDesignPipeline, database_traceability
-from targets.react_fastapi.lowering.database.pipeline import DatabaseSourcePipeline
 from ..passes.backend.pipeline import BackendIRGenerationPipeline, design_traceability
 from ..passes.frontend.pipeline import FrontendIRGenerationPipeline, frontend_ir_traceability
 from .pipeline import CanonicalCompilerPipeline
-from targets.react_fastapi.lowering.frontend.pipeline import FrontendSourcePipeline
 from runtime.history import GitStageError, ProjectGitHistory
 from ..passes.database.fixture import (
     FixturePass,
@@ -84,12 +82,15 @@ class CompilerController:
         runtime: AgentRuntime,
         log_cb: LogCallback,
         model: StructuredModel | None = None,
+        *,
+        target: str = "react-fastapi",
     ) -> None:
         self._runtime = runtime
         self._log_cb = log_cb
         self._preprocessor = RequirementPreprocessor()
         self._model = model
-        self._target = target
+        self._target_definition = load_target_definition(target)
+        self._target = self._target_definition.profile.name
 
     async def compile(self, request: CompilationRequest) -> CompilationResult:
         visual_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="arc-visual-analysis")
@@ -316,7 +317,7 @@ class CompilerController:
             fixture_ir = fixture_result.fixture_ir
             artifacts["fixture_ir"] = artifact_store.write_fixture_ir(fixture_ir)
 
-            lowered_database = DatabaseSourcePipeline().run(
+            lowered_database = self._target_definition.database_source_pipeline()().run(
                 output_dir=request.output_dir,
                 artifact_store=artifact_store,
                 schema=database.schema,
@@ -397,7 +398,7 @@ class CompilerController:
                 "SKELETON", "ARC skeleton lowering stage started."
             )
             await self._log("Compiler", "Running backend source lowering pipeline.")
-            backend_sources = BackendSourcePipeline(request.output_dir).run(
+            backend_sources = self._target_definition.backend_source_pipeline()(request.output_dir).run(
                 design_ir=design.design_ir,
                 database_schema=database.schema,
                 fixture_ir=fixture_ir,
@@ -571,7 +572,7 @@ class CompilerController:
                                        "report": {"status": frontend.report["status"], "warnings": [], "failed_tasks": []}})
         self._runtime.events.mark_phase_started("FRONTEND_LOWERING", "Lowering frontend IR to React.")
         await self._log("Compiler", "Deterministically lowering React components, types, wiring and behavior placeholders; no model calls.")
-        lowered_frontend = FrontendSourcePipeline(request.output_dir).run(
+        lowered_frontend = self._target_definition.frontend_source_pipeline()(request.output_dir).run(
             frontend_ir=frontend.frontend_ir,
             backend_design_ir=design.design_ir,
             backend_routes=backend_glue.route_registry,
