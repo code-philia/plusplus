@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -69,6 +70,19 @@ FIELD_PROPERTIES_SCHEMA: dict[str, Any] = {
     },
 }
 
+FIELD_DECLARATION_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "required": ["name", "type", "nullable", "description", "properties"],
+    "properties": {
+        "name": {"type": "string", "pattern": IDENTIFIER_PATTERN.pattern},
+        "type": {"type": "string", "enum": sorted(FIELD_TYPES - {"uuid", "foreign_key"})},
+        "nullable": {"type": "boolean"},
+        "description": {"type": "string"},
+        "properties": FIELD_PROPERTIES_SCHEMA,
+    },
+}
+
+
 FIELD_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False, "required": ["requirement_id", "entities"],
     "properties": {
@@ -77,23 +91,16 @@ FIELD_DECISION_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {
                 "type": "object", "additionalProperties": False,
-                "required": ["entity", "reuse_fields", "new_fields"],
+                "required": ["entity", "new_fields", "update_fields"],
                 "properties": {
                     "entity": {"type": "string"},
-                    "reuse_fields": {"type": "array", "items": {"type": "string"}},
                     "new_fields": {
                         "type": "array",
-                        "items": {
-                            "type": "object", "additionalProperties": False,
-                            "required": ["name", "type", "nullable", "description", "properties"],
-                            "properties": {
-                                "name": {"type": "string"},
-                                "type": {"type": "string", "enum": sorted(FIELD_TYPES - {"uuid", "foreign_key"})},
-                                "nullable": {"type": "boolean"},
-                                "description": {"type": "string"},
-                                "properties": FIELD_PROPERTIES_SCHEMA,
-                            },
-                        },
+                        "items": FIELD_DECLARATION_SCHEMA,
+                    },
+                    "update_fields": {
+                        "type": "array",
+                        "items": FIELD_DECLARATION_SCHEMA,
                     },
                 },
             },
@@ -123,8 +130,8 @@ RELATIONSHIP_DECISION_SCHEMA: dict[str, Any] = {
 
 
 
-ENTITY_INSTRUCTIONS = """You are a senior data-modeling specialist focused on persistent domain entities.
-Your task is to perform the entity-discovery pass for one atomic requirement.
+ENTITY_INSTRUCTIONS = """You are an ER-modeling specialist focused on persistent domain entities.
+Your task is to discover entities in the shared ER model for one atomic requirement.
 For exactly one atomic requirement, decide which persistent entities it reuses and which persistent entities must
 be introduced. Existing entities are compiler symbols: reuse them when their meaning fits. Do not produce fields,
 relationships, constraints, APIs, modules, or SQL. Entity keys are singular snake_case. Case-only name differences
@@ -145,33 +152,71 @@ Valid empty output example:
 {"requirement_id":"REQ-4.1","reuse_entities":[],"new_entities":[]}
 """
 
-FIELD_INSTRUCTIONS = """You are a senior database-schema specialist focused on scalar domain fields.
-Your task is to perform the field-discovery pass for one atomic requirement.
-For exactly one atomic requirement, discover scalar domain fields only for entities already associated with it.
-Reuse existing fields whenever their meaning fits. Do not create entities, relationships, foreign-key fields,
-cross-field constraints, APIs, modules, or SQL. Do not put id in new_fields because the compiler creates it; id may
-appear in reuse_fields only when the requirement uses it. Relationship references such as user_id are forbidden
-in new_fields because Pass 3 lowers relationships into foreign keys. Return every related entity.
-Each properties member is required by the response protocol: use null when it does not apply, and false for an
-inactive date_past/date_future flag. Never invent a default or format merely to fill the response structure.
+FIELD_INSTRUCTIONS = """You are an ER-modeling specialist focused on persistent entity attributes.
+Your task is to refine the shared ER model for exactly one atomic requirement, using only its related_entities.
+These are logical attributes and business-domain constraints, not MySQL column types or physical storage options.
+Do not create entities, relationships, foreign-key fields, cross-field constraints, APIs, modules, or SQL.
+Do not persist transient form inputs, confirmation passwords, search criteria, selection state, or derived display
+values unless the requirement explicitly gives them a persistent domain meaning.
+
+Compare the requirement with each supplied entity's current fields:
+- Existing field already sufficient: silently use it; omit it from both field lists. There is no reuse_fields key.
+- Missing attribute: add a complete declaration to new_fields. Its name must not already exist on that entity.
+- Existing attribute needs revision: add its complete resulting declaration to update_fields, with exactly the
+  same name. This is a full replacement, not a patch: include unchanged attributes and all retained properties.
+  Preserve constraints needed by earlier requirements; reconcile them with the current requirement. Do not weaken
+  or erase earlier constraints merely because the current requirement does not repeat them. Use null to remove a
+  property only when the combined requirements justify removal. Do not rename fields or emit unchanged updates.
+- The same field must not occur twice or appear in both lists. Use [] when a list has no changes.
+- Never create or update id, names ending in _id, or fields with origin SYSTEM or RELATIONSHIP. The compiler owns
+  identifiers and Pass 3 owns relationships and their references. Return one entry for every related entity.
+
+Every new_fields and update_fields declaration has exactly these five attributes:
+- name: nonempty singular snake_case identifier matching ^[a-z][a-z0-9_]*$. In update_fields it identifies the
+  existing attribute; in new_fields it identifies a new attribute. Choose names by domain meaning.
+- type: exactly one of string (text), integer (whole number), number (integer or fractional number), boolean
+  (true/false), date (calendar date), datetime (date and time), json (structured JSON value). Use logical types,
+  not SQL types. uuid and foreign_key are reserved for the compiler.
+- nullable: boolean. true permits absent/null values; false requires a value on every stored instance of the
+  entity. A form requiring input does not by itself prove all stored instances must have a non-null value.
+- description: string explaining the attribute's persistent domain meaning.
+- properties: object containing all ten keys below. Use null for every inapplicable or unspecified property;
+  false is also allowed for inactive date flags. Do not invent constraints, formats or defaults.
+
+Allowed properties and their values:
+- min_length: nonnegative integer or null; minimum character count, string only.
+- max_length: nonnegative integer or null; maximum character count, string only; must be >= min_length.
+- pattern: regex string or null; required text pattern, string only. Use the regular-expression syntax supported
+  by the Python re validator; this is a domain rule, not SQL.
+- enum: nonempty list of distinct strings or null; allowed domain values, string only.
+- format: string or null; requirement-supported semantic format label such as email, uri, date or date-time,
+  on string/date/datetime only. This is descriptive metadata, not an SQL type or an enforced format validator.
+- minimum: finite number or null; inclusive lower bound, integer/number only; whole number for integer fields.
+- maximum: finite number or null; inclusive upper bound, integer/number only; must be >= minimum; whole number
+  for integer fields.
+- date_past: boolean or null; true requires a date/datetime strictly before the current date/time. false/null
+  imposes no past-only rule. Only date/datetime; must not be true together with date_future.
+- date_future: boolean or null; true requires a date/datetime strictly after the current date/time. false/null
+  imposes no future-only rule. Only date/datetime; must not be true together with date_past.
+- default: string, finite number, boolean or null; a requirement-supported literal matching the field's type and
+  constraints. null means no declared default, not an explicit DEFAULT NULL. SQL expressions and JSON object/array
+  defaults are not supported by this protocol. Do not encode CURRENT_TIMESTAMP or other expressions as strings.
 
 Return exactly one JSON object with these keys and no others:
-- requirement_id: copy the supplied requirement.requirement_id exactly.
-- entities: one entry for every supplied related_entities item, even when it contributes no fields. Each entry is
-  {"entity": existing_key, "reuse_fields": [existing field names], "new_fields": [field declarations]}.
-- Every field declaration contains name, type, nullable, description, and properties. properties must contain all
-  ten protocol keys: min_length, max_length, pattern, enum, format, minimum, maximum, date_past, date_future,
-  default. Set every inapplicable value to null; false is also allowed for inactive date flags.
-- Emit each entity and field once. Never put id or names ending in _id in new_fields.
+- requirement_id: copy requirement.requirement_id exactly.
+- entities: [{"entity": existing_key, "new_fields": [complete declarations],
+  "update_fields": [complete resulting declarations]}]. Return every related entity even with no changes.
 
-Valid output example:
-{"requirement_id":"REQ-3.2","entities":[{"entity":"booking","reuse_fields":[],"new_fields":[{"name":"booking_number","type":"string","nullable":false,"description":"Public booking number.","properties":{"min_length":1,"max_length":20,"pattern":null,"enum":null,"format":null,"minimum":null,"maximum":null,"date_past":null,"date_future":null,"default":null}}]},{"entity":"train_service","reuse_fields":["train_number"],"new_fields":[]},{"entity":"traveler","reuse_fields":[],"new_fields":[]}]}
-Valid no-field output example:
-{"requirement_id":"REQ-3.1","entities":[{"entity":"train_service","reuse_fields":[],"new_fields":[]}]}
+Valid new-field output example:
+{"requirement_id":"REQ-3.2","entities":[{"entity":"booking","new_fields":[{"name":"booking_number","type":"string","nullable":false,"description":"Public booking number.","properties":{"min_length":1,"max_length":20,"pattern":null,"enum":null,"format":null,"minimum":null,"maximum":null,"date_past":null,"date_future":null,"default":null}}],"update_fields":[]}]}
+Valid update example (username already exists; retain its meaning and constraints and require at most 20 characters):
+{"requirement_id":"REQ-1.2","entities":[{"entity":"user","new_fields":[],"update_fields":[{"name":"username","type":"string","nullable":false,"description":"Account username.","properties":{"min_length":1,"max_length":20,"pattern":null,"enum":null,"format":null,"minimum":null,"maximum":null,"date_past":null,"date_future":null,"default":null}}]}]}
+Valid unchanged-field output example:
+{"requirement_id":"REQ-3.1","entities":[{"entity":"train_service","new_fields":[],"update_fields":[]}]}
 """
 
-RELATIONSHIP_INSTRUCTIONS = """You are a senior data-modeling specialist focused on entity relationships.
-Your task is to resolve persistent relationships for one atomic requirement.
+RELATIONSHIP_INSTRUCTIONS = """You are an ER-modeling specialist focused on entity relationships.
+Your task is to refine persistent relationships in the shared ER model for one atomic requirement.
 For exactly one atomic requirement, decide only logical relationships among the supplied related entities. Choose
 parent, child, ONE_TO_ONE / ONE_TO_MANY / MANY_TO_MANY, and whether the child reference is required. Do not create
 entities, fields, foreign keys, constraints, APIs, modules, or SQL. The compiler lowers accepted relationships.
@@ -271,20 +316,15 @@ class DatabaseSchemaState:
             if key not in related:
                 errors.append(_format_error("ARC2221", f"Pass 2 references an entity outside its requirement slice: {key}.", node_id=requirement_id))
                 continue
-            # Structured model output can repeat an entity or split its fields
-            # across several entries. Applying every fragment is deterministic:
-            # reuse links are sets and _add_field rejects incompatible declarations.
+            # Normalization can combine fragments for the same entity.
             seen.add(key)
-            for raw_name in item.get("reuse_fields", []):
-                name = _normalize_identifier(str(raw_name))
-                if name not in self.entities[key]["fields"]:
-                    errors.append(_format_error("ARC2223", f"Pass 2 reuses an unknown field: {key}.{name}.", node_id=requirement_id))
-                else:
-                    self._link_field(requirement_id, key, name)
             for raw_field in item.get("new_fields", []):
                 name = _normalize_identifier(str(raw_field.get("name", "")))
                 if name == "id" or name.endswith("_id"):
                     errors.append(_format_error("ARC2224", f"Pass 2 cannot create system or foreign-key field: {key}.{name}.", node_id=requirement_id))
+                    continue
+                if name in self.entities[key]["fields"]:
+                    errors.append(_format_error("ARC2223", f"Pass 2 cannot recreate existing field: {key}.{name}; use update_fields.", node_id=requirement_id))
                     continue
                 self._add_field(key, {
                     "name": name, "type": raw_field.get("type"), "nullable": raw_field.get("nullable"),
@@ -292,6 +332,24 @@ class DatabaseSchemaState:
                     "properties": _compact_properties(raw_field.get("properties", {})),
                     "origin": "REQUIREMENT", "references": None,
                 }, requirement_id, errors)
+            for raw_field in item.get("update_fields", []):
+                name = _normalize_identifier(str(raw_field.get("name", "")))
+                existing = self.entities[key]["fields"].get(name)
+                if existing is None:
+                    errors.append(_format_error("ARC2223", f"Pass 2 updates an unknown field: {key}.{name}.", node_id=requirement_id))
+                    continue
+                if name == "id" or name.endswith("_id") or existing["origin"] != "REQUIREMENT":
+                    errors.append(_format_error("ARC2224", f"Pass 2 cannot update system or foreign-key field: {key}.{name}.", node_id=requirement_id))
+                    continue
+                # A declaration is the complete resulting definition. Replace
+                # domain attributes, retaining identity, origin and provenance.
+                existing.update({
+                    "type": raw_field["type"],
+                    "nullable": raw_field["nullable"],
+                    "description": raw_field["description"].strip(),
+                    "properties": _compact_properties(raw_field["properties"]),
+                })
+                self._link_field(requirement_id, key, name)
         if related - seen:
             errors.append(_format_error("ARC2225", "Pass 2 omitted related entities: " + ", ".join(sorted(related - seen)) + ".", node_id=requirement_id))
 
@@ -892,6 +950,8 @@ def _field_property_errors(entity_key: str, field_item: dict[str, Any]) -> list[
     errors: list[str] = []
     name = str(field_item.get("name", ""))
     field_type = field_item.get("type")
+    if not isinstance(field_type, str) or field_type not in FIELD_TYPES:
+        return [f"invalid field type: {entity_key}.{name}"]
     properties = field_item.get("properties")
     if not isinstance(properties, dict):
         return [f"field properties must be an object: {entity_key}.{name}"]
@@ -901,6 +961,53 @@ def _field_property_errors(entity_key: str, field_item: dict[str, Any]) -> list[
     }
     if unknown:
         errors.append(f"unknown field properties: {entity_key}.{name} -> {', '.join(sorted(unknown))}")
+    for key in ("min_length", "max_length"):
+        value = properties.get(key)
+        if value is not None and (type(value) is not int or value < 0):
+            errors.append(f"{key} must be a nonnegative integer: {entity_key}.{name}")
+    for key in ("minimum", "maximum"):
+        value = properties.get(key)
+        if value is not None and (
+            type(value) not in {int, float} or not math.isfinite(value)
+            or (field_type == "integer" and int(value) != value)
+        ):
+            errors.append(f"invalid numeric {key}: {entity_key}.{name}")
+    for key in ("pattern", "format"):
+        value = properties.get(key)
+        if value is not None and not isinstance(value, str):
+            errors.append(f"{key} must be a string: {entity_key}.{name}")
+    pattern = properties.get("pattern")
+    if isinstance(pattern, str):
+        try:
+            re.compile(pattern)
+        except re.error:
+            errors.append(f"invalid regular expression: {entity_key}.{name}")
+    enum = properties.get("enum")
+    if enum is not None and (
+        not isinstance(enum, list) or not enum
+        or any(not isinstance(value, str) for value in enum)
+        or len(enum) != len(set(value for value in enum if isinstance(value, str)))
+    ):
+        errors.append(f"enum must be a nonempty list of distinct strings: {entity_key}.{name}")
+    for key in ("date_past", "date_future"):
+        if properties.get(key) is not None and not isinstance(properties[key], bool):
+            errors.append(f"{key} must be a boolean: {entity_key}.{name}")
+    if properties.get("date_past") is True and properties.get("date_future") is True:
+        errors.append(f"date cannot be both past-only and future-only: {entity_key}.{name}")
+    default = properties.get("default")
+    if default is not None:
+        valid_default = (
+            (field_type in {"string", "date", "datetime", "uuid", "foreign_key"} and isinstance(default, str))
+            or (field_type == "integer" and type(default) is int)
+            or (field_type == "number" and type(default) in {int, float} and math.isfinite(default))
+            or (field_type == "boolean" and isinstance(default, bool))
+            or (field_type == "json" and type(default) in {str, int, float, bool})
+        )
+        if not valid_default:
+            errors.append(f"default does not match field type: {entity_key}.{name}")
+    # Malformed values must produce diagnostics rather than comparison errors.
+    if errors:
+        return errors
     active = {key for key, value in properties.items() if value is not None and value is not False}
     if active & {"min_length", "max_length", "pattern"} and field_type != "string":
         errors.append(f"string property used on non-string field: {entity_key}.{name}")
@@ -918,6 +1025,20 @@ def _field_property_errors(entity_key: str, field_item: dict[str, Any]) -> list[
     if properties.get("minimum") is not None and properties.get("maximum") is not None:
         if properties["minimum"] > properties["maximum"]:
             errors.append(f"invalid numeric range: {entity_key}.{name}")
+    if isinstance(default, str):
+        if properties.get("min_length") is not None and len(default) < properties["min_length"]:
+            errors.append(f"default is shorter than min_length: {entity_key}.{name}")
+        if properties.get("max_length") is not None and len(default) > properties["max_length"]:
+            errors.append(f"default is longer than max_length: {entity_key}.{name}")
+        if enum is not None and default not in enum:
+            errors.append(f"default is outside enum: {entity_key}.{name}")
+        if pattern is not None and re.search(pattern, default) is None:
+            errors.append(f"default does not match pattern: {entity_key}.{name}")
+    if type(default) in {int, float}:
+        if properties.get("minimum") is not None and default < properties["minimum"]:
+            errors.append(f"default is below minimum: {entity_key}.{name}")
+        if properties.get("maximum") is not None and default > properties["maximum"]:
+            errors.append(f"default is above maximum: {entity_key}.{name}")
     return errors
 
 
@@ -946,34 +1067,37 @@ def _validate_decision_shape(phase: str, node_id: str, decision: Any) -> list[st
             if not isinstance(item, dict) or not isinstance(item.get("entity"), str):
                 errors.append("Pass 2 contains an invalid entity decision")
                 continue
-            if not isinstance(item.get("reuse_fields"), list) or not isinstance(item.get("new_fields"), list):
+            if set(item) != {"entity", "new_fields", "update_fields"}:
+                errors.append("Pass 2 entity must contain only entity, new_fields and update_fields")
+            if not isinstance(item.get("new_fields"), list) or not isinstance(item.get("update_fields"), list):
                 errors.append("Pass 2 field lists must be arrays")
                 continue
-            if any(not isinstance(value, str) for value in item["reuse_fields"]):
-                errors.append("Pass 2 reuse_fields contains a non-string value")
-            for field_item in item["new_fields"]:
-                if not isinstance(field_item, dict):
-                    errors.append("Pass 2 new_fields contains a non-object")
-                    continue
-                if field_item.get("type") not in FIELD_TYPES - {"uuid", "foreign_key"}:
-                    errors.append("Pass 2 new field has an invalid type")
-                if not isinstance(field_item.get("name"), str) or not isinstance(field_item.get("nullable"), bool):
-                    errors.append("Pass 2 new field has an invalid name or nullable flag")
-                if not isinstance(field_item.get("properties"), dict):
-                    errors.append("Pass 2 new field properties must be an object")
-                    continue
-                errors.extend(
-                    f"Pass 2 invalid field properties: {error}"
-                    for error in _field_property_errors(
-                        "decision",
-                        {
-                            "name": field_item.get("name"),
-                            "type": field_item.get("type"),
-                            "nullable": field_item.get("nullable"),
-                            "properties": _compact_properties(field_item.get("properties")),
-                        },
+            for operation in ("new_fields", "update_fields"):
+                for field_item in item[operation]:
+                    if not isinstance(field_item, dict):
+                        errors.append(f"Pass 2 {operation} contains a non-object")
+                        continue
+                    if set(field_item) != set(FIELD_DECLARATION_SCHEMA["required"]):
+                        errors.append(f"Pass 2 {operation} must contain a complete field declaration")
+                    if not isinstance(field_item.get("type"), str) or field_item["type"] not in FIELD_TYPES - {"uuid", "foreign_key"}:
+                        errors.append(f"Pass 2 {operation} field has an invalid type")
+                    name = field_item.get("name")
+                    if not isinstance(name, str) or not IDENTIFIER_PATTERN.fullmatch(name):
+                        errors.append(f"Pass 2 {operation} field has an invalid name")
+                    if not isinstance(field_item.get("nullable"), bool):
+                        errors.append(f"Pass 2 {operation} field has an invalid nullable flag")
+                    if not isinstance(field_item.get("description"), str):
+                        errors.append(f"Pass 2 {operation} field has an invalid description")
+                    properties = field_item.get("properties")
+                    if not isinstance(properties, dict):
+                        errors.append(f"Pass 2 {operation} field properties must be an object")
+                        continue
+                    if set(properties) != set(FIELD_PROPERTIES_SCHEMA["required"]):
+                        errors.append(f"Pass 2 {operation} field properties must contain all ten protocol keys")
+                    errors.extend(
+                        f"Pass 2 invalid field properties: {error}"
+                        for error in _field_property_errors("decision", field_item)
                     )
-                )
     elif phase == "pass3_relationships":
         for item in decision["relationships"]:
             if not isinstance(item, dict):
@@ -1042,36 +1166,46 @@ def _validate_decision_context(
                 continue
             key = _normalize_identifier(str(item.get("entity", "")))
             known_fields = {
-                _normalize_identifier(str(field_item.get("name", "")))
+                _normalize_identifier(str(field_item.get("name", ""))): field_item
                 for field_item in related_by_key.get(key, {}).get("fields", [])
                 if isinstance(field_item, dict)
             }
-            reused = {
-                _normalize_identifier(str(value))
-                for value in item.get("reuse_fields", [])
-                if isinstance(value, str)
-            }
-            if reused - known_fields:
+            names_by_operation: dict[str, set[str]] = {}
+            for operation in ("new_fields", "update_fields"):
+                declarations = item.get(operation, [])
+                if not isinstance(declarations, list):
+                    continue
+                names = [
+                    _normalize_identifier(str(field_item.get("name", "")))
+                    for field_item in declarations if isinstance(field_item, dict)
+                ]
+                names_by_operation[operation] = set(names)
+                if len(names) != len(set(names)):
+                    errors.append(f"Pass 2 {operation} repeats a field on {key}")
+                forbidden = {
+                    name for name in names
+                    if name == "id" or name.endswith("_id")
+                    or known_fields.get(name, {}).get("origin") in {"SYSTEM", "RELATIONSHIP"}
+                }
+                if forbidden:
+                    errors.append(
+                        f"Pass 2 cannot create or update system or foreign-key fields on {key}: "
+                        + ", ".join(sorted(forbidden))
+                    )
+            new_names = names_by_operation.get("new_fields", set())
+            updated_names = names_by_operation.get("update_fields", set())
+            if new_names & known_fields.keys():
                 errors.append(
-                    f"Pass 2 reuses unknown fields on {key}: "
-                    + ", ".join(sorted(reused - known_fields))
+                    f"Pass 2 redeclares existing fields on {key}; use update_fields: "
+                    + ", ".join(sorted(new_names & known_fields.keys()))
                 )
-            new_names = {
-                _normalize_identifier(str(field_item.get("name", "")))
-                for field_item in item.get("new_fields", [])
-                if isinstance(field_item, dict)
-            }
-            forbidden = {name for name in new_names if name == "id" or name.endswith("_id")}
-            if forbidden:
+            if updated_names - known_fields.keys():
                 errors.append(
-                    f"Pass 2 cannot create system or foreign-key fields on {key}: "
-                    + ", ".join(sorted(forbidden))
+                    f"Pass 2 updates unknown fields on {key}: "
+                    + ", ".join(sorted(updated_names - known_fields.keys()))
                 )
-            if new_names & known_fields:
-                errors.append(
-                    f"Pass 2 redeclares existing fields on {key}; use reuse_fields: "
-                    + ", ".join(sorted(new_names & known_fields))
-                )
+            if new_names & updated_names:
+                errors.append(f"Pass 2 puts the same field in new_fields and update_fields on {key}")
         return errors
 
     if phase == "pass3_relationships":
@@ -1119,7 +1253,8 @@ def _normalize_decision_context(
         or any(
             not isinstance(item, dict)
             or not isinstance(item.get("entity"), str)
-            or not isinstance(item.get("reuse_fields"), list)
+            or set(item) != {"entity", "new_fields", "update_fields"}
+            or not isinstance(item.get("update_fields"), list)
             or not isinstance(item.get("new_fields"), list)
             for item in entities
         )
@@ -1133,16 +1268,14 @@ def _normalize_decision_context(
         key = _normalize_identifier(item["entity"])
         target = grouped.get(key)
         if target is None:
-            target = {"entity": key, "reuse_fields": [], "new_fields": []}
+            target = {"entity": key, "new_fields": [], "update_fields": []}
             grouped[key] = target
         else:
             notes.append(f"merged_repeated_entity:{key}")
-        for field_name in item["reuse_fields"]:
-            if field_name not in target["reuse_fields"]:
-                target["reuse_fields"].append(field_name)
-        for field_item in item["new_fields"]:
-            if field_item not in target["new_fields"]:
-                target["new_fields"].append(field_item)
+        for operation in ("new_fields", "update_fields"):
+            for field_item in item[operation]:
+                if field_item not in target[operation]:
+                    target[operation].append(field_item)
 
     expected = [
         _normalize_identifier(str(item.get("key", "")))
@@ -1151,7 +1284,7 @@ def _normalize_decision_context(
     ]
     for key in expected:
         if key not in grouped:
-            grouped[key] = {"entity": key, "reuse_fields": [], "new_fields": []}
+            grouped[key] = {"entity": key, "new_fields": [], "update_fields": []}
             notes.append(f"completed_missing_entity:{key}")
     ordered_keys = expected + sorted(set(grouped) - set(expected))
     normalized["entities"] = [grouped[key] for key in ordered_keys]
