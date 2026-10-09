@@ -9,9 +9,18 @@ from .database import (
     SchemaColumn, SchemaConstraint, SchemaDefault, SchemaIR, SchemaTable,
     SchemaDataType, RuntimeRule,
 )
+from .backend import (
+    BackendIR, BackendModule, APIModule, FunctionModule,
+    DatabaseModule, ModuleBase, BackendField, BackendType, BackendTypeDefinition,
+    AcceptanceCriterion, ModuleCall, DataAccess, RequirementBlueprint, APIEntryPoint,
+)
 
 __all__ = [
     "ERAttribute", "EREntity", "ERModelIR", "ERRelationship", "SchemaDataType",
     "RuntimeRule", "SchemaColumn", "SchemaConstraint", "SchemaDefault",
     "SchemaIR", "SchemaTable",
+    "BackendIR", "BackendModule", "APIModule",
+    "FunctionModule", "DatabaseModule", "ModuleBase", "BackendField",
+    "BackendType", "BackendTypeDefinition", "AcceptanceCriterion", "ModuleCall",
+    "DataAccess", "RequirementBlueprint", "APIEntryPoint",
 ]

@@ -1,0 +1,144 @@
+"""Technology-neutral backend module blueprints.
+
+Define responsibilities, interfaces, collaboration and acceptance criteria, not
+internal execution steps. TypedDicts are contracts, not runtime validators.
+The legacy DesignPass has not yet migrated to this representation.
+"""
+
+from __future__ import annotations
+
+from typing import Literal, NotRequired, TypedDict
+
+from .database import SchemaDataType
+
+
+class ScalarType(TypedDict):
+    kind: Literal["scalar"]
+    name: SchemaDataType
+
+
+class ArrayType(TypedDict):
+    kind: Literal["array"]
+    items: BackendType
+
+
+class NamedType(TypedDict):
+    kind: Literal["named"]
+    type_id: str
+
+
+BackendType = ScalarType | ArrayType | NamedType
+
+
+class BackendField(TypedDict):
+    semantic_id: str
+    name: str
+    type: BackendType
+    required: bool
+    nullable: bool
+    description: str
+
+
+class ObjectTypeDefinition(TypedDict):
+    id: str
+    kind: Literal["object"]
+    fields: list[BackendField]
+
+
+class EnumTypeDefinition(TypedDict):
+    id: str
+    kind: Literal["enum"]
+    values: list[str]
+
+
+BackendTypeDefinition = ObjectTypeDefinition | EnumTypeDefinition
+
+
+class AcceptanceCriterion(TypedDict):
+    id: str
+    given: str
+    when: str
+    then: str
+    scenario_ids: list[str]
+
+
+class ModuleCall(TypedDict):
+    id: str
+    module_id: str
+    purpose: str
+    # Business constraints, not executable branching or parameter expressions.
+    condition: NotRequired[str]
+    # Local call ids that must precede this collaboration when it occurs.
+    after: NotRequired[list[str]]
+
+
+class DataAccess(TypedDict):
+    table: str
+    # Direct access only; indirect access is derived from the call graph.
+    read: list[str]
+    create: list[str]
+    update: list[str]
+    delete: bool
+
+
+class APIEntryPoint(TypedDict):
+    operation: str
+    authentication: Literal["none", "required", "optional"]
+
+
+class ModuleBase(TypedDict):
+    id: str
+    name: str
+    requirement_ids: list[str]
+    spec: str
+    inputs: list[BackendField]
+    # Trusted identity, time and other ambient values, separate from inputs.
+    context: list[BackendField]
+    outputs: list[BackendField]
+    calls: list[ModuleCall]
+    data_access: list[DataAccess]
+    acceptance_criteria: list[AcceptanceCriterion]
+
+
+class APIModule(ModuleBase):
+    kind: Literal["API"]
+    entrypoint: APIEntryPoint
+
+
+class FunctionModule(ModuleBase):
+    kind: Literal["FUNC"]
+
+
+class DatabaseModule(ModuleBase):
+    kind: Literal["DB"]
+
+
+BackendModule = APIModule | FunctionModule | DatabaseModule
+
+
+class RequirementBlueprint(TypedDict):
+    requirement_id: str
+    spec: str
+    server_state: bool
+    api_ids: list[str]
+    # Candidate associations, not an authoritative list of actual operations.
+    related_data: dict[str, list[str]]
+    acceptance_criteria: list[AcceptanceCriterion]
+
+
+class BackendIR(TypedDict):
+    ir_kind: Literal["backend_design"]
+    status: Literal["PROPOSED", "RESOLVED"]
+    schema_ref: str
+    schema_hash: str
+    types: list[BackendTypeDefinition]
+    requirements: list[RequirementBlueprint]
+    modules: list[BackendModule]
+
+
+__all__ = [
+    "BackendIR", "BackendModule", "APIModule",
+    "FunctionModule", "DatabaseModule", "ModuleBase", "BackendField",
+    "BackendType", "BackendTypeDefinition", "AcceptanceCriterion",
+    "ModuleCall", "DataAccess", "RequirementBlueprint", "APIEntryPoint",
+]
