@@ -210,10 +210,10 @@ def complete_legacy_manifests(root: Path, snapshot: dict[str, Any]) -> None:
         return
     from .symbol_planning import GlobalSymbolPlanner
     from .file_planning import GlobalFilePlanner
-    from .skeleton_lowering import DatabaseSchemaLowerer, TypeLowerer
+    from .skeleton_lowering import TypeLowerer
+    from .database_lowering import DatabaseLowerer
     from .module_lowering import ModuleSkeletonLowerer
     from .backend_lowering import BackendGlueLowerer
-    from .fixture_lowering import FixtureLowerer, fixture_source_paths
 
     def checked(result: Any) -> Any:
         if not result.ok:
@@ -221,21 +221,15 @@ def complete_legacy_manifests(root: Path, snapshot: dict[str, Any]) -> None:
         return result
     payload = snapshot["payload"]
     manifest = json.loads((root / ".arc/project/project-manifest.json").read_text(encoding="utf-8"))
-    empty = {"requirements": [], "modules": []}
-    symbols = checked(GlobalSymbolPlanner().plan(empty, payload["database"], manifest))
-    files = checked(GlobalFilePlanner(root).plan(empty, symbols.registry, manifest,
-                    fixture_paths=fixture_source_paths(payload["fixture_ir"])))
-    database = checked(DatabaseSchemaLowerer().lower(payload["database"], symbols.registry, files.registry))
-    fixture = checked(FixtureLowerer().lower(payload["fixture_ir"], database.manifest))
-    database.manifest["generated_files"] = sorted(
-        path for path in database.sources | fixture.sources if path.startswith("backend/src/"))
+    database = checked(DatabaseLowerer().lower(payload["database"], manifest, root))
+    payload["fixture_ir"] = {"fixture_sets": []}
     payload["database_manifest"] = database.manifest
     if snapshot["stage"] == "backend-ir":
         return
     design = payload["design"]
     symbols = checked(GlobalSymbolPlanner().plan(design, payload["database"], manifest))
     files = checked(GlobalFilePlanner(root).plan(design, symbols.registry, manifest,
-                    fixture_paths=fixture_source_paths(payload["fixture_ir"])))
+                    fixture_paths=[]))
     types = checked(TypeLowerer().lower(symbols.registry, files.registry))
     manifests = {"type": types.manifest, "database": database.manifest}
     for kind in ("DB", "FUNC", "API"):

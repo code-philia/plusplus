@@ -19,7 +19,6 @@ SYSTEM_FILES = (
     ("backend/src/db/schema/index.ts", "DATABASE_SCHEMA_BARREL", "SKELETON_COMPILER"),
     ("backend/src/db/repositories/index.ts", "REPOSITORY_BARREL", "SKELETON_COMPILER"),
     ("backend/src/db/client.ts", "DATABASE_CLIENT", "SKELETON_COMPILER"),
-    ("backend/src/fixtures/index.ts", "FIXTURE_ENTRY", "SKELETON_COMPILER"),
     ("backend/src/generated/router.ts", "ROUTER", "SKELETON_COMPILER"),
     ("backend/src/generated/module-registry.ts", "MODULE_REGISTRY", "SKELETON_COMPILER"),
     ("backend/src/generated/dependency-registry.ts", "DEPENDENCY_REGISTRY", "SKELETON_COMPILER"),
@@ -73,8 +72,6 @@ class GlobalFilePlanner:
 
         self._reserve_system_files()
         for path in sorted(set(fixture_paths or [])):
-            if path == "backend/src/fixtures/index.ts":
-                continue
             self._add_file(
                 path,
                 role="FIXTURE_SET",

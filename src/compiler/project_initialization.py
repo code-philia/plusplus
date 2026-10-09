@@ -1046,6 +1046,7 @@ class ProjectInitializer:
                 "start": (
                     "npm run build -w @arc/shared && npm run build && node ./dist/server.js"
                 ),
+                "db:init": "node init-db.mjs",
                 "db:generate": "drizzle-kit generate",
                 "db:migrate": "drizzle-kit migrate",
             },

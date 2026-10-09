@@ -1,7 +1,7 @@
-"""Deterministically refine a completed ER model into a MySQL-ready Schema IR.
+"""Deterministically refine a completed ER model into a database-neutral relational Schema IR.
 
 The existing relationship mapper supplies the relational projection. This
-pass fixes column storage types and structured constraints; it emits no SQL.
+pass resolves tables, scalar types and structured constraints; storage is a lowering decision.
 """
 
 from __future__ import annotations
@@ -13,8 +13,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..ir import ERModelIR, MySQLType, SchemaIR
-from ..ir.database import SCHEMA_IR_VERSION
+from ..ir import ERModelIR, SchemaIR
 from .state import DatabaseSchemaState
 from .validation import validate_database_schema
 
@@ -32,7 +31,7 @@ def refine_er_model(
     """Rebuild the relational mapping from ER alone; do not mutate the source.
 
     Reuse the existing structural mapper so the current SQLite consumers and
-    the new MySQL schema agree on table/column identities.
+    the relational schema agree on table/column identities.
     """
     state = DatabaseSchemaState()
     errors: list[str] = []
@@ -63,7 +62,7 @@ def refine_er_model(
 
 
 def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefinementResult:
-    """Use declared ER constraints and explicit fixed storage policies only."""
+    """Resolve declared ER semantics without choosing a database dialect."""
     errors: list[str] = []
     warnings: list[str] = []
     tables: list[dict[str, Any]] = []
@@ -72,17 +71,23 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
         f"{entity['key']}.{column['name']}": column
         for entity in relational["entities"] for column in entity["fields"]
     }
-    mapped_types: dict[str, MySQLType] = {}
-    for reference, column in fields.items():
-        if column["type"] != "foreign_key":
-            mapped_types[reference] = _mysql_type(column)
-    for reference, column in fields.items():
-        if column["type"] == "foreign_key":
-            target = column.get("references")
-            if target not in mapped_types:
-                errors.append(f"SCHEMA_IR_REFERENCE_INVALID: {reference} -> {target}")
-            else:
-                mapped_types[reference] = copy.deepcopy(mapped_types[target])
+    mapped_types: dict[str, str] = {}
+    def resolve_type(reference: str, active: set[str]) -> str:
+        if reference in mapped_types:
+            return mapped_types[reference]
+        if reference not in fields or reference in active:
+            raise ValueError(f"Unresolvable field type: {reference}")
+        column = fields[reference]
+        kind = column["type"]
+        if kind == "foreign_key":
+            kind = resolve_type(column.get("references"), active | {reference})
+        mapped_types[reference] = kind
+        return kind
+    for reference in fields:
+        try:
+            resolve_type(reference, set())
+        except ValueError as exc:
+            errors.append(f"SCHEMA_IR_REFERENCE_INVALID: {exc}")
 
     for entity in sorted(relational["entities"], key=lambda item: item["key"]):
         table_name = entity["key"]
@@ -93,29 +98,20 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
             name = column["name"]
             _identifier(name, errors)
             reference = f"{table_name}.{name}"
-            mysql_type = mapped_types.get(reference)
-            if mysql_type is None:
+            resolved_type = mapped_types.get(reference)
+            if resolved_type is None:
                 continue
-            if column["type"] == "number":
-                warnings.append(f"SCHEMA_IR_APPROXIMATE_NUMBER: {reference} uses DOUBLE; exact decimal semantics are not present in the ER type")
             props = column.get("properties", {})
             default = props.get("default")
-            if mysql_type["name"] == "BIGINT":
-                for value in (props.get("minimum"), props.get("maximum"), default):
-                    if value is not None and not -(2**63) <= value <= 2**63 - 1:
-                        errors.append(f"SCHEMA_IR_INTEGER_RANGE: {reference} exceeds signed BIGINT")
             columns.append({
-                "name": name, "logical_type": column["type"], "mysql_type": mysql_type,
-                "nullable": column["nullable"],
+                "name": name, "type": resolved_type, "nullable": column["nullable"],
                 "default": None if default is None else {
-                    "kind": "json_literal" if column["type"] == "json" else "literal", "value": default,
+                    "kind": "json_literal" if resolved_type == "json" else "literal", "value": default,
                 },
-                "auto_increment": False, "description": column["description"],
-                "comment": column["description"][:1024], "origin": column["origin"],
+                "generation": "application_uuid" if column["primary_key"] and resolved_type == "uuid" else "none",
+                "description": column["description"], "origin": column["origin"],
                 "properties": copy.deepcopy(props), "requirement_ids": list(column["requirement_ids"]),
             })
-            if len(column["description"]) > 1024:
-                warnings.append(f"SCHEMA_IR_COMMENT_TRUNCATED: {reference}; full description retained")
             for kind, value in sorted(props.items()):
                 if value is None or (kind in {"date_past", "date_future"} and value is False) or kind == "default":
                     continue
@@ -126,11 +122,9 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
                 else:
                     runtime_rules.append({
                         "scope": reference, "kind": kind, "value": copy.deepcopy(value),
-                        "reason": "Python regex/semantic format/relative time is not a portable MySQL CHECK",
+                        "reason": "Python regex/semantic format/relative time is not a portable relational CHECK",
                         "requirement_ids": list(column["requirement_ids"]),
                     })
-            if column["type"] == "boolean":
-                constraints.append(_check(table_name, name, "in", [0, 1], column["requirement_ids"]))
 
         for constraint in relational["constraints"]:
             refs = constraint["fields"]
@@ -138,19 +132,18 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
                 continue
             kind = constraint["type"]
             local_columns = [ref.partition(".")[2] for ref in refs]
-            physical = {
+            table_constraint = {
                 "name": _constraint_name(table_name, kind.lower(), refs),
                 "kind": "UNIQUE" if kind == "COMPOSITE_UNIQUE" else kind,
                 "columns": local_columns, "requirement_ids": list(constraint["requirement_ids"]),
             }
             if kind == "FOREIGN_KEY":
                 target_table, _, target_column = refs[1].partition(".")
-                physical.update({"columns": local_columns[:1], "referenced_table": target_table,
+                table_constraint.update({"columns": local_columns[:1], "referenced_table": target_table,
                                  "referenced_columns": [target_column], "on_delete": "RESTRICT", "on_update": "RESTRICT"})
-            constraints.append(physical)
+            constraints.append(table_constraint)
         tables.append({
-            "name": table_name, "description": entity["description"], "comment": entity["description"][:2048],
-            "engine": "InnoDB", "character_set": "utf8mb4", "collation": "utf8mb4_bin",
+            "name": table_name, "description": entity["description"],
             "columns": columns, "constraints": sorted(constraints, key=lambda item: item["name"]),
             "requirement_ids": list(entity["requirement_ids"]),
         })
@@ -168,15 +161,7 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
 
     schema: SchemaIR = {
         **copy.deepcopy(relational),
-        "ir_kind": "database_schema", "ir_version": SCHEMA_IR_VERSION,
-        "target": {"dialect": "mysql", "version": "8.4"},
-        "policies": {
-            "version": 1, "integer_storage": "signed BIGINT", "number_storage": "approximate DOUBLE",
-            "unbounded_text_storage": "LONGTEXT", "uuid_storage": "CHAR(36) ascii_bin; application-generated",
-            "datetime_storage": "DATETIME(6); application normalizes to UTC",
-            "foreign_key_actions": "RESTRICT", "schema_sql": "tables first, foreign keys second",
-            "exact_decimal": "not inferred from number; requires a future explicit ER decimal type",
-        },
+        "ir_kind": "database_schema",
         "tables": tables, "runtime_rules": runtime_rules, "er_model": copy.deepcopy(er_model),
     }
     errors.extend(validate_schema_ir(schema))
@@ -185,34 +170,9 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
     return SchemaRefinementResult(schema, errors, warnings)
 
 
-def _mysql_type(column: dict[str, Any]) -> MySQLType:
-    kind = column["type"]
-    props = column.get("properties", {})
-    storage: MySQLType = {
-        "name": "LONGTEXT", "length": None, "fractional_seconds": None,
-        "unsigned": False, "character_set": None, "collation": None,
-    }
-    if kind == "string":
-        length = props.get("max_length")
-        if length is None and props.get("enum"):
-            length = max(1, max(map(len, props["enum"])))
-        # utf8mb4: wider values use LONGTEXT plus a length CHECK. Even smaller
-        # VARCHAR columns are subject to the table's total row-size budget.
-        if isinstance(length, int) and 1 <= length <= 16383:
-            storage.update(name="VARCHAR", length=length)
-    elif kind == "uuid":
-        storage.update(name="CHAR", length=36, character_set="ascii", collation="ascii_bin")
-    else:
-        storage["name"] = {"integer": "BIGINT", "number": "DOUBLE", "boolean": "BOOLEAN",
-                           "date": "DATE", "datetime": "DATETIME", "json": "JSON"}[kind]
-        if kind == "datetime":
-            storage["fractional_seconds"] = 6
-    return storage
-
-
 def _identifier(name: str, errors: list[str]) -> None:
-    if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name):
-        errors.append(f"SCHEMA_IR_IDENTIFIER_INVALID: {name!r}; MySQL identifiers must fit 64 characters")
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+        errors.append(f"SCHEMA_IR_IDENTIFIER_INVALID: {name!r}")
 
 
 def _constraint_name(table: str, kind: str, values: Any) -> str:
@@ -229,54 +189,74 @@ def _check(table: str, column: str, op: str, value: Any, requirements: list[str]
 
 
 def validate_schema_ir(schema: SchemaIR) -> list[str]:
-    """Check the concrete constraints needed by a later MySQL file renderer."""
+    """Validate relational consistency; database limits belong to lowering."""
     errors: list[str] = []
-    names: set[str] = set()
+    if schema.get("ir_kind") != "database_schema":
+        return ["SCHEMA_IR_KIND_INVALID: expected database-neutral Schema IR"]
+    if "target" in schema or "policies" in schema:
+        errors.append("SCHEMA_IR_DIALECT_SPECIFIC: target/storage policies do not belong in Schema IR")
     tables = {table["name"]: table for table in schema["tables"]}
     if len(tables) != len(schema["tables"]):
         errors.append("SCHEMA_IR_DUPLICATE_TABLE")
+    types = {"string", "integer", "number", "boolean", "date", "datetime", "json", "uuid"}
     for table in schema["tables"]:
+        _identifier(table["name"], errors)
+        if any(key in table for key in ("engine", "character_set", "collation")):
+            errors.append(f"SCHEMA_IR_DIALECT_SPECIFIC: {table['name']}")
         columns = {column["name"]: column for column in table["columns"]}
-        if len(columns) != len(table["columns"]):
-            errors.append(f"SCHEMA_IR_DUPLICATE_COLUMN: {table['name']}")
-        if sum(constraint["kind"] == "PRIMARY_KEY" for constraint in table["constraints"]) != 1:
+        if not columns or len(columns) != len(table["columns"]):
+            errors.append(f"SCHEMA_IR_COLUMNS_INVALID: {table['name']}")
+        if sum(item["kind"] == "PRIMARY_KEY" for item in table["constraints"]) != 1:
             errors.append(f"SCHEMA_IR_PRIMARY_KEY_INVALID: {table['name']}")
-        # Conservative upper bound for VARCHAR + fixed-width inline data.
-        inline_bytes = 0
         for column in columns.values():
-            mysql = column["mysql_type"]
-            inline_bytes += (mysql["length"] * 4 + 2 if mysql["name"] == "VARCHAR" else
-                             mysql["length"] if mysql["name"] == "CHAR" else 16)
-        if inline_bytes > 65000:
-            errors.append(f"SCHEMA_IR_ROW_TOO_WIDE: {table['name']}; reduce VARCHAR bounds")
+            _identifier(column["name"], errors)
+            if "mysql_type" in column or "auto_increment" in column:
+                errors.append(f"SCHEMA_IR_DIALECT_SPECIFIC: {table['name']}.{column['name']}")
+            if column["type"] not in types or type(column["nullable"]) is not bool:
+                errors.append(f"SCHEMA_IR_COLUMN_TYPE_INVALID: {table['name']}.{column['name']}")
+            if column["generation"] not in {"none", "application_uuid"} or (column["generation"] == "application_uuid" and column["type"] != "uuid"):
+                errors.append(f"SCHEMA_IR_GENERATION_INVALID: {table['name']}.{column['name']}")
+            default = column["default"]
+            if default is not None:
+                kind = "json_literal" if column["type"] == "json" else "literal"
+                value = default["value"]
+                valid = (isinstance(value, str) if column["type"] in {"string", "uuid", "date", "datetime"} else
+                         type(value) is int if column["type"] == "integer" else
+                         type(value) in {int, float} if column["type"] == "number" else
+                         type(value) is bool if column["type"] == "boolean" else True)
+                if default["kind"] != kind or not valid:
+                    errors.append(f"SCHEMA_IR_DEFAULT_INVALID: {table['name']}.{column['name']}")
+        names: set[str] = set()
         for constraint in table["constraints"]:
+            _identifier(constraint["name"], errors)
             if constraint["name"] in names:
                 errors.append(f"SCHEMA_IR_CONSTRAINT_DUPLICATE: {constraint['name']}")
             names.add(constraint["name"])
-            if set(constraint["columns"]) - columns.keys():
+            refs = constraint["columns"]
+            if not refs or len(refs) != len(set(refs)) or set(refs) - columns.keys():
                 errors.append(f"SCHEMA_IR_CONSTRAINT_COLUMN_INVALID: {constraint['name']}")
                 continue
-            if constraint["kind"] in {"PRIMARY_KEY", "UNIQUE"}:
-                key_bytes = 0
-                for name in constraint["columns"]:
-                    mysql = columns[name]["mysql_type"]
-                    if mysql["name"] in {"LONGTEXT", "JSON"}:
-                        errors.append(f"SCHEMA_IR_KEY_TYPE_INVALID: {table['name']}.{name}")
-                    key_bytes += (mysql["length"] * (1 if mysql["character_set"] == "ascii" else 4)
-                                  if mysql["length"] else 8)
-                if key_bytes > 3072:
-                    errors.append(f"SCHEMA_IR_KEY_TOO_WIDE: {constraint['name']}")
-            if constraint["kind"] == "FOREIGN_KEY":
+            kind = constraint["kind"]
+            if kind == "PRIMARY_KEY" and any(columns[name]["nullable"] for name in refs):
+                errors.append(f"SCHEMA_IR_NULLABLE_PRIMARY_KEY: {constraint['name']}")
+            if kind == "CHECK":
+                predicate = constraint["predicate"]
+                if predicate["column"] not in refs or predicate["operator"] not in {"length_gte", "length_lte", "gte", "lte", "in"}:
+                    errors.append(f"SCHEMA_IR_CHECK_INVALID: {constraint['name']}")
+            elif kind == "FOREIGN_KEY":
                 target = tables.get(constraint["referenced_table"])
                 target_columns = {column["name"]: column for column in target["columns"]} if target else {}
-                if len(constraint["columns"]) != len(constraint["referenced_columns"]):
+                target_refs = constraint["referenced_columns"]
+                if not target or len(refs) != len(target_refs) or len(target_refs) != len(set(target_refs)):
                     errors.append(f"SCHEMA_IR_FOREIGN_KEY_ARITY: {constraint['name']}")
                     continue
-                for source, reference in zip(constraint["columns"], constraint["referenced_columns"]):
-                    if reference not in target_columns or columns[source]["mysql_type"] != target_columns[reference]["mysql_type"]:
-                        errors.append(f"SCHEMA_IR_FOREIGN_KEY_TYPE: {constraint['name']}")
-                target_key = constraint["referenced_columns"]
-                if target and not any(item["kind"] in {"PRIMARY_KEY", "UNIQUE"} and item["columns"] == target_key
-                                      for item in target["constraints"]):
+                if any(ref not in target_columns or columns[source]["type"] != target_columns[ref]["type"]
+                       for source, ref in zip(refs, target_refs)):
+                    errors.append(f"SCHEMA_IR_FOREIGN_KEY_TYPE: {constraint['name']}")
+                if not any(item["kind"] in {"PRIMARY_KEY", "UNIQUE"} and item["columns"] == target_refs for item in target["constraints"]):
                     errors.append(f"SCHEMA_IR_FOREIGN_KEY_TARGET_NOT_UNIQUE: {constraint['name']}")
+                if constraint["on_delete"] != "RESTRICT" or constraint["on_update"] != "RESTRICT":
+                    errors.append(f"SCHEMA_IR_FOREIGN_KEY_ACTION_INVALID: {constraint['name']}")
+            elif kind not in {"PRIMARY_KEY", "UNIQUE"}:
+                errors.append(f"SCHEMA_IR_CONSTRAINT_KIND_INVALID: {constraint['name']}")
     return errors

@@ -23,10 +23,6 @@ from .file_planning import GlobalFilePlanner
 from .frontend_generation import FrontendIRGenerationPass, frontend_ir_traceability
 from .frontend_react_lowering import FrontendReactLowerer
 from .git_history import GitStageError, ProjectGitHistory
-from .fixture_stage import (
-    FixturePass,
-)
-from .fixture_lowering import fixture_source_paths
 from .preprocessing_stage import RequirementPreprocessor, PreprocessingResult
 from .model_client import Model, ModelConfigurationError, StructuredModel
 from .cost_tracking import stage_checkpoint
@@ -132,6 +128,8 @@ class Compiler:
                 "database_schema": ".arc/design/database/schema.json", "fixture_ir": ".arc/design/database/fixture_ir.json",
                 "database_er_model": ".arc/design/database/er_model.json",
                 "database_schema_ir": ".arc/design/database/schema.json",
+                "database_lowering_report": ".arc/lowering/database/report.json",
+                "database_lowering_manifest": ".arc/lowering/database/manifest.json",
                 "design_ir": ".arc/design/backend/modules.json", "frontend_design_ir": ".arc/design/frontend/components.json",
                 "frontend_traceability": ".arc/design/frontend/requirements.json",
                 "frontend_lowering_report": ".arc/lowering/frontend/lowering.json",
@@ -305,28 +303,16 @@ class Compiler:
             }, database=database.schema)
 
         # ===================================================================
-        #                 Database Lowering: Seed Fixtures
+        #                 Database Lowering: Static SQLite Sources
         # ===================================================================
 
         if rank < 3:
-            fixture_ir: dict[str, Any]
-            fixture_result = FixturePass(model, artifact_store.root).compile(
-                preprocessing.requirement_ir,
-                database.schema,
-            )
-            for error in fixture_result.errors:
-                await self._log("Compiler", error, "warning")
-            if not fixture_result.ok:
-                await self._log(
-                    "Compiler",
-                    "FIXTURE design issues recorded; continuing with available fixture records.",
-                    "warning",
-                )
-            fixture_ir = fixture_result.fixture_ir
+            # Fixtures are deferred. Keep an empty IR for checkpoint and
+            # downstream interfaces while lowering only schema and connections.
+            fixture_ir: dict[str, Any] = {"fixture_sets": []}
             artifacts["fixture_ir"] = artifact_store.write_fixture_ir(fixture_ir)
-
             lowered_database = lower_database(
-                request.output_dir, artifact_store, database.schema, fixture_ir, project_manifest,
+                request.output_dir, artifact_store, project_manifest,
             )
             artifacts.update(lowered_database.artifacts)
             for warning in lowered_database.warnings:
@@ -336,11 +322,15 @@ class Compiler:
             if not lowered_database.ok:
                 await self._log(
                     "Compiler",
-                    "Database lowering is incomplete; continuing with available generated files.",
+                    "Database lowering failed; stopping before backend design.",
                     "warning",
                 )
+                return CompilationResult(
+                    ok=False, root_id=root_id, states=states, artifacts=artifacts,
+                )
             history.commit("2.2 database schema lowering", [
-                ".arc", "backend/src/db", "backend/src/fixtures", "backend/init-db.mjs",
+                ".arc", "backend/src/db", "backend/sql", "backend/init-db.mjs",
+                "backend/database-schema.mjs", "backend/database-schema.d.mts",
                 "backend/database-baseline.mjs", "backend/database-baseline.d.mts", "shared/src",
             ])
             stage_checkpoint(request.output_dir, "database-lowering")
@@ -438,7 +428,7 @@ class Compiler:
                 design.design_ir,
                 symbol_planning.registry,
                 project_manifest,
-                fixture_paths=fixture_source_paths(fixture_ir),
+                fixture_paths=[],
             )
             for error in file_planning.errors:
                 await self._log("Compiler", error, "error")
@@ -791,7 +781,7 @@ class Compiler:
                 return result
             symbols = checked(GlobalSymbolPlanner().plan(design_ir, database_schema, project_manifest))
             files = checked(GlobalFilePlanner(request.output_dir).plan(
-                design_ir, symbols.registry, project_manifest, fixture_paths=fixture_source_paths(fixture_ir)))
+                design_ir, symbols.registry, project_manifest, fixture_paths=[]))
             types = checked(TypeLowerer().lower(symbols.registry, files.registry))
             modules = {kind: checked(ModuleSkeletonLowerer().lower(
                 kind, design_ir, symbols.registry, files.registry)).manifest for kind in ("DB", "FUNC", "API")}
