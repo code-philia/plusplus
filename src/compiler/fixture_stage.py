@@ -14,7 +14,7 @@ from typing import Any
 
 from core.logging import SynchronousLog
 
-from .database_stage import schema_for_requirement
+from .database_design import schema_for_requirement
 from .model_client import StructuredModel, describe_model_error
 
 

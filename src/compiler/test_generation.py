@@ -17,7 +17,7 @@ from core.logging import SynchronousLog
 
 from .artifacts import CompilerArtifactStore
 from .code_binding import CODE_BINDING_READY, CodeTargetResolver
-from .database_stage import schema_for_requirement
+from .database_design import schema_for_requirement
 from .model_client import StructuredModel, describe_model_error
 from .project_initialization import DependencyCatalog, test_workspace_spec
 from .process_utils import resolve_executable, run_command

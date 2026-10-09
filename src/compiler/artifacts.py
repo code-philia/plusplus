@@ -46,6 +46,8 @@ class CompilerArtifactStore:
     def write_database_schema(self, schema: dict[str, Any]) -> str:
         path = self.database_root / "schema.json"
         write_json_atomic(path, schema)
+        if isinstance(schema.get("er_model"), dict):
+            write_json_atomic(self.database_root / "er_model.json", schema["er_model"])
         return str(path)
 
 

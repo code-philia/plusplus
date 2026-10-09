@@ -13,7 +13,7 @@ from .artifacts import CompilerArtifactStore
 from .checkpoints import CheckpointStore, START_FROM
 from .backend_lowering import BackendGlueLowerer
 from .code_binding import CodeTargetResolver, CodeBindingLowerer
-from .database_stage import (
+from .database_design import (
     DatabaseSchemaPass,
     database_traceability,
 )
@@ -130,6 +130,8 @@ class Compiler:
             for name, relative in {
                 "project_manifest": ".arc/project/project-manifest.json",
                 "database_schema": ".arc/design/database/schema.json", "fixture_ir": ".arc/design/database/fixture_ir.json",
+                "database_er_model": ".arc/design/database/er_model.json",
+                "database_schema_ir": ".arc/design/database/schema.json",
                 "design_ir": ".arc/design/backend/modules.json", "frontend_design_ir": ".arc/design/frontend/components.json",
                 "frontend_traceability": ".arc/design/frontend/requirements.json",
                 "frontend_lowering_report": ".arc/lowering/frontend/lowering.json",
@@ -286,6 +288,8 @@ class Compiler:
                     "warning",
                 )
             artifacts["database_schema"] = artifact_store.write_database_schema(database.schema)
+            artifacts["database_er_model"] = str(artifact_store.database_root / "er_model.json")
+            artifacts["database_schema_ir"] = artifacts["database_schema"]
             self._runtime.traceability.merge_database_schema_links(links)
             history.commit("2.1 database schema design", [".arc"])
             stage_checkpoint(request.output_dir, "database")
