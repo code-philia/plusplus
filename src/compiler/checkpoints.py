@@ -180,6 +180,10 @@ def legacy_snapshot(history: ProjectGitHistory, commit: str, stage: str) -> dict
                               "modules": modules.get("modules", [])}
         if "modules" not in modules and "requirements" in modules:
             payload["design"] = modules
+        try:
+            payload["design"] = read(".arc/design/backend/backend_ir.json")
+        except Exception:
+            pass  # Historical projects predating backend blueprints.
     if stage in {"frontend-ir", "lowered"}:
         frontend_tables = {}
         for table in ("components", "data", "ui", "properties", "events", "handlers", "effects", "api_dependencies"):
@@ -226,7 +230,8 @@ def complete_legacy_manifests(root: Path, snapshot: dict[str, Any]) -> None:
     payload["database_manifest"] = database.manifest
     if snapshot["stage"] == "backend-ir":
         return
-    design = payload["design"]
+    from .backend_design.projection import project_lowering_design
+    design = project_lowering_design(payload["design"])
     symbols = checked(GlobalSymbolPlanner().plan(design, payload["database"], manifest))
     files = checked(GlobalFilePlanner(root).plan(design, symbols.registry, manifest,
                     fixture_paths=[]))

@@ -20,6 +20,7 @@ from .database_design import (
 )
 from .database_lowering import lower_database
 from .design_stage import DesignPass, design_traceability
+from .backend_design.projection import project_lowering_design
 from .file_planning import GlobalFilePlanner
 from .frontend_generation import FrontendIRGenerationPass, frontend_ir_traceability
 from .frontend_react_lowering import FrontendReactLowerer
@@ -207,6 +208,8 @@ class Compiler:
                 "database_lowering_report": ".arc/lowering/database/report.json",
                 "database_lowering_manifest": ".arc/lowering/database/manifest.json",
                 "design_ir": ".arc/design/backend/modules.json", "frontend_design_ir": ".arc/design/frontend/components.json",
+                "backend_ir": ".arc/design/backend/backend_ir.json",
+                "backend_design_report": ".arc/design/backend/report.json",
                 "frontend_traceability": ".arc/design/frontend/requirements.json",
                 "frontend_lowering_report": ".arc/lowering/frontend/lowering.json",
             }.items():
@@ -314,7 +317,7 @@ class Compiler:
                 await self._build_gate(request, "Restart from lowered", root_id, states, artifacts)
             return await self._continue_after_lowering(
                 request=request, artifact_store=artifact_store, preprocessing=preprocessing,
-                database_schema=saved["database"], design_ir=saved["design"],
+                database_schema=saved["database"], design_ir=project_lowering_design(saved["design"]),
                 frontend_ir=saved["frontend"]["frontend_ir"], backend_routes=saved["backend_routes"],
                 fixture_ir=saved["fixture_ir"], project_manifest=project_manifest,
                 root_id=root_id, states=states, artifacts=artifacts,
@@ -426,7 +429,7 @@ class Compiler:
             design_stage = DesignPass(model, artifact_store.root)
             await self._log(
                 "Compiler",
-                "Running REQUIREMENT CONTRACT, REQUIREMENT TO API, and full top-down MODULE DECOMPOSITION passes.",
+                "Running requirement analysis, incremental module architecture, leaf-first refinement, and global backend review.",
             )
             design = design_stage.compile(
                 preprocessing.requirement_ir,
@@ -441,11 +444,15 @@ class Compiler:
             artifacts.update(artifact_store.write_design(design_ir=design.design_ir))
             if not design.ok:
                 failed_nodes = sorted(node_id for node_id, state in states.items() if state == "FAILED")
+                if not failed_nodes:
+                    failed_nodes = list(preprocessing.requirement_ir.get("atomic_units", []))
                 await self._log(
                     "Compiler",
-                    "DESIGN validation issues recorded; continuing with committed/partial Design IR.",
-                    "warning",
+                    "Backend blueprint validation failed; stopping before backend lowering.",
+                    "error",
                 )
+                return CompilationResult(ok=False, root_id=root_id, states=states,
+                                         failed_nodes=failed_nodes, artifacts=artifacts)
 
             self._runtime.traceability.merge_design_links(design_traceability(design.design_ir))
             history.commit("3.1 backend design", [".arc"])
@@ -453,11 +460,18 @@ class Compiler:
 
         else:
             design = SimpleNamespace(design_ir=saved["design"])
+            if design.design_ir.get("ir_kind") == "backend_design" and design.design_ir.get("status") != "RESOLVED":
+                await self._log("Compiler", "Checkpoint backend blueprint is not RESOLVED.", "error")
+                return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
             self._runtime.traceability.merge_design_links(design_traceability(design.design_ir))
 
         if rank < 3:
             checkpoints.save("backend-ir", fixture_ir=fixture_ir,
                              database_manifest=lowered_database.manifest, design=design.design_ir)
+
+        # Keep canonical blueprints in design artifacts/checkpoints. Existing
+        # consumers receive a deterministic view, never a second model design.
+        design = SimpleNamespace(design_ir=project_lowering_design(design.design_ir))
 
         # ===================================================================
         #                  Backend Lowering: Symbol Planning

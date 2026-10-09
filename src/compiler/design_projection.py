@@ -66,7 +66,7 @@ def project_api_module(module: dict[str, Any]) -> dict[str, Any]:
 def _compact_field(field: dict[str, Any]) -> dict[str, Any]:
     return {
         key: copy.deepcopy(field[key])
-        for key in ("semantic_id", "name", "type", "required")
+        for key in ("semantic_id", "name", "type", "required", "nullable", "backend_type")
         if key in field
     }
 

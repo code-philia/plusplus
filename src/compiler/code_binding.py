@@ -128,7 +128,7 @@ class CodeBindingLowerer:
             route = copy.deepcopy(backend_routes.get(module_id)) if kind == "API" else None
             binding = {
                 "module_id": module_id,
-                "owner_requirements": [owner] if owner else [],
+                "owner_requirements": _strings(module.get("requirement_ids")) or ([owner] if owner else []),
                 "kind": kind,
                 "file": str(lowered.get("path", "")),
                 "symbol": symbol,
@@ -252,7 +252,7 @@ class CodeBindingLowerer:
                 {
                     "module_id": client_id,
                     "source_ir_id": api_id,
-                    "owner_requirements": [owner] if owner else [],
+                    "owner_requirements": _strings(backend_module.get("requirement_ids")) or ([owner] if owner else []),
                     "kind": "API_CLIENT",
                     "file": str(location.get("path", "")),
                     "symbol": symbol,

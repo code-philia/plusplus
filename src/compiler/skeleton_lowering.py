@@ -261,7 +261,12 @@ def _render_contract_file(symbols: list[dict[str, Any]], errors: list[str]) -> s
                 )
                 continue
             field_name = str(field_item.get("name", ""))
-            type_name = _typescript_type(field_item.get("type"), DESIGN_TYPE_MAP, errors, "ARC3307")
+            if "backend_type" in field_item:
+                type_name = _render_backend_type(field_item["backend_type"], errors)
+                if field_item.get("nullable"):
+                    type_name += " | null"
+            else:
+                type_name = _typescript_type(field_item.get("type"), DESIGN_TYPE_MAP, errors, "ARC3307")
             optional = "" if bool(field_item.get("required", True)) else "?"
             if not _is_typescript_property(field_name):
                 errors.append(
@@ -271,6 +276,23 @@ def _render_contract_file(symbols: list[dict[str, Any]], errors: list[str]) -> s
             lines.append(f"  {field_name}{optional}: {type_name};")
         lines.extend(["}", ""])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_backend_type(value: dict[str, Any], errors: list[str]) -> str:
+    """Render the resolved neutral type tree supplied by blueprint projection."""
+    if value["kind"] == "scalar":
+        return _typescript_type(value["name"], DESIGN_TYPE_MAP, errors, "ARC3307")
+    if value["kind"] == "array":
+        return "Array<" + _render_backend_type(value["items"], errors) + ">"
+    if value["kind"] == "enum":
+        import json
+        return " | ".join(json.dumps(item) for item in value["values"])
+    properties = []
+    for field in value["fields"]:
+        optional = "" if field["required"] else "?"
+        nullable = " | null" if field["nullable"] else ""
+        properties.append(f'{field["name"]}{optional}: {_render_backend_type(field["type"], errors)}{nullable}')
+    return "{ " + "; ".join(properties) + " }"
 
 
 def _coalesce_render_fields(

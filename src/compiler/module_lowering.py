@@ -599,6 +599,7 @@ def _render_module(
             f" * @arc-requirement {function_symbol.get('owner_requirement', '')}",
             f" * @arc-kind {kind}",
             " * @arc-generated skeleton",
+            *[" * " + line.replace("*/", "* /") for line in str(module.get("spec", "")).splitlines()],
             " */",
         ]
     )

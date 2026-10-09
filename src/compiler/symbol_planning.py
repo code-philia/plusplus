@@ -473,6 +473,9 @@ class GlobalSymbolPlanner:
             "type": field_type,
             "required": required,
         }
+        if "backend_type" in value:
+            normalized["backend_type"] = copy.deepcopy(value["backend_type"])
+            normalized["nullable"] = bool(value.get("nullable", False))
         self._record_semantic_value(
             normalized,
             source_id=source_id,
