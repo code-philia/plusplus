@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
@@ -95,6 +96,9 @@ class Compiler:
     async def compile(self, request: CompilationRequest) -> CompilationResult:
         visual_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="arc-visual-analysis")
         try:
+            # TEMP(database-only-debug): remove this switch and helper before release.
+            if os.environ.get("ARC_DEBUG_DATABASE_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}:
+                return await self._compile_database_only_debug(request)
             return await self._compile(request, visual_executor)
         except GitStageError as exc:
             await self._log("Compiler", str(exc), "error")
@@ -108,6 +112,78 @@ class Compiler:
             return CompilationResult(ok=False)
         finally:
             await asyncio.to_thread(visual_executor.shutdown, wait=True)
+
+    async def _compile_database_only_debug(self, request: CompilationRequest) -> CompilationResult:
+        """TEMP(database-only-debug): remove before release; no full-pipeline checkpoint."""
+        artifacts: dict[str, str] = {}
+        if request.resume or request.start_from != "zero":
+            await self._log("Compiler", "ARC_DEBUG_DATABASE_ONLY requires a fresh run (no resume/start-from).", "error")
+            return CompilationResult(ok=False)
+        store = CompilerArtifactStore(request.output_dir)
+        await self._log("Compiler", "TEMP database-only debug: preprocessing -> database design -> project initialization -> SQLite lowering -> stop.")
+        preprocessing = self._preprocessor.compile(request.requirement_path)
+        ir = preprocessing.requirement_ir or {}
+        root_id = ir.get("root_id")
+        requirement_ids = list(ir.get("node_order", []))
+        states = {node_id: "DISCOVERED" for node_id in requirement_ids}
+        artifacts.update(store.write_preprocessing(
+            requirement_ir=preprocessing.requirement_ir,
+            dependency_graph=preprocessing.dependency_graph,
+        ))
+        if requirement_ids:
+            self._runtime.traceability.store_requirement_ids(requirement_ids)
+        if not preprocessing.ok:
+            for error in preprocessing.errors:
+                await self._log("Compiler", error, "error")
+            return CompilationResult(ok=False, root_id=root_id, states=states,
+                                     failed_nodes=requirement_ids, artifacts=artifacts)
+
+        self._runtime.events.mark_phase_started("DATABASE", "Database-only debug: designing ER and relational schema.")
+        try:
+            model = self._model or Model.from_env()
+            if hasattr(model, "set_usage_path"):
+                model.set_usage_path(store.root / "model_usage.jsonl")
+        except ModelConfigurationError as exc:
+            await self._log("Compiler", str(exc), "error")
+            return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
+        database = DatabaseSchemaPass(model, store.root).compile(
+            preprocessing.requirement_ir, preprocessing.dependency_graph,
+        )
+        states.update(database.node_states)
+        artifacts["database_schema"] = store.write_database_schema(database.schema)
+        artifacts["database_schema_ir"] = artifacts["database_schema"]
+        artifacts["database_er_model"] = str(store.database_root / "er_model.json")
+        self._runtime.traceability.merge_database_schema_links(database_traceability(database.schema))
+        for warning in database.warnings:
+            await self._log("Compiler", warning, "warning")
+        for error in database.errors:
+            await self._log("Compiler", error, "error")
+        if not database.ok:
+            return CompilationResult(ok=False, root_id=root_id, states=states,
+                                     failed_nodes=sorted(key for key, value in states.items() if value == "FAILED"),
+                                     artifacts=artifacts)
+
+        self._runtime.events.mark_phase_started("PROJECT", "Database-only debug: initializing project after database design.")
+        project = ProjectInitializer(request.output_dir, web_port=request.web_port).initialize()
+        artifacts.update(project.artifacts)
+        if not project.ok:
+            for error in project.errors:
+                await self._log("Compiler", error, "error")
+            return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
+        manifest, error = store.read_project_manifest()
+        if error or manifest is None:
+            await self._log("Compiler", error or "Missing project manifest.", "error")
+            return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
+
+        self._runtime.events.mark_phase_started("DATABASE", "Database-only debug: generating SQLite sources.")
+        lowered = lower_database(request.output_dir, store, manifest)
+        artifacts.update(lowered.artifacts)
+        for warning in lowered.warnings:
+            await self._log("Compiler", warning, "warning")
+        for error in lowered.errors:
+            await self._log("Compiler", error, "error")
+        await self._log("Compiler", "TEMP database-only debug stopped after SQLite lowering; backend/frontend design, build and TDD skipped.")
+        return CompilationResult(ok=lowered.ok, root_id=root_id, states=states, artifacts=artifacts)
 
     async def _compile(self, request: CompilationRequest,
                        visual_executor: ThreadPoolExecutor) -> CompilationResult:
@@ -329,9 +405,7 @@ class Compiler:
                     ok=False, root_id=root_id, states=states, artifacts=artifacts,
                 )
             history.commit("2.2 database schema lowering", [
-                ".arc", "backend/src/db", "backend/sql", "backend/init-db.mjs",
-                "backend/database-schema.mjs", "backend/database-schema.d.mts",
-                "backend/database-baseline.mjs", "backend/database-baseline.d.mts", "shared/src",
+                ".arc", "backend/src/db", "backend/sql", "shared/src",
             ])
             stage_checkpoint(request.output_dir, "database-lowering")
             failed_gate = await self._build_gate(request, "2.2 database schema lowering", root_id, states, artifacts)

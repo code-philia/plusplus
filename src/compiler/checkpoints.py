@@ -250,13 +250,3 @@ def install_restart_dependencies(root: Path) -> None:
         raise GitStageError(f"Restart dependency installation failed: {exc}") from exc
     if result.returncode:
         raise GitStageError(f"Restart npm ci failed: {result.stderr or result.stdout}")
-    if (root / "backend/init-db.mjs").is_file():
-        node = resolve_executable("node", os.environ)
-        if node is None:
-            raise GitStageError("node is required to rebuild the ignored database in the restart worktree")
-        try:
-            seeded = run_command([node, "init-db.mjs"], cwd=root / "backend", environment=os.environ, timeout=120)
-        except Exception as exc:
-            raise GitStageError(f"Restart database initialization failed: {exc}") from exc
-        if seeded.returncode:
-            raise GitStageError(f"Restart database initialization failed: {seeded.stderr or seeded.stdout}")

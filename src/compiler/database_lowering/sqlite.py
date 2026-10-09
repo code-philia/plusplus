@@ -83,7 +83,7 @@ class SQLiteLoweringStrategy:
         from .orm import render_bindings
         bindings, tables = render_bindings(schema, symbols, files, storage_type=storage_type, storage_checks=storage_checks)
         statements = render_statements(schema)
-        sources = {**bindings, **render_runtime_sources(statements, schema['tables']),
+        sources = {**bindings, **render_runtime_sources(statements),
                    'backend/sql/schema.sqlite.sql': render_ddl(schema)}
         warnings = []
         if any(column['type'] == 'integer' for table in schema['tables'] for column in table['columns']):

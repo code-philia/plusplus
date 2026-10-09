@@ -83,7 +83,7 @@ class DatabaseLowerer:
                 'schema_sha256': hashlib.sha256(json.dumps(schema, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
                 'tables': lowered.tables,
                 'initialization': {'mode': 'create_if_not_exists', 'statements': lowered.statements,
-                                   'entrypoint': 'backend/init-db.mjs', 'executed': False},
+                                   'entrypoint': 'backend/src/db/init.ts', 'executed': False},
                 'ddl': {'sqlite': 'backend/sql/schema.sqlite.sql'},
                 'policies': lowered.policies,
                 'runtime_rules': copy.deepcopy(schema.get('runtime_rules', [])),

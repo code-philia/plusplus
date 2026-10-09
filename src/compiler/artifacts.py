@@ -261,11 +261,6 @@ class CompilerArtifactStore:
                 or not (
                     normalized.endswith((".ts", ".tsx"))
                     or normalized in {
-                        "backend/init-db.mjs",
-                        "backend/database-baseline.mjs",
-                        "backend/database-baseline.d.mts",
-                        "backend/database-schema.mjs",
-                        "backend/database-schema.d.mts",
                         "backend/sql/schema.sqlite.sql",
                     }
                 )
@@ -277,11 +272,6 @@ class CompilerArtifactStore:
             if not (
                 normalized.startswith("backend/src/")
                 or normalized in {
-                    "backend/init-db.mjs",
-                    "backend/database-baseline.mjs",
-                    "backend/database-baseline.d.mts",
-                    "backend/database-schema.mjs",
-                    "backend/database-schema.d.mts",
                     "backend/sql/schema.sqlite.sql",
                 }
                 or normalized.startswith("shared/src/")

@@ -82,7 +82,7 @@ class TypeLowerer:
                         continue
                     contract_files.setdefault(path, []).append(symbol)
                 elif kind == "ENTITY_TYPE":
-                    if not path.startswith("backend/src/db/schema/"):
+                    if path != "backend/src/db/schema.ts":
                         errors.append(
                             f"ARC3304 TYPE_LOCATION_MISSING: entity {symbol_id} is outside database schema."
                         )
@@ -92,13 +92,8 @@ class TypeLowerer:
             for path, rows in sorted(contract_files.items()):
                 sources[path] = _render_contract_file(rows, errors)
                 definitions.extend(_definition_rows(rows, path, "DATA_CONTRACT"))
+            # Database lowering owns table bindings and inferred record types.
             for path, rows in sorted(entity_files.items()):
-                if len(rows) != 1:
-                    errors.append(
-                        f"ARC3305 ENTITY_TYPE_INVALID: expected one entity type in {path}, found {len(rows)}."
-                    )
-                    continue
-                sources[path] = _render_entity_type_file(rows[0], errors)
                 definitions.extend(_definition_rows(rows, path, "ENTITY_TYPE"))
 
             runtime_path = "shared/src/contracts/runtime.ts"

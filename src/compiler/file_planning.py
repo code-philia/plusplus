@@ -16,8 +16,10 @@ SYSTEM_FILES = (
     ("shared/src/contracts/runtime.ts", "RUNTIME_TYPES", "SKELETON_COMPILER"),
     ("backend/src/api/index.ts", "API_BARREL", "SKELETON_COMPILER"),
     ("backend/src/functions/index.ts", "FUNCTION_BARREL", "SKELETON_COMPILER"),
-    ("backend/src/db/schema/index.ts", "DATABASE_SCHEMA_BARREL", "SKELETON_COMPILER"),
+    ("backend/src/db/schema.ts", "DATABASE_SCHEMA", "SKELETON_COMPILER"),
     ("backend/src/db/repositories/index.ts", "REPOSITORY_BARREL", "SKELETON_COMPILER"),
+    ("backend/src/db/initialize.ts", "DATABASE_INITIALIZATION", "SKELETON_COMPILER"),
+    ("backend/src/db/init.ts", "DATABASE_INIT_ENTRY", "SKELETON_COMPILER"),
     ("backend/src/db/client.ts", "DATABASE_CLIENT", "SKELETON_COMPILER"),
     ("backend/src/generated/router.ts", "ROUTER", "SKELETON_COMPILER"),
     ("backend/src/generated/module-registry.ts", "MODULE_REGISTRY", "SKELETON_COMPILER"),
@@ -268,7 +270,6 @@ class GlobalFilePlanner:
             )
 
     def _plan_entity_files(self, symbols: dict[str, dict[str, Any]]) -> None:
-        entity_paths: dict[str, str] = {}
         rows = sorted(
             (
                 symbol
@@ -284,21 +285,14 @@ class GlobalFilePlanner:
                     f"ARC3208 ENTITY_PLACEMENT_INVALID: {symbol.get('id')} has no entity key."
                 )
                 continue
-            path = entity_paths.get(entity)
-            if path is None:
-                path = self._allocate_path(
-                    "backend/src/db/schema",
-                    _kebab_case(entity),
-                    qualifier=entity,
-                )
-                entity_paths[entity] = path
+            path = "backend/src/db/schema.ts"
             self._place_symbol(
                 symbol,
                 path,
                 role="DATABASE_SCHEMA",
                 owner="SKELETON_COMPILER",
                 mutability="FROZEN",
-                origin="DATABASE_SCHEMA",
+                origin="SYSTEM",
             )
 
     def _plan_contract_files(

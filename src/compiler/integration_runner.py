@@ -4,22 +4,23 @@ from __future__ import annotations
 
 
 def integration_runner_source() -> str:
-    return r'''import { spawn } from "node:child_process";
+    return r'''/* Generated TypeScript test supervisor. */
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 const testsRoot = fileURLToPath(new URL("../", import.meta.url));
 const projectRoot = resolve(testsRoot, "..");
-const active = new Set();
-const stopping = new WeakMap();
+const active = new Set<ChildProcess>();
+const stopping = new WeakMap<ChildProcess, Promise<void>>();
 let interrupted = false;
 
-function pause(milliseconds) {
+function pause(milliseconds: number) {
   return new Promise((done) => setTimeout(done, milliseconds));
 }
 
-function start(args, options = {}) {
+function start(args: string[], options: SpawnOptions = {}) {
   const child = spawn(process.execPath, args, {
     cwd: projectRoot,
     stdio: "inherit",
@@ -32,31 +33,32 @@ function start(args, options = {}) {
   return child;
 }
 
-function waitFor(child) {
-  return new Promise((done, fail) => {
+function waitFor(child: ChildProcess) {
+  return new Promise<number>((done, fail) => {
     child.once("error", fail);
     child.once("close", (code) => done(code ?? 1));
   });
 }
 
-function stop(child) {
-  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) {
+function stop(child: ChildProcess): Promise<void> {
+  const pid = child.pid;
+  if (!pid || child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve();
   }
-  if (stopping.has(child)) return stopping.get(child);
+  if (stopping.has(child)) return stopping.get(child)!;
   const task = (async () => {
     if (process.platform === "win32") {
-      await new Promise((done) => {
-        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+      await new Promise<void>((done) => {
+        const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
           stdio: "ignore",
           windowsHide: true,
         });
-        killer.once("error", done);
-        killer.once("close", done);
+        killer.once("error", () => done());
+        killer.once("close", () => done());
       });
     } else {
       try {
-        process.kill(-child.pid, "SIGTERM");
+        process.kill(-pid, "SIGTERM");
       } catch {
         child.kill("SIGTERM");
       }
@@ -67,7 +69,7 @@ function stop(child) {
     if (child.exitCode === null && child.signalCode === null) {
       try {
         if (process.platform === "win32") child.kill("SIGKILL");
-        else process.kill(-child.pid, "SIGKILL");
+        else process.kill(-pid, "SIGKILL");
       } catch {
         child.kill("SIGKILL");
       }
@@ -88,7 +90,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 async function freePort() {
   const listener = createServer();
   try {
-    await new Promise((done, fail) => {
+    await new Promise<void>((done, fail) => {
       listener.once("error", fail);
       listener.listen(0, "127.0.0.1", done);
     });
@@ -96,11 +98,11 @@ async function freePort() {
     if (!address || typeof address === "string") throw new Error("No TCP port allocated");
     return address.port;
   } finally {
-    await new Promise((done) => listener.close(done));
+    await new Promise<void>((done) => listener.close(() => done()));
   }
 }
 
-async function waitUntilReady(server, baseUrl) {
+async function waitUntilReady(server: ChildProcess, baseUrl: string) {
   const deadline = Date.now() + 20000;
   while (!interrupted && Date.now() < deadline) {
     if (server.exitCode !== null || server.signalCode !== null) {
@@ -130,10 +132,10 @@ async function main() {
 
     const port = await freePort();
     const baseUrl = `http://127.0.0.1:${port}`;
-    const server = start([resolve(testsRoot, "support/server.mjs")], {
+    const server = start([fileURLToPath(import.meta.resolve("tsx/cli")), resolve(testsRoot, "support/server.ts")], {
       env: { ...process.env, NODE_ENV: "test", DATABASE_URL: ":memory:", PORT: String(port) },
     });
-    let serverError;
+    let serverError: Error | undefined;
     server.once("error", (error) => { serverError = error; });
     await waitUntilReady(server, baseUrl);
     if (serverError) throw serverError;
