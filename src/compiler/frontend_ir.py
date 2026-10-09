@@ -8,7 +8,6 @@ from enum import StrEnum
 from typing import Any
 
 
-FRONTEND_IR_SCHEMA_VERSION = 2
 UI_SCOPE_VALUES = {"UI_REQUIRED", "UI_AFFECTING", "NO_UI"}
 
 
@@ -375,7 +374,6 @@ FRONTEND_DESIGN_IR_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "schema_version",
         "visual_references",
         "layouts",
         "pages",
@@ -385,7 +383,6 @@ FRONTEND_DESIGN_IR_SCHEMA: dict[str, Any] = {
         "requirement_links",
     ],
     "properties": {
-        "schema_version": {"type": "integer", "const": FRONTEND_IR_SCHEMA_VERSION},
         "visual_references": {"type": "array", "items": VISUAL_REFERENCE_SCHEMA},
         "layouts": {"type": "array", "items": LAYOUT_SCHEMA},
         "pages": {"type": "array", "items": PAGE_SCHEMA},

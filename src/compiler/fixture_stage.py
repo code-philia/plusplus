@@ -18,7 +18,6 @@ from .database_design import schema_for_requirement
 from .model_client import StructuredModel, describe_model_error
 
 
-FIXTURE_IR_SCHEMA_VERSION = 1
 FIXTURE_STATUS = "FIXTURES_FROZEN"
 
 FIXTURE_VALUE_SCHEMA: dict[str, Any] = {
@@ -153,7 +152,6 @@ class FixturePass:
             sets.extend(compiled)
             errors.extend(local_errors)
         fixture_ir = {
-            "schema_version": FIXTURE_IR_SCHEMA_VERSION,
             "status": FIXTURE_STATUS if not errors else "FIXTURE_FAILED",
             "fixture_sets": sets,
         }

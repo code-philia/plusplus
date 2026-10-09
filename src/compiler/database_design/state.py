@@ -8,7 +8,6 @@ import json
 from typing import Any
 
 from ..ir import ERModelIR
-from ..ir.database import ER_MODEL_VERSION
 from .common import (
     _append_unique,
     _compact_properties,
@@ -17,7 +16,7 @@ from .common import (
     _normalize_identifier,
     _relationship_id,
 )
-from .contracts import FIELD_TYPES, IDENTIFIER_PATTERN, RELATIONSHIP_TYPES, SCHEMA_VERSION
+from .contracts import FIELD_TYPES, IDENTIFIER_PATTERN, RELATIONSHIP_TYPES
 
 
 class DatabaseSchemaState:
@@ -210,7 +209,6 @@ class DatabaseSchemaState:
             for requirement_id in sorted(requirement_ids)
         }
         return {
-            "schema_version": SCHEMA_VERSION,
             "status": status,
             "entities": [self._public_entity(item) for item in self._ordered_entities()],
             "relationships": [copy.deepcopy(self.relationships[key]) for key in sorted(self.relationships)],
@@ -222,7 +220,6 @@ class DatabaseSchemaState:
         """Return the logical model without generated foreign keys or join entities."""
         return {
             "ir_kind": "er_model",
-            "ir_version": ER_MODEL_VERSION,
             "status": "PROPOSED",
             "entities": [self._public_entity(item) for item in self._ordered_entities()],
             "relationships": [

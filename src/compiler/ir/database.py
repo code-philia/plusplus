@@ -1,9 +1,7 @@
-"""Logical ER and refined MySQL schema contracts; neither contains SQL text."""
+"""Logical ER and database-neutral relational schema contracts; neither contains SQL text."""
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-ER_MODEL_VERSION = 1
-SCHEMA_IR_VERSION = 1
 
 
 class ERAttribute(TypedDict):
@@ -42,19 +40,12 @@ class ERRelationship(TypedDict):
 
 class ERModelIR(TypedDict):
     ir_kind: Literal["er_model"]
-    ir_version: int
     status: Literal["RESOLVED", "PROPOSED"]
     entities: list[EREntity]
     relationships: list[ERRelationship]
 
 
-class MySQLType(TypedDict):
-    name: Literal["CHAR", "VARCHAR", "LONGTEXT", "BIGINT", "DOUBLE", "BOOLEAN", "DATE", "DATETIME", "JSON"]
-    length: int | None
-    fractional_seconds: int | None
-    unsigned: bool
-    character_set: str | None
-    collation: str | None
+SchemaDataType = Literal["string", "integer", "number", "boolean", "date", "datetime", "json", "uuid"]
 
 
 class SchemaDefault(TypedDict):
@@ -64,13 +55,11 @@ class SchemaDefault(TypedDict):
 
 class SchemaColumn(TypedDict):
     name: str
-    logical_type: str
-    mysql_type: MySQLType
+    type: SchemaDataType
     nullable: bool
     default: SchemaDefault | None
-    auto_increment: bool
+    generation: Literal["none", "application_uuid"]
     description: str
-    comment: str
     origin: str
     properties: dict[str, Any]
     requirement_ids: list[str]
@@ -85,7 +74,7 @@ class SchemaConstraint(TypedDict):
     referenced_columns: NotRequired[list[str]]
     on_delete: NotRequired[Literal["RESTRICT"]]
     on_update: NotRequired[Literal["RESTRICT"]]
-    # A structured predicate. A future MySQL renderer quotes its column and
+    # A structured predicate. A database strategy quotes its column and
     # literal operands; arbitrary SQL from model output is never accepted.
     predicate: NotRequired[dict[str, Any]]
 
@@ -93,10 +82,6 @@ class SchemaConstraint(TypedDict):
 class SchemaTable(TypedDict):
     name: str
     description: str
-    comment: str
-    engine: Literal["InnoDB"]
-    character_set: Literal["utf8mb4"]
-    collation: Literal["utf8mb4_bin"]
     columns: list[SchemaColumn]
     constraints: list[SchemaConstraint]
     requirement_ids: list[str]
@@ -112,16 +97,12 @@ class RuntimeRule(TypedDict):
 
 class SchemaIR(TypedDict):
     ir_kind: Literal["database_schema"]
-    ir_version: int
     status: Literal["RESOLVED", "PROPOSED"]
-    target: dict[str, str]
-    policies: dict[str, Any]
     tables: list[SchemaTable]
     runtime_rules: list[RuntimeRule]
     traceability: dict[str, Any]
-    # Derived compatibility view for current fixture/backend/SQLite consumers.
-    # These fields are not a second physical schema authority.
-    schema_version: int
+    # Derived compatibility view for existing requirement/backend consumers.
+    # These fields are not a second schema authority.
     entities: list[EREntity]
     relationships: list[dict[str, Any]]
     constraints: list[dict[str, Any]]

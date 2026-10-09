@@ -7,11 +7,11 @@ producers and consumers can share the same definitions.
 from .database import (
     ERAttribute, EREntity, ERModelIR, ERRelationship,
     SchemaColumn, SchemaConstraint, SchemaDefault, SchemaIR, SchemaTable,
-    MySQLType, RuntimeRule,
+    SchemaDataType, RuntimeRule,
 )
 
 __all__ = [
-    "ERAttribute", "EREntity", "ERModelIR", "ERRelationship", "MySQLType",
+    "ERAttribute", "EREntity", "ERModelIR", "ERRelationship", "SchemaDataType",
     "RuntimeRule", "SchemaColumn", "SchemaConstraint", "SchemaDefault",
     "SchemaIR", "SchemaTable",
 ]

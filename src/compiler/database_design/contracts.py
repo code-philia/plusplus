@@ -6,7 +6,6 @@ import re
 from typing import Any
 
 
-SCHEMA_VERSION = 2
 
 
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")

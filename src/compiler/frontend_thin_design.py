@@ -13,7 +13,7 @@ from typing import Any
 from core.logging import SynchronousLog
 
 from .frontend_ir import FrontendDesignErrorCode, FrontendDesignIssue, schema_shape_errors
-from .frontend_thin_ir import FRONTEND_DESIGN_IR_SCHEMA, FRONTEND_IR_SCHEMA_VERSION, repair_shape, shape_errors
+from .frontend_thin_ir import FRONTEND_DESIGN_IR_SCHEMA, repair_shape, shape_errors
 from .model_client import StructuredModel, describe_model_error
 from .trace_payload import format_payload_trace
 
@@ -201,7 +201,7 @@ class ThinFrontendDesignPass:
             visual_references=visual_references,
         )
         candidate = {
-            "schema_version": FRONTEND_IR_SCHEMA_VERSION,
+
             "visual_references": copy.deepcopy(visual_references),
             "screen_components": [],
             "placements": [],
@@ -1359,7 +1359,7 @@ def project_frontend_runtime_ir(frontend_ir: dict[str, Any]) -> dict[str, Any]:
         }),
         "visual_reference_ids": copy.deepcopy(row["visual_reference_ids"]),
     } for row in frontend_ir.get("requirement_links", [])]
-    return {"schema_version": 2, "visual_references": copy.deepcopy(frontend_ir.get("visual_references", [])), "layouts": [], "pages": pages, "components": components, "stores": stores, "api_dependencies": dependencies, "requirement_links": links}
+    return {"visual_references": copy.deepcopy(frontend_ir.get("visual_references", [])), "layouts": [], "pages": pages, "components": components, "stores": stores, "api_dependencies": dependencies, "requirement_links": links}
 
 
 def _render_obligations(observable_states: list[Any]) -> list[dict[str, Any]]:

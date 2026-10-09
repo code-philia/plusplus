@@ -16,7 +16,6 @@ from .contracts import (
     FIELD_TYPES,
     IDENTIFIER_PATTERN,
     RELATIONSHIP_TYPES,
-    SCHEMA_VERSION,
 )
 
 
@@ -29,8 +28,6 @@ def validate_database_schema(
 
     if not isinstance(schema, dict):
         return ["schema must be a JSON object"]
-    if schema.get("schema_version") != SCHEMA_VERSION:
-        return [f"schema_version must be {SCHEMA_VERSION}"]
     if schema.get("status") != "RESOLVED":
         return ["schema status must be RESOLVED"]
     entities = schema.get("entities")

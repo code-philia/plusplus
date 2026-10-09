@@ -13,7 +13,6 @@ from .frontend_ir import (
     schema_shape_errors,
 )
 
-FRONTEND_IR_SCHEMA_VERSION = 6
 
 
 def _strings(*, maximum: int = 64) -> dict[str, Any]:
@@ -163,11 +162,10 @@ FRONTEND_DESIGN_TABLE_SCHEMAS = {
 FRONTEND_DESIGN_IR_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": [
-        "schema_version",
         *(key for key in FRONTEND_DESIGN_TABLE_SCHEMAS if key not in OPTIONAL_FRONTEND_DESIGN_TABLES),
         "requirement_links",
     ],
-    "properties": {"schema_version": {"type": "integer", "const": FRONTEND_IR_SCHEMA_VERSION}, **FRONTEND_DESIGN_TABLE_SCHEMAS, "requirement_links": {"type": "array", "items": REQUIREMENT_LINK_SCHEMA}},
+    "properties": {**FRONTEND_DESIGN_TABLE_SCHEMAS, "requirement_links": {"type": "array", "items": REQUIREMENT_LINK_SCHEMA}},
 }
 
 

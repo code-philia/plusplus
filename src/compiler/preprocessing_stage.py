@@ -72,7 +72,6 @@ class RequirementPreprocessor:
         errors.extend(error for error in atomic_wave_errors if error not in errors)
 
         requirement_ir = {
-            "schema_version": 1,
             "source": {
                 "document": source_path.name,
                 "sha256": hashlib.sha256(source_bytes).hexdigest(),
