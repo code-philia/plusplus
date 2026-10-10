@@ -69,39 +69,13 @@ def frontend_ir_traceability(ir: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return links
 
 
-def preorder(requirement_ir: dict[str, Any]) -> list[str]:
-    """Depth-first document order; dependency edges supply context, not scheduling."""
-    nodes = requirement_ir.get("nodes", {})
-    source = list(dict.fromkeys([*requirement_ir.get("node_order", []), *nodes]))
-    children: dict[str, list[str]] = {}
-    for rid in source:
-        if rid in nodes:
-            children.setdefault(nodes[rid].get("parent_id"), []).append(rid)
-    result, seen = [], set()
-
-    def visit(rid: str) -> None:
-        if rid in seen or rid not in nodes:
-            return
-        seen.add(rid)
-        result.append(rid)
-        for child in children.get(rid, []):
-            visit(child)
-
-    visit(requirement_ir.get("root_id"))
-    for rid in source:
-        if rid in nodes and nodes[rid].get("parent_id") not in nodes:
-            visit(rid)
-    for rid in source:
-        visit(rid)
-    return result
-
-
 def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
-                  related_ids: set[str]) -> dict[str, Any]:
+                  related_ids: set[str], *, include_related: bool = False) -> dict[str, Any]:
     rows = {row["id"]: row for table in TABLES for row in ir[table]}
     ui = {row["id"]: row for row in ir["ui"]}
     parents = {child: row["id"] for row in ui.values() for child in row.get("children", [])}
-    owned = {key for key, row in rows.items() if rid in row.get("requirement_ids", [])}
+    owners = related_ids | {rid} if include_related else {rid}
+    owned = {key for key, row in rows.items() if owners & set(row.get("requirement_ids", []))}
     related = [row for row in ui.values() if related_ids & set(row.get("requirement_ids", []))]
     candidates = ranked(related, requirement, 8)
     candidates += ranked(list(ui.values()), requirement, 12)

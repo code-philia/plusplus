@@ -244,57 +244,17 @@ add a criterion describing stable display_order sorting to clarify spec. INVALID
 page_size input, rename a field, remove a call, or add a new read column at refinement time.
 Criteria must remain nonempty and use only supplied own/inherited scenario IDs.
 '''
-PARENT_CONTEXT_SCHEMA = object_schema({
-    'shared_rules': {'type': 'array', 'items': {'type': 'string'}},
-    'acceptance_criteria': schema_for(list[AcceptanceCriterion]),
-})
 from ..ir.backend import RequirementBlueprint
-PARENT_DESIGN_SCHEMA = object_schema({
-    'role': {'enum': ['CATEGORY', 'WORKFLOW']},
-    'requirement': schema_for(RequirementBlueprint),
-    'new_types': schema_for(list[BackendTypeDefinition]),
-    'new_modules': schema_for(list[BackendModule]),
-    'updates': schema_for(list[BackendModule]),
-})
-PARENT_CONTEXT_PROMPT = COMMON + '''Read this parent requirement before its children.
-Extract only explicit inherited business rules, terminology and falsifiable parent criteria.
-Do not invent modules. Criteria scenario_ids may reference only supplied parent scenarios;
-use [] for rules without an explicit scenario. Preserve the inherited ancestor rules.
-'''
-PARENT_CONTEXT_PROMPT += '''Return exactly shared_rules and acceptance_criteria, each a list.
-Example: {"shared_rules":["Only owners may modify orders"],"acceptance_criteria":[]} when
-the parent states that rule but provides no scenario. Reference only the parent's supplied
-scenario IDs, not child IDs or invented IDs. Child/context failure prevents parent finalization;
-do not claim that an unprocessed child has already passed.
-'''
-PARENT_DESIGN_PROMPT = COMMON + '''Compose the parent blueprint after its children have completed.
-CATEGORY means grouping/context: associate relevant existing child APIs, create no new modules.
-Repairs of existing child modules are allowed for inherited rule conflicts.
-WORKFLOW means an explicit whole business operation: add orchestration only for uncovered
-parent behavior. Tree containment is not itself a module call. Prefer existing interfaces.
-Return the parent requirement blueprint, new types/modules, and full module replacements.
-New ids must be local KIND.Name; calls/API refs may use these or exact supplied existing ids.
-Update existing interfaces only if required by a specific inherited/parent criterion; prefer composition/new orchestration when sufficient.
-Include ALL caller changes required by a replacement, including callers outside this subtree.
-Preserve existing module id/kind/name and criteria; preserve old behavior and semantic identities
-needed by other requirements. Update only modules supplied in editable_modules.
-Do not remove modules or change existing requirement contracts. Never silently redefine types.
-The compiler derives usage associations and verifies all affected requirements before commit.
-'''
-PARENT_DESIGN_PROMPT += '''Parent-specific checks:
-requirement.requirement_id must equal supplied requirement_id. Cover every parent's own scenario;
-keep acceptance_criteria nonempty, even for a grouping parent (use a concrete combination criterion).
-CATEGORY must return new_modules=[]; it may associate existing child APIs and repair existing
-modules through updates. WORKFLOW may introduce local KIND.Name modules for explicit composition.
-Example category: api_ids=["REQ-1.1::API.GetHomeBanners"], new_modules=[], updates=[].
-new_types must use fresh unique ids, never even repeat an existing type definition here.
-New module ids must be unique local ids with matching kind; calls and api_ids may reference only
-supplied module ids or those new local ids. Every update is a COMPLETE module, not an id/patch.
-Each update target must be unique and listed in editable_modules. Preserve its id/kind/name
-exactly and retain EVERY existing acceptance criterion unchanged; append new criteria if needed.
-Example: to add nullable output display_order, return the entire existing module with the same
-qualified id, old fields/criteria, and the new output, plus complete replacements of any callers
-whose contracts/specs need adjustment. Do not rename an old criterion or silently change its then.
-Do not remove modules or orphan them. The compiler recomputes requirement_ids from API reachability;
-all remaining graph/type/access checks above still apply, including outside-subtree callers.
-'''
+PARENT_DESIGN_SCHEMA = object_schema({'requirement': schema_for(RequirementBlueprint)})
+PARENT_DESIGN_PROMPT = COMMON + """Integrate this non-leaf requirement once, after all descendants.
+Only describe composition and frontend/backend integration using available_api_ids from the completed descendants.
+Return exactly {"requirement": the complete parent RequirementBlueprint}.
+Do not create or update backend APIs, FUNC/DB modules, types, interfaces, call graphs or child contracts.
+Tree containment is not a backend module call. Select only existing supplied descendant API IDs.
+Describe how the frontend combines their existing capabilities; preserve child behavior and API contracts.
+If a parent scenario needs a missing backend capability, state that limitation in its spec rather than inventing
+an endpoint or claiming it is implemented. Frontend supplementation is handled later by the frontend parent pass.
+requirement_id must match the supplied ID. Cover all own scenarios with nonempty falsifiable criteria;
+for a grouping parent use a concrete integration criterion. server_state reflects whether selected APIs are used.
+related_data may only reference supplied schema tables/columns. No new storage design.
+"""

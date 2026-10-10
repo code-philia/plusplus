@@ -1,4 +1,4 @@
-"""Incremental requirement analysis, module architecture, and leaf-first refinement."""
+"""Postorder leaf design and single-pass parent integration using existing APIs."""
 from __future__ import annotations
 
 import copy
@@ -14,10 +14,11 @@ from typing import Any, Callable
 from arcbench_agent_runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 from ..model_client import StructuredModel, describe_model_error
+from ..requirement_traversal import children_by_id, postorder
 from .contracts import (
     ANALYSIS_SCHEMA, ARCHITECTURE_SCHEMA, MODULE_SCHEMA,
     ANALYSIS_PROMPT, ARCHITECTURE_PROMPT, REFINEMENT_PROMPT,
-    PARENT_CONTEXT_SCHEMA, PARENT_DESIGN_SCHEMA, PARENT_CONTEXT_PROMPT, PARENT_DESIGN_PROMPT,
+    PARENT_DESIGN_SCHEMA, PARENT_DESIGN_PROMPT,
 )
 from .validation import shape_errors, validate_data_access, validate_backend_ir, access_set, reachable
 
@@ -62,64 +63,9 @@ def _scenario_ids(requirement: dict[str, Any], rid: str) -> set[str]:
             for index, row in enumerate(rows) if isinstance(row, dict)}
 
 
-def _preorder(requirement_ir: dict[str, Any]) -> list[str]:
-    """Visit parents before children, preserving document sibling order."""
-    nodes = requirement_ir.get('nodes', {})
-    atomic = set(requirement_ir.get('atomic_units', []))
-    order: list[str] = []
-    visited: set[str] = set()
-    active: set[str] = set()
-
-    def visit(key: str) -> None:
-        if key in active:
-            raise ValueError(f'Requirement tree cycle at {key}')
-        if key in visited:
-            return
-        if key not in nodes:
-            raise ValueError(f'Missing requirement node {key}')
-        active.add(key)
-        if key in atomic:
-            order.append(key)
-        for child in nodes[key].get('children_ids', []):
-            visit(child)
-        active.remove(key)
-        visited.add(key)
-
-    root = requirement_ir.get('root_id')
-    if root:
-        visit(root)
-    # Preserve document order for additional roots or partial input trees.
-    for key in [*requirement_ir.get('node_order', []), *requirement_ir.get('atomic_units', [])]:
-        visit(key)
-    return order
-
-
 def _tree_events(requirement_ir: dict[str, Any]) -> list[tuple[str, str]]:
-    """Ancestor context on entry; composition on exit, in document order."""
-    _preorder(requirement_ir)  # Validate references/cycles before any model calls.
-    nodes = requirement_ir['nodes']
-    atomic = set(requirement_ir.get('atomic_units', []))
-    seen: set[str] = set()
-    events: list[tuple[str, str]] = []
-
-    def visit(key: str) -> None:
-        if key in seen:
-            return
-        seen.add(key)
-        if key in atomic:
-            events.append(('atomic', key))
-            return
-        events.append(('enter', key))
-        for child in nodes[key].get('children_ids', []):
-            visit(child)
-        events.append(('exit', key))
-
-    root = requirement_ir.get('root_id')
-    if root:
-        visit(root)
-    for key in [*requirement_ir.get('node_order', []), *requirement_ir.get('atomic_units', [])]:
-        visit(key)
-    return events
+    children = children_by_id(requirement_ir)
+    return [('parent' if children[key] else 'leaf', key) for key in postorder(requirement_ir)]
 
 
 def project_design_context(schema: dict[str, Any], requirement_id: str, dependencies: dict[str, Any]) -> dict[str, Any]:
@@ -191,7 +137,8 @@ class BackendDesignPass:
     def _decision(self, phase: str, unit: str, prompt: str, schema: dict[str, Any], payload: dict[str, Any],
                   validator: Callable[[dict[str, Any]], list[str]]) -> dict[str, Any]:
         feedback: list[str] = []
-        for attempt in range(self.retries + 1):
+        attempts = 1 if phase == "parent_composition" else self.retries + 1
+        for attempt in range(attempts):
             request = copy.deepcopy(payload)
             if feedback:
                 request['validation_feedback'] = feedback
@@ -202,7 +149,7 @@ class BackendDesignPass:
             started = time.perf_counter()
             self.log.info(
                 f'MODEL_REQUEST phase={phase} call={self.sequence} '
-                f'attempt={attempt + 1}/{self.retries + 1} '
+                f'attempt={attempt + 1}/{attempts} '
                 f'input_chars={len(json.dumps(request, ensure_ascii=False))}', node_id=unit)
             try:
                 value = self.model.generate_json(schema_name=f'arc_backend_{phase}', instructions=prompt,
@@ -227,7 +174,7 @@ class BackendDesignPass:
                           f'errors={len(feedback)} trace={trace_path}', node_id=unit)
             for error in feedback:
                 self.log.info(f'VALIDATION_FEEDBACK phase={phase}: {error}', node_id=unit)
-        self.log.info(f'MODEL_FAILED phase={phase} attempts={self.retries + 1}', node_id=unit)
+        self.log.info(f'MODEL_FAILED phase={phase} attempts={attempts}', node_id=unit)
         raise ValueError(f'{phase} {unit}: ' + '; '.join(feedback))
 
     def compile(self, requirement_ir: dict[str, Any], dependency_graph: dict[str, Any], database_schema: dict[str, Any]) -> BackendDesignResult:
@@ -236,7 +183,7 @@ class BackendDesignPass:
               'types': [], 'requirements': [], 'modules': []}
         states, errors = {}, []
         self.sequence = 0
-        self.parent_contexts = {}
+        self.node_order = []
         self.inherited_context = []
         self.started_at = time.perf_counter()
         nodes = requirement_ir.get('nodes', {})
@@ -244,11 +191,13 @@ class BackendDesignPass:
         atomic = list(dict.fromkeys(requirement_ir.get('atomic_units', [])))
         dependencies = dependency_graph.get('atomic_dependencies', {})
         self.log.info(f'BACKEND_DESIGN_STARTED requirements={len(atomic)} '
-                      f'tables={len(database_schema.get("tables", []))} traversal=ancestor_context_then_postorder_composition '
+                      f'tables={len(database_schema.get("tables", []))} traversal=depth_first_postorder '
                       f'output={self.root}')
         try:
             events = _tree_events(requirement_ir)
-            order = [key for phase, key in events if phase == 'atomic']
+            self.node_order = [key for _, key in events]
+            order = [key for phase, key in events if phase == 'leaf']
+            self.children = children_by_id(requirement_ir)
         except ValueError as exc:
             errors.append(str(exc))
             order = []
@@ -262,28 +211,17 @@ class BackendDesignPass:
         for event, rid in events:
             self.inherited_context = []
             ancestor = nodes[rid].get('parent_id')
-            while ancestor:
-                if ancestor in self.parent_contexts:
-                    self.inherited_context.insert(0, {'requirement_id': ancestor, **self.parent_contexts[ancestor]})
+            seen_ancestors = set()
+            while ancestor in nodes and ancestor not in seen_ancestors:
+                seen_ancestors.add(ancestor)
+                self.inherited_context.insert(0, {'requirement_id': ancestor,
+                    'requirement': copy.deepcopy(nodes[ancestor]),
+                    'scenario_ids': sorted(_scenario_ids(nodes[ancestor], ancestor))})
                 ancestor = nodes[ancestor].get('parent_id')
-            if event == 'enter':
+            if event == 'parent':
                 try:
-                    self.log.info('PARENT_CONTEXT_STARTED', node_id=rid)
-                    self.parent_contexts[rid] = self._decision(
-                        'parent_context', rid, PARENT_CONTEXT_PROMPT, PARENT_CONTEXT_SCHEMA,
-                        {'requirement': nodes[rid], 'scenario_ids': sorted(_scenario_ids(nodes[rid], rid)),
-                         'ancestor_context': self.inherited_context},
-                        lambda value: ['Parent criteria reference unknown scenarios']
-                        if {key for row in value['acceptance_criteria'] for key in row['scenario_ids']} - _scenario_ids(nodes[rid], rid) else [])
-                    states[rid] = 'CONTEXT_READY'
-                except ValueError as exc:
-                    states[rid] = 'FAILED'
-                    errors.append(f'{rid}: {exc}')
-                continue
-            if event == 'exit':
-                try:
-                    if states.get(rid) == 'FAILED' or any(states.get(child) != 'DESIGN_VALIDATED' for child in nodes[rid].get('children_ids', [])):
-                        raise ValueError('Parent cannot finalize: context or child design failed')
+                    if any(states.get(child) != 'DESIGN_VALIDATED' for child in self.children[rid]):
+                        raise ValueError('Parent cannot integrate: child design failed')
                     ir = self._compose_parent(ir, rid, nodes, database_schema, scenarios)
                     states[rid] = 'DESIGN_VALIDATED'
                     write_json_atomic(self.root / 'backend_ir.json', ir)
@@ -356,7 +294,7 @@ class BackendDesignPass:
                 covered = {key for row in value['acceptance_criteria'] for key in row['scenario_ids']}
                 own_scenarios = _scenario_ids(requirement, rid)
                 inherited_scenarios = {key for context_row in self.inherited_context
-                                       for criterion in context_row['acceptance_criteria'] for key in criterion['scenario_ids']}
+                                       for key in context_row['scenario_ids']}
                 if not own_scenarios <= covered or covered - own_scenarios - inherited_scenarios:
                     problems.append('analysis criteria must cover own scenarios and reference only own/inherited scenarios')
                 if not value['acceptance_criteria'] or not value['spec'].strip():
@@ -506,115 +444,54 @@ class BackendDesignPass:
             refine(module['id'])
 
     def _compose_parent(self, base: dict[str, Any], rid: str, nodes: dict[str, Any], schema: dict[str, Any], scenarios: set[str]) -> dict[str, Any]:
-        self.log.info('PARENT_COMPOSITION_STARTED', node_id=rid)
-        descendants = set()
-        pending = list(nodes[rid].get('children_ids', []))
+        self.log.info('PARENT_INTEGRATION_STARTED', node_id=rid)
+        descendants, pending = set(), list(self.children[rid])
         while pending:
             key = pending.pop()
+            if key in descendants:
+                continue
             descendants.add(key)
-            pending.extend(nodes[key].get('children_ids', []))
+            pending.extend(self.children[key])
         requirements = [row for row in base['requirements'] if row['requirement_id'] in descendants]
         modules = {row['id']: row for row in base['modules']}
-        scope = reachable([key for row in requirements for key in row['api_ids']], modules)
-        # Include reverse transitive callers: modifying a shared leaf affects
-        # users outside the current parent's subtree as well.
-        editable = set(scope)
-        while True:
-            expanded = editable | {key for key, module in modules.items()
-                                   if any(call['module_id'] in editable for call in module['calls'])}
-            if expanded == editable:
-                break
-            editable = expanded
-        supplied = reachable(list(editable), modules)
+        available = {key for row in requirements for key in row['api_ids']}
+        scope = reachable(sorted(available), modules)
 
         def materialize(value: dict[str, Any]) -> dict[str, Any]:
-            trial = copy.deepcopy(base)
             requirement = copy.deepcopy(value['requirement'])
             if requirement['requirement_id'] != rid:
                 raise ValueError('Parent requirement id changed')
+            if set(requirement['api_ids']) - available:
+                raise ValueError('Parent may only associate existing descendant APIs; new interfaces are forbidden')
             covered = {key for row in requirement['acceptance_criteria'] for key in row['scenario_ids']}
             if not _scenario_ids(nodes[rid], rid) <= covered:
                 raise ValueError('Parent scenarios are not fully covered')
-            definitions = {row['id']: row for row in trial['types']}
-            for row in value['new_types']:
-                if row['id'] in definitions:
-                    raise ValueError('Parent cannot redefine an existing type')
-                definitions[row['id']] = row
-            trial['types'] = list(definitions.values())
-            mapping = {}
-            for module in value['new_modules']:
-                key = module['id']
-                if not re.fullmatch(r'(API|FUNC|DB)\.[A-Za-z][A-Za-z0-9_]*', key) or not key.startswith(module['kind'] + '.'):
-                    raise ValueError(f'Invalid new local module id {key}')
-                if key in mapping:
-                    raise ValueError('Duplicate new module id')
-                mapping[key] = f'{rid}::{key}'
-            if value['role'] == 'CATEGORY' and value['new_modules']:
-                raise ValueError('Category parents do not create orchestration modules')
-            updated = set()
-            targets = {row['id']: row for row in trial['modules']}
-            for change in value['updates']:
-                replacement = copy.deepcopy(change)
-                key = replacement['id']
-                if key not in editable or key in updated:
-                    raise ValueError(f'Invalid or duplicate module update {key}')
-                original = targets[key]
-                for prop in ('id', 'kind', 'name'):
-                    if replacement[prop] != original[prop]:
-                        raise ValueError(f'Cannot change module identity {key}.{prop}')
-                if not all(row in replacement['acceptance_criteria'] for row in original['acceptance_criteria']):
-                    raise ValueError(f'Update must preserve existing acceptance criteria {key}')
-                updated.add(key)
-                replacement['requirement_ids'] = original['requirement_ids']
-                targets[key] = replacement
-            for draft in value['new_modules']:
-                module = copy.deepcopy(draft)
-                module['id'] = mapping[module['id']]
-                module['requirement_ids'] = [rid]
-                targets[module['id']] = module
-            for key in updated | set(mapping.values()):
-                for call in targets[key]['calls']:
-                    call['module_id'] = mapping.get(call['module_id'], call['module_id'])
-                    if call['module_id'] not in supplied | set(mapping.values()):
-                        raise ValueError('Parent references an unsupplied module')
-            requirement['api_ids'] = [mapping.get(key, key) for key in requirement['api_ids']]
-            if set(requirement['api_ids']) - supplied - set(mapping.values()):
-                raise ValueError('Parent references an unsupplied API')
+            trial = copy.deepcopy(base)
             trial['requirements'].append(requirement)
-            trial['modules'] = list(targets.values())
-            # Derive associations afresh after call graph changes, not just add
-            # memberships. Preserved criteria keep their original provenance.
-            for module in targets.values():
-                module['requirement_ids'] = []
-            for row in trial['requirements']:
-                for key in reachable(row['api_ids'], targets):
-                    targets[key]['requirement_ids'].append(row['requirement_id'])
+            targets = {row['id']: row for row in trial['modules']}
+            for key in reachable(requirement['api_ids'], targets):
+                targets[key]['requirement_ids'] = sorted(set(targets[key]['requirement_ids']) | {rid})
             return trial
 
         def validate(value: dict[str, Any]) -> list[str]:
             try:
-                trial = materialize(value)
-                problems = validate_backend_ir(trial, schema, scenarios)
-                if problems:
-                    return problems
-                return []
+                return validate_backend_ir(materialize(value), schema, scenarios)
             except ValueError as exc:
                 return [str(exc)]
 
         decision = self._decision('parent_composition', rid, PARENT_DESIGN_PROMPT, PARENT_DESIGN_SCHEMA,
-                                  {'requirement_id': rid, 'requirement': nodes[rid],
-                                   'parent_context': self.parent_contexts[rid], 'ancestor_context': self.inherited_context,
-                                   'child_requirements': requirements, 'types': base['types'],
-                                   'editable_modules': sorted(editable),
-                                   'modules': [modules[key] for key in sorted(supplied)],
-                                   'schema': schema}, validate)
-        trial = materialize(decision)
-        return trial
+            {'requirement_id': rid, 'requirement': nodes[rid],
+             'scenario_ids': sorted(_scenario_ids(nodes[rid], rid)), 'ancestor_context': self.inherited_context,
+             'child_requirements': requirements, 'available_api_ids': sorted(available),
+             'types': base['types'], 'modules': [modules[key] for key in sorted(scope)],
+             'schema': schema}, validate)
+        return materialize(decision)
 
     def _finish(self, ir: dict[str, Any], states: dict[str, str], errors: list[str]) -> BackendDesignResult:
         errors = list(dict.fromkeys(errors))
         write_json_atomic(self.root / 'backend_ir.json', ir)
-        write_json_atomic(self.root / 'report.json', {'errors': errors, 'model_calls': self.sequence})
+        write_json_atomic(self.root / 'report.json', {'errors': errors, 'model_calls': self.sequence,
+                                                    'traversal': 'depth_first_postorder', 'node_order': self.node_order})
         self.log.info(f'BACKEND_DESIGN_FINISHED success={not errors} '
                       f'requirements={len(ir["requirements"])} modules={len(ir["modules"])} '
                       f'model_calls={self.sequence} errors={len(errors)} '

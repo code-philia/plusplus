@@ -1,4 +1,4 @@
-"""Four generation passes over the lightweight frontend IR; no review gates."""
+"""Postorder leaf passes and one frontend integration pass per non-leaf node."""
 from __future__ import annotations
 
 import base64
@@ -12,9 +12,10 @@ from arcbench_agent_runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 
 from ..model_client import StructuredModel, describe_model_error
+from ..requirement_traversal import children_by_id, postorder
 from ..visual_reference import ResolvedVisualReference, VisualModel, VisualStructuredModel
 from .contracts import PHASE_TABLES, PROMPTS, patch_schema
-from .context import TABLES, frontend_ir_traceability, local_context, preorder, ranked, required_types
+from .context import TABLES, frontend_ir_traceability, local_context, ranked, required_types
 
 
 @dataclass
@@ -45,7 +46,8 @@ class FrontendIRGenerationPass:
                 visual_analyses: list[dict[str, Any]] | None = None) -> FrontendIRGenerationResult:
         backend_design_ir = backend_design_ir.get("backend_blueprint", backend_design_ir)
         self.nodes = requirement_ir.get("nodes", {})
-        order = preorder(requirement_ir)
+        order = postorder(requirement_ir)
+        self.children = children_by_id(requirement_ir)
         self.dependencies = dependency_graph.get("requirement_dependencies", {})
         self.batches, self.failures, self.warnings = [], [], []
         self.apis = [copy.deepcopy(row) for row in backend_design_ir.get("modules", []) if row.get("kind") == "API"]
@@ -69,46 +71,12 @@ class FrontendIRGenerationPass:
                    }], "data": [], "events": [], "functions": []}
         if self.visuals:
             self.ir["visual_references"] = [{"id": row["id"], "path": row["path"]} for row in self.visuals]
-        # Bound system planning by top-level requirement branches. Each chunk sees
-        # the accumulated topology, so shared screens are progressively reusable.
-        branch_for: dict[str, str] = {}
-        groups: dict[str, list[str]] = {}
-        root_id = requirement_ir.get("root_id")
+        # Finish each subtree before visiting its parent. Non-leaves receive one
+        # full frontend delta, rather than one call in every system-wide pass.
         for rid in order:
-            parent = self.nodes[rid].get("parent_id")
-            branch_for[rid] = branch_for.get(parent, rid) if parent != root_id else rid
-            groups.setdefault(branch_for[rid], []).append(rid)
-        for branch, ids in groups.items():
-            for offset in range(0, len(ids), 24):
-                selected = ids[offset:offset + 24]
-                self._call("topology", selected, {
-                    "new_id_prefix": f"{branch}.topology{offset // 24}.",
-                    "requirement_catalog": [self._requirement(rid, compact=True) for rid in selected],
-                    "root_ui_id": self.ir["root_ui_id"], "existing": {"ui": copy.deepcopy(self.ir["ui"])},
-                    "visual_references": [row for row in self.visuals if set(selected) & set(row["requirement_ids"])],
-                })
-        for phase in ("ui", "data", "interaction"):
-            for rid in order:
-                requirement = self._requirement(rid)
-                related = self._related(rid)
-                context = local_context(self.ir, rid, requirement, set(related))
-                owners = set(related) | {rid}
-                attached = {key for owner in owners for key in self.api_owners.get(owner, [])}
-                primary = [row for row in self.apis if row["id"] in attached
-                           or owners & set(row.get("requirement_ids", []))]
-                # Related APIs are never truncated; other APIs are ranked candidates.
-                primary_ids = {row["id"] for row in primary}
-                apis = primary + ranked([row for row in self.apis if row["id"] not in primary_ids], requirement, 8)
-                payload = {**context, "new_id_prefix": f"{rid}.", "requirement": requirement,
-                           "related_requirements": [self._requirement(key) for key in related],
-                           "api_contracts": [self._api(row) for row in apis] if phase != "ui" else [],
-                           "api_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}
-                                           for row in ranked(self.apis, requirement, 24)] if phase != "ui" else [],
-                           "visual_references": [row for row in self.visuals
-                                                 if owners & set(row["requirement_ids"])],
-                           "prior_task_failures": [row for row in self.failures if rid in row["requirement_ids"]]}
-                payload["types"] = required_types(payload, [*self.backend_types, *self.ir["types"]])
-                self._call(phase, [rid], payload)
+            phases = ("composition",) if self.children[rid] else ("topology", "ui", "data", "interaction")
+            for phase in phases:
+                self._call(phase, [rid], self._payload(rid, phase))
         status = "GENERATED_WITH_WARNINGS" if self.failures or self.warnings else "GENERATED"
         if not order:
             status = "FAILED"
@@ -118,6 +86,7 @@ class FrontendIRGenerationPass:
         links = frontend_ir_traceability(self.ir)
         traceability = {rid: links.get(rid, {"ui_scope": "NO_UI"}) for rid in order}
         report = {"status": status, "warnings": self.warnings, "failed_tasks": self.failures,
+                  "traversal": "depth_first_postorder", "node_order": order,
                   "task_counts": {phase: sum(row["phase"] == phase for row in self.batches) for phase in PHASE_TABLES},
                   "requirement_entities": {rid: [key for name, values in traceability[rid].items()
                                                 if name.endswith("_ids") and name != "api_ids" for key in values]
@@ -126,6 +95,38 @@ class FrontendIRGenerationPass:
         write_json_atomic(self.root / "requirements.json", {"requirements": traceability})
         write_json_atomic(self.root / "report.json", report)
         return FrontendIRGenerationResult(self.ir, report, self.batches, traceability)
+
+    def _payload(self, rid: str, phase: str) -> dict[str, Any]:
+        requirement = self._requirement(rid)
+        related = self._related(rid)
+        descendants, pending = set(), list(self.children[rid])
+        while pending:
+            key = pending.pop()
+            if key in descendants:
+                continue
+            descendants.add(key)
+            pending.extend(self.children[key])
+        related = list(dict.fromkeys([*related, *sorted(descendants)]))
+        context = local_context(self.ir, rid, requirement, set(related), include_related=phase == "composition")
+        owners = set(related) | {rid}
+        attached = {key for owner in owners for key in self.api_owners.get(owner, [])}
+        primary = [row for row in self.apis if row["id"] in attached
+                   or owners & set(row.get("requirement_ids", []))]
+        primary_ids = {row["id"] for row in primary}
+        apis = primary + ranked([row for row in self.apis if row["id"] not in primary_ids], requirement, 8)
+        payload = {**context, "new_id_prefix": f"{rid}.", "requirement": requirement,
+                   "node_role": "NON_LEAF" if self.children[rid] else "LEAF",
+                   "child_requirements": [self._requirement(key) for key in self.children[rid]],
+                   "related_requirements": [self._requirement(key) for key in related],
+                   "api_contracts": [self._api(row) for row in apis] if phase not in {"topology", "ui"} else [],
+                   "api_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}
+                                   for row in ranked(self.apis, requirement, 24)] if phase not in {"topology", "ui"} else [],
+                   "visual_references": [row for row in self.visuals if owners & set(row["requirement_ids"])],
+                   "prior_task_failures": [row for row in self.failures if owners & set(row["requirement_ids"])]}
+        if phase == "topology":
+            payload["requirement_catalog"] = [requirement]
+        payload["types"] = required_types(payload, [*self.backend_types, *self.ir["types"]])
+        return payload
 
     def _requirement(self, rid: str, compact: bool = False) -> dict[str, Any]:
         row = self.nodes[rid]
@@ -143,7 +144,7 @@ class FrontendIRGenerationPass:
             ids.append(parent)
             parent = self.nodes[parent].get("parent_id")
         ids.extend(self.dependencies.get(rid, []))
-        ids.extend(key for key, row in self.nodes.items() if row.get("parent_id") == rid)
+        ids.extend(self.children[rid])
         # Shared objects bring the requirements whose behavior must be preserved.
         context = local_context(self.ir, rid, self._requirement(rid), set(ids))
         ids.extend(owner for table, rows in context["existing"].items() for row in rows
@@ -173,7 +174,7 @@ class FrontendIRGenerationPass:
                     row["requirement_ids"] = list(dict.fromkeys([
                         *registry.get(row["id"], {}).get("requirement_ids", []),
                         *row.get("requirement_ids", []),
-                        *(requirements if phase != "topology" else []),
+                        *requirements,
                     ]))
                 registry[row["id"]] = row
             trial[table] = list(registry.values())
