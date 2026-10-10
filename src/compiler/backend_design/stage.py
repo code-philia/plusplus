@@ -15,8 +15,8 @@ from arcbench_agent_runtime.jsonio import write_json_atomic
 from core.logging import SynchronousLog
 from ..model_client import StructuredModel, describe_model_error
 from .contracts import (
-    ANALYSIS_SCHEMA, ARCHITECTURE_SCHEMA, MODULE_SCHEMA, AUDIT_SCHEMA,
-    ANALYSIS_PROMPT, ARCHITECTURE_PROMPT, REFINEMENT_PROMPT, AUDIT_PROMPT,
+    ANALYSIS_SCHEMA, ARCHITECTURE_SCHEMA, MODULE_SCHEMA,
+    ANALYSIS_PROMPT, ARCHITECTURE_PROMPT, REFINEMENT_PROMPT,
     PARENT_CONTEXT_SCHEMA, PARENT_DESIGN_SCHEMA, PARENT_CONTEXT_PROMPT, PARENT_DESIGN_PROMPT,
 )
 from .validation import shape_errors, validate_data_access, validate_backend_ir, access_set, reachable
@@ -256,7 +256,6 @@ class BackendDesignPass:
             errors.append('Backend design requires a RESOLVED database-neutral schema with tables')
         if errors:
             return self._finish(ir, states, errors)
-        analyses = {}
         index = 0
         for event, rid in events:
             self.inherited_context = []
@@ -283,7 +282,7 @@ class BackendDesignPass:
                 try:
                     if states.get(rid) == 'FAILED' or any(states.get(child) != 'DESIGN_VALIDATED' for child in nodes[rid].get('children_ids', [])):
                         raise ValueError('Parent cannot finalize: context or child design failed')
-                    ir = self._compose_parent(ir, rid, nodes, database_schema, scenarios, analyses)
+                    ir = self._compose_parent(ir, rid, nodes, database_schema, scenarios)
                     states[rid] = 'DESIGN_VALIDATED'
                     write_json_atomic(self.root / 'backend_ir.json', ir)
                     self.log.info('PARENT_DESIGN_COMMITTED', node_id=rid)
@@ -302,7 +301,6 @@ class BackendDesignPass:
                 continue
             try:
                 analysis, context = self._analyze(ir, rid, nodes[rid], database_schema, dependencies)
-                analyses[rid] = analysis
                 self.log.info(f'ANALYSIS_COMPLETED server_state={analysis["server_state"]} '
                               f'data_operations={len(analysis["data_operations"])} '
                               f'criteria={len(analysis["acceptance_criteria"])}', node_id=rid)
@@ -316,7 +314,6 @@ class BackendDesignPass:
                         problems = validate_backend_ir(trial, database_schema, scenarios)
                         if problems:
                             raise ValueError('; '.join(problems))
-                        self._review(rid, analysis, trial)
                         ir = trial
                         states[rid] = 'DESIGN_VALIDATED'
                         write_json_atomic(self.root / 'backend_ir.json', ir)
@@ -338,36 +335,6 @@ class BackendDesignPass:
         errors += validate_backend_ir(ir, database_schema, scenarios)
         if {key for _, key in events} != {row['requirement_id'] for row in ir['requirements']}:
             errors.append('Final backend IR does not cover every requirement tree node')
-        if not errors:
-            self.log.info('GLOBAL_REVIEW_STARTED reviewing related requirement groups')
-            # Bounded semantic groups: each requirement plus related prior/current
-            # requirements, including all descendants of the selected entries.
-            for requirement in ir['requirements']:
-                try:
-                    rid = requirement['requirement_id']
-                    tables = set(requirement['related_data'])
-                    related = [row for row in ir['requirements'] if row['requirement_id'] == rid or
-                               tables & set(row['related_data']) or row['requirement_id'] in _closure(rid, dependencies)]
-                    for start in range(0, len(related), 8):
-                        group = related[start:start + 8]
-                        if requirement not in group:
-                            group = [requirement, *group]
-                        modules = {row['id']: row for row in ir['modules']}
-                        scope = reachable([key for row in group for key in row['api_ids']], modules)
-                        group_tables = {access['table'] for key in scope for access in modules[key]['data_access']}
-                        self.log.info(f'GLOBAL_REVIEW_GROUP group={start // 8 + 1} '
-                                      f'requirements={len(group)} modules={len(scope)}', node_id=rid)
-                        self._decision('global_review', rid, AUDIT_PROMPT, AUDIT_SCHEMA,
-                                       {'requirements': group, 'types': ir['types'],
-                                        'modules': [modules[key] for key in sorted(scope)],
-                                        'schema_slice': {'tables': [row for row in database_schema['tables'] if row['name'] in group_tables],
-                                                         'runtime_rules': [row for row in database_schema.get('runtime_rules', [])
-                                                                           if not row.get('requirement_ids') or set(row['requirement_ids']) & {item['requirement_id'] for item in group}]}},
-                                       lambda value: value['issues'])
-                except ValueError as exc:
-                    errors.append(str(exc))
-                    states[rid] = 'FAILED'
-                    self.log.info(f'GLOBAL_REVIEW_FAILED {exc}', node_id=rid)
         return self._finish(ir, states, errors)
 
     def _analyze(self, ir: dict[str, Any], rid: str, requirement: dict[str, Any], schema: dict[str, Any], dependencies: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -400,8 +367,6 @@ class BackendDesignPass:
                 visible = {row['name'] for row in context['tables']} | set(value['requested_tables'])
                 if {row['table'] for row in value['data_operations']} - visible:
                     problems.append('request a schema table before declaring operations on it')
-                if value['unresolved_questions']:
-                    problems += value['unresolved_questions']
                 return problems
             analysis = self._decision('analysis', rid, ANALYSIS_PROMPT, ANALYSIS_SCHEMA,
                                       {**payload, 'schema_slice': context}, validate)
@@ -514,22 +479,7 @@ class BackendDesignPass:
         for module in list(modules.values()):
             refine(module['id'])
 
-    def _review(self, rid: str, analysis: dict[str, Any], trial: dict[str, Any]) -> None:
-        requirement = next(row for row in trial['requirements'] if row['requirement_id'] == rid)
-        modules = {row['id']: row for row in trial['modules']}
-        scope = reachable(requirement['api_ids'], modules)
-        inherited = []
-        ancestor = self.requirement_nodes[rid].get('parent_id')
-        while ancestor:
-            if ancestor in self.parent_contexts:
-                inherited.insert(0, {'requirement_id': ancestor, **self.parent_contexts[ancestor]})
-            ancestor = self.requirement_nodes[ancestor].get('parent_id')
-        self._decision('coverage_review', rid, AUDIT_PROMPT, AUDIT_SCHEMA,
-                       {'analysis': analysis, 'requirement': requirement, 'types': trial['types'],
-                        'ancestor_context': inherited,
-                        'modules': [modules[key] for key in sorted(scope)]}, lambda value: value['issues'])
-
-    def _compose_parent(self, base: dict[str, Any], rid: str, nodes: dict[str, Any], schema: dict[str, Any], scenarios: set[str], analyses: dict[str, Any]) -> dict[str, Any]:
+    def _compose_parent(self, base: dict[str, Any], rid: str, nodes: dict[str, Any], schema: dict[str, Any], scenarios: set[str]) -> dict[str, Any]:
         self.log.info('PARENT_COMPOSITION_STARTED', node_id=rid)
         descendants = set()
         pending = list(nodes[rid].get('children_ids', []))
@@ -551,7 +501,7 @@ class BackendDesignPass:
             editable = expanded
         supplied = reachable(list(editable), modules)
 
-        def materialize(value: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
+        def materialize(value: dict[str, Any]) -> dict[str, Any]:
             trial = copy.deepcopy(base)
             requirement = copy.deepcopy(value['requirement'])
             if requirement['requirement_id'] != rid:
@@ -613,36 +563,14 @@ class BackendDesignPass:
             for row in trial['requirements']:
                 for key in reachable(row['api_ids'], targets):
                     targets[key]['requirement_ids'].append(row['requirement_id'])
-            affected = {rid}
-            for row in base['requirements']:
-                before = reachable(row['api_ids'], modules)
-                after = reachable(row['api_ids'], targets)
-                if before & updated or after & updated or before != after:
-                    affected.add(row['requirement_id'])
-            return trial, affected
+            return trial
 
         def validate(value: dict[str, Any]) -> list[str]:
             try:
-                trial, affected = materialize(value)
+                trial = materialize(value)
                 problems = validate_backend_ir(trial, schema, scenarios)
                 if problems:
                     return problems
-                self.log.info(f'PARENT_CHANGE_REVALIDATION updated_modules={len(value["updates"])} '
-                              f'rechecking_requirements={len(affected)}', node_id=rid)
-                for key in sorted(affected):
-                    row = next(item for item in trial['requirements'] if item['requirement_id'] == key)
-                    if key in analyses:
-                        self._review(key, analyses[key], trial)
-                    else:
-                        graph = {item['id']: item for item in trial['modules']}
-                        used = reachable(row['api_ids'], graph)
-                        self._decision('parent_revalidation', key, AUDIT_PROMPT, AUDIT_SCHEMA,
-                                       {'requirement': nodes[key], 'blueprint': row,
-                                        'parent_context': self.parent_contexts.get(key, {}),
-                                        'proposed_changes': value['updates'],
-                                        'types': trial['types'], 'schema': schema,
-                                        'modules': [graph[item] for item in sorted(used)]},
-                                       lambda decision: decision['issues'])
                 return []
             except ValueError as exc:
                 return [str(exc)]
@@ -654,7 +582,7 @@ class BackendDesignPass:
                                    'editable_modules': sorted(editable),
                                    'modules': [modules[key] for key in sorted(supplied)],
                                    'schema': schema}, validate)
-        trial, _ = materialize(decision)
+        trial = materialize(decision)
         return trial
 
     def _finish(self, ir: dict[str, Any], states: dict[str, str], errors: list[str]) -> BackendDesignResult:

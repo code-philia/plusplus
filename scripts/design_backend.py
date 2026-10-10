@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Backend design workspace: {output}", flush=True)
         result = BackendDesignPass(model, store.root).compile(requirements, dependencies, schema)
         store.write_design(design_ir=result.design_ir)
-        print(f"Backend design status: {result.design_ir['status']}")
+        print(f"Backend design completed: {result.ok}")
         print(f"IR: {store.backend_design_root / 'backend_ir.json'}")
         print(f"Report: {store.backend_design_root / 'report.json'}")
         for warning in result.warnings:

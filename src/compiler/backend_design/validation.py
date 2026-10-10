@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .contracts import IR_SCHEMA
+from .contracts import IR_SCHEMA, FIELD_NAME_PATTERN, SEMANTIC_ID_PATTERN
 
 
 def shape_errors(value: Any, schema: dict[str, Any], path: str = '$', definitions: dict[str, Any] | None = None) -> list[str]:
@@ -25,6 +25,9 @@ def shape_errors(value: Any, schema: dict[str, Any], path: str = '$', definition
     if kind and not valid[kind]:
         return [f'{path}: expected {kind}']
     errors = []
+    if kind == 'string' and 'pattern' in schema and not re.fullmatch(schema['pattern'], value):
+        errors.append(f'{path}: must match {schema["pattern"]}; use snake_case names '
+                      'such as image_source and lowercase semantic IDs such as home_banner.image_source')
     if kind == 'object':
         properties = schema.get('properties', {})
         errors += [f'{path}: missing {key}' for key in schema.get('required', []) if key not in value]
@@ -117,8 +120,10 @@ def validate_backend_ir(ir: dict[str, Any], schema: dict[str, Any], scenarios: s
         if len(fields) != len({field['semantic_id'] for field in fields}):
             errors.append(f'{path}: duplicate semantic_id')
         for field in fields:
-            if not re.fullmatch(r'[a-z][a-z0-9_]*', field['name']) or not re.fullmatch(r'[a-z][a-z0-9_.]*', field['semantic_id']):
-                errors.append(f'{path}: invalid field identity {field["name"]}/{field["semantic_id"]}')
+            if not re.fullmatch(FIELD_NAME_PATTERN, field['name']) or not re.fullmatch(SEMANTIC_ID_PATTERN, field['semantic_id']):
+                errors.append(f'{path}: invalid field identity {field["name"]}/{field["semantic_id"]}; '
+                              f'name must match {FIELD_NAME_PATTERN} (image_source), '
+                              f'semantic_id must match {SEMANTIC_ID_PATTERN} (home_banner.image_source)')
             previous = semantic_types.setdefault(field['semantic_id'], field['type'])
             if previous != field['type']:
                 errors.append(f'{path}: incompatible semantic type {field["semantic_id"]}')
