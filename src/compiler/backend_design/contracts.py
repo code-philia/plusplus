@@ -227,8 +227,12 @@ operation and column: no missing read, extra update or hidden delete. Example: a
 Do not redefine an existing shared type; exact identical definitions may be reused.
 Drafts omit acceptance_criteria ONLY in this pass; retain every other required module field.
 '''
-REFINEMENT_PROMPT = COMMON + """Refine the supplied fixed module using the requirement analysis,
-related schema and full callee interfaces. Return the complete module with acceptance_criteria.
+REFINEMENT_PROMPT = COMMON + """Refine the supplied fixed module using its fixed responsibilities,
+module_context and callee interfaces/guarantees. Return the complete module with acceptance_criteria.
+The architecture has already assigned requirement responsibilities to fixed_module.spec.
+Do not reanalyze the entire requirement or expand module scope. allowed_scenario_ids is provenance,
+not a demand for every layer to repeat every requirement rule. API modules handle boundary behavior;
+FUNC modules implement business/runtime obligations; DB modules specify logical storage operations.
 Keep id/name/kind/requirement_ids/inputs/context/outputs/calls/entrypoint exactly unchanged.
 Clarify spec with data sources, call collaboration, observable errors and required consistency.
 Only a DB leaf may refine data_access, within the fixed logical operation scope.
@@ -245,16 +249,24 @@ page_size input, rename a field, remove a call, or add a new read column at refi
 Criteria must remain nonempty and use only supplied own/inherited scenario IDs.
 '''
 from ..ir.backend import RequirementBlueprint
-PARENT_DESIGN_SCHEMA = object_schema({'requirement': schema_for(RequirementBlueprint)})
+from ..ir.integration import PendingCapability
+_PARENT_REQUIREMENT_SCHEMA = schema_for(RequirementBlueprint)
+_PARENT_REQUIREMENT_SCHEMA['properties'].pop('pending_capabilities')
+PARENT_DESIGN_SCHEMA = object_schema({'requirement': _PARENT_REQUIREMENT_SCHEMA,
+                                     'pending_capabilities': schema_for(list[PendingCapability])})
 PARENT_DESIGN_PROMPT = COMMON + """Integrate this non-leaf requirement once, after all descendants.
 Only describe composition and frontend/backend integration using available_api_ids from the completed descendants.
-Return exactly {"requirement": the complete parent RequirementBlueprint}.
+Return requirement (the complete parent RequirementBlueprint) and pending_capabilities (a list).
 Do not create or update backend APIs, FUNC/DB modules, types, interfaces, call graphs or child contracts.
 Tree containment is not a backend module call. Select only existing supplied descendant API IDs.
 Describe how the frontend combines their existing capabilities; preserve child behavior and API contracts.
-If a parent scenario needs a missing backend capability, state that limitation in its spec rather than inventing
-an endpoint or claiming it is implemented. Frontend supplementation is handled later by the frontend parent pass.
+For every required server capability absent from the supplied API contracts, emit a pending_capabilities
+record: stable id prefixed with requirement_id + '.capability.', requirement_ids, capability, reason,
+and function_ids=[] (frontend wiring has not been designed). Use [] only when no gap exists.
+Do not hide a missing login, search, booking or logout capability only in prose, invent an endpoint,
+or claim it is implemented. Parent prose is legitimate scope even when children omit the capability.
+Reuse child gap IDs for the same missing capability. Frontend supplementation is handled later.
 requirement_id must match the supplied ID. Cover all own scenarios with nonempty falsifiable criteria;
 for a grouping parent use a concrete integration criterion. server_state reflects whether selected APIs are used.
-related_data may only reference supplied schema tables/columns. No new storage design.
+related_data is the deterministic union supplied by the compiler: copy it unchanged. No new storage design.
 """

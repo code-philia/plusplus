@@ -19,6 +19,7 @@ class ReactLoweringResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     implementation_tasks: list[dict[str, Any]] = field(default_factory=list)
+    pending_capabilities: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -28,7 +29,8 @@ class ReactLoweringResult:
     def report(self) -> dict[str, Any]:
         return {"status": "LOWERED" if self.ok else "FAILED", "errors": self.errors,
                 "warnings": self.warnings, "files": sorted(self.sources), "bindings": self.bindings,
-                "implementation_tasks": self.implementation_tasks, "implementation_status": "SKELETON"}
+                "implementation_tasks": self.implementation_tasks, "implementation_status": "SKELETON",
+                "pending_capabilities": self.pending_capabilities}
 
 
 class FrontendReactLowerer:
@@ -38,6 +40,9 @@ class FrontendReactLowerer:
     def lower(self, ir: dict[str, Any], backend_design: dict[str, Any],
               backend_routes: dict[str, Any], backend_port: int) -> ReactLoweringResult:
         self.result = ReactLoweringResult()
+        self.result.pending_capabilities = copy.deepcopy(ir.get("pending_capabilities", []))
+        self.result.warnings.extend(f"{gap['id']}: pending integration: {gap['capability']} ({gap['reason']})"
+                                    for gap in self.result.pending_capabilities)
         self.ir = ir
         try:
             if ir.get("ir_kind") != "frontend_design":

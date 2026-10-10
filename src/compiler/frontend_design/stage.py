@@ -68,7 +68,17 @@ class FrontendIRGenerationPass:
                    "types": [], "root_ui_id": "ui.app", "ui": [{
                        "id": "ui.app", "kind": "group", "spec": "Application UI composition root.",
                        "requirement_ids": [], "children": [], "bindings": {},
-                   }], "data": [], "events": [], "functions": []}
+                   }], "data": [], "events": [], "functions": [], "pending_capabilities": []}
+        gaps: dict[str, Any] = {}
+        for requirement in backend_design_ir.get("requirements", []):
+            for source in requirement.get("pending_capabilities", []):
+                gap = copy.deepcopy(source)
+                prior = gaps.get(gap["id"], {})
+                gap["requirement_ids"] = list(dict.fromkeys([
+                    *prior.get("requirement_ids", []), *gap["requirement_ids"], requirement["requirement_id"]]))
+                gap["function_ids"] = list(dict.fromkeys([*prior.get("function_ids", []), *gap["function_ids"]]))
+                gaps[gap["id"]] = gap
+        self.ir["pending_capabilities"] = list(gaps.values())
         if self.visuals:
             self.ir["visual_references"] = [{"id": row["id"], "path": row["path"]} for row in self.visuals]
         # Finish each subtree before visiting its parent. Non-leaves receive one
@@ -77,6 +87,8 @@ class FrontendIRGenerationPass:
             phases = ("composition",) if self.children[rid] else ("topology", "ui", "data", "interaction")
             for phase in phases:
                 self._call(phase, [rid], self._payload(rid, phase))
+        self.warnings.extend(f"{gap['id']}: pending integration: {gap['capability']} ({gap['reason']})"
+                             for gap in self.ir["pending_capabilities"])
         status = "GENERATED_WITH_WARNINGS" if self.failures or self.warnings else "GENERATED"
         if not order:
             status = "FAILED"
@@ -86,6 +98,7 @@ class FrontendIRGenerationPass:
         links = frontend_ir_traceability(self.ir)
         traceability = {rid: links.get(rid, {"ui_scope": "NO_UI"}) for rid in order}
         report = {"status": status, "warnings": self.warnings, "failed_tasks": self.failures,
+                  "pending_capabilities": copy.deepcopy(self.ir["pending_capabilities"]),
                   "traversal": "depth_first_postorder", "node_order": order,
                   "task_counts": {phase: sum(row["phase"] == phase for row in self.batches) for phase in PHASE_TABLES},
                   "requirement_entities": {rid: [key for name, values in traceability[rid].items()
@@ -94,6 +107,7 @@ class FrontendIRGenerationPass:
         write_json_atomic(self.root / "frontend_ir.json", self.ir)
         write_json_atomic(self.root / "requirements.json", {"requirements": traceability})
         write_json_atomic(self.root / "report.json", report)
+        write_json_atomic(self.root / "pending_capabilities.json", {"pending_capabilities": self.ir["pending_capabilities"]})
         return FrontendIRGenerationResult(self.ir, report, self.batches, traceability)
 
     def _payload(self, rid: str, phase: str) -> dict[str, Any]:
@@ -121,12 +135,24 @@ class FrontendIRGenerationPass:
                    "api_contracts": [self._api(row) for row in apis] if phase not in {"topology", "ui"} else [],
                    "api_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}
                                    for row in ranked(self.apis, requirement, 24)] if phase not in {"topology", "ui"} else [],
-                   "visual_references": [row for row in self.visuals if owners & set(row["requirement_ids"])],
+                   "visual_references": [self._visual_context(row, phase) for row in self.visuals
+                                         if owners & set(row["requirement_ids"])],
+                   "pending_capabilities": [copy.deepcopy(row) for row in self.ir["pending_capabilities"]
+                                            if owners & set(row["requirement_ids"])],
                    "prior_task_failures": [row for row in self.failures if owners & set(row["requirement_ids"])]}
         if phase == "topology":
             payload["requirement_catalog"] = [requirement]
         payload["types"] = required_types(payload, [*self.backend_types, *self.ir["types"]])
         return payload
+
+    @staticmethod
+    def _visual_context(row: dict[str, Any], phase: str) -> dict[str, Any]:
+        if phase in {"ui", "composition"}:
+            return copy.deepcopy(row)
+        keys = ("regions", "layout_cues") if phase == "topology" else ("visible_controls",)
+        analysis = row.get("analysis", {})
+        return {"id": row["id"], "requirement_ids": row["requirement_ids"],
+                "analysis": {key: copy.deepcopy(analysis[key]) for key in keys if key in analysis}}
 
     def _requirement(self, rid: str, compact: bool = False) -> dict[str, Any]:
         row = self.nodes[rid]
@@ -176,6 +202,9 @@ class FrontendIRGenerationPass:
                         *row.get("requirement_ids", []),
                         *requirements,
                     ]))
+                if table == "pending_capabilities":
+                    row["function_ids"] = list(dict.fromkeys([
+                        *registry.get(row["id"], {}).get("function_ids", []), *row["function_ids"]]))
                 registry[row["id"]] = row
             trial[table] = list(registry.values())
         reused = set(output.get("reuse_ids", []))

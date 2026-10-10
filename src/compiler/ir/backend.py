@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Literal, NotRequired, TypedDict
 
 from .database import SchemaDataType
+from .integration import PendingCapability
 
 
 class ScalarType(TypedDict):
@@ -124,6 +125,7 @@ class RequirementBlueprint(TypedDict):
     # Candidate associations, not an authoritative list of actual operations.
     related_data: dict[str, list[str]]
     acceptance_criteria: list[AcceptanceCriterion]
+    pending_capabilities: NotRequired[list[PendingCapability]]
 
 
 class BackendIR(TypedDict):

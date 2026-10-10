@@ -4,6 +4,7 @@ Stage algorithms live outside this package. Add new IR families here so their
 producers and consumers can share the same definitions.
 """
 
+from .integration import PendingCapability
 from .database import (
     ERAttribute, EREntity, ERModelIR, ERRelationship,
     SchemaColumn, SchemaConstraint, SchemaDefault, SchemaIR, SchemaTable,
@@ -20,6 +21,7 @@ from .frontend import (
 )
 
 __all__ = [
+    "PendingCapability",
     "ERAttribute", "EREntity", "ERModelIR", "ERRelationship", "SchemaDataType",
     "RuntimeRule", "MinimumParticipation", "SchemaColumn", "SchemaConstraint", "SchemaDefault",
     "SchemaIR", "SchemaTable",

@@ -6,15 +6,17 @@ from typing import Any, ForwardRef, Literal, NotRequired, Required, Union, get_a
 
 from ..ir.frontend import UINode, UIData, UIEvent, UIFunction
 from ..ir.backend import BackendTypeDefinition
+from ..ir.integration import PendingCapability
 
 TABLE_TYPES = {"ui": UINode, "data": UIData, "events": UIEvent,
-               "functions": UIFunction, "types": BackendTypeDefinition}
+               "functions": UIFunction, "types": BackendTypeDefinition,
+               "pending_capabilities": PendingCapability}
 PHASE_TABLES = {
     "topology": ("ui",),
-    "composition": ("ui", "data", "types", "events", "functions"),
+    "composition": ("ui", "data", "types", "events", "functions", "pending_capabilities"),
     "ui": ("ui",),
-    "data": ("ui", "data", "types"),
-    "interaction": ("ui", "data", "types", "events", "functions"),
+    "data": ("ui", "data", "types", "pending_capabilities"),
+    "interaction": ("ui", "data", "types", "events", "functions", "pending_capabilities"),
 }
 
 
@@ -99,6 +101,16 @@ UI kinds: screen,group,text,input,choice,action,image,list,feedback.
 bindings keys are semantic attributes such as label,value,options,visible,enabled,items.
 presentation is optional natural-language layout/visual intent. Reference images are optional;
 use only supplied visual_reference_ids and preserve their relevant layout and visual cues.
+The backend API catalog is the capability boundary. For every required server behavior with no
+compatible API, emit pending_capabilities in data/interaction/composition instead of hiding the gap
+only in function spec. Fields: stable id (<prefix>capability.<operation>), requirement_ids, capability,
+reason, function_ids (empty until known). Reuse supplied pending IDs for the same missing capability;
+include affected frontend function IDs once designed. Preserve unrelated gaps.
+Delete a gap only if a supplied existing API fully supports it and the affected interaction is wired;
+local simulation, disabled UI or a local logout that leaves the server session valid is not resolution.
+Do not invent API IDs or claim unsupported server effects. Local-only behavior needs no gap.
+Pictures supply visual evidence, not additional functional scope. Only UI/composition receives full
+visual analysis; behavior passes receive visible controls and should rely on the committed UI tree.
 """
 
 PROMPTS = {
@@ -110,7 +122,7 @@ You may upsert all frontend tables together, including typed data, event handler
 Preserve existing child surfaces, their local state scopes and behavior. Prefer reuse of descendant objects.
 Complete frontend/backend integration with supplied existing API IDs and exact input/output contracts only.
 No new backend interface, backend module or API definition; never alter backend contracts or call backend FUNC/DB.
-If an API capability is unavailable, describe the integration gap in frontend function spec without inventing an API.
+If an API capability is unavailable, emit its pending_capabilities record and describe the local behavior in function spec.
 Mount handlers on existing/added UI; frontend functions can sequence existing APIs and local computations.
 Specify payload/arguments, state/result mapping, navigation and error behavior as in the interaction pass.
 Every added UI must be attached through complete parent children records; preserve all existing siblings.
@@ -158,8 +170,8 @@ and applicable error, reentry/concurrency rules. reads/writes lists alone are no
 Call failures stop the list unless caller spec explicitly defines handling; never use a skipped result
 unconditionally. Specify call interleaving with local computations in spec; no executable step DSL.
 Preserve shared function behavior for its original requirements when updating it.
-If no available API supplies a required capability, do not invent one; describe the unresolved
-integration in function spec while still designing the local UI/interaction.
+If no available API supplies a required capability, emit a pending_capabilities record linked to its
+functions while still designing the local UI/interaction. Do not invent an API or simulate server success.
 This pass generates behavior; do not audit or reject the existing design.
 """,
 }

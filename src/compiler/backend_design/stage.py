@@ -21,6 +21,7 @@ from .contracts import (
     PARENT_DESIGN_SCHEMA, PARENT_DESIGN_PROMPT,
 )
 from .validation import shape_errors, validate_data_access, validate_backend_ir, access_set, reachable
+from .context import module_contract, refinement_context, required_types
 
 
 @dataclass
@@ -432,10 +433,16 @@ class BackendDesignPass:
                 candidate = copy.deepcopy(trial)
                 candidate['modules'] = [value if row['id'] == key else row for row in candidate['modules']]
                 return errors + validate_backend_ir(candidate, schema, scenarios)
-            value = self._decision('refinement', key, REFINEMENT_PROMPT, MODULE_SCHEMA,
-                                   {'fixed_module': module, 'analysis': analysis, 'schema_slice': context,
-                                    'ancestor_context': self.inherited_context,
-                                    'types': trial['types'], 'callees': [modules[call['module_id']] for call in module['calls']]}, validate)
+            payload = {'fixed_module': module,
+                       'module_context': refinement_context(module, modules, context),
+                       'allowed_scenario_ids': sorted({scenario for criterion in analysis['acceptance_criteria']
+                                                      for scenario in criterion['scenario_ids']} |
+                                                     {scenario for row in self.inherited_context
+                                                      for scenario in row['scenario_ids']}),
+                       'callees': [module_contract(modules[callee]) for callee in
+                                   dict.fromkeys(call['module_id'] for call in module['calls'])]}
+            payload['types'] = required_types(payload, trial['types'])
+            value = self._decision('refinement', key, REFINEMENT_PROMPT, MODULE_SCHEMA, payload, validate)
             module.clear()
             module.update(value)
             done.add(key)
@@ -455,10 +462,17 @@ class BackendDesignPass:
         requirements = [row for row in base['requirements'] if row['requirement_id'] in descendants]
         modules = {row['id']: row for row in base['modules']}
         available = {key for row in requirements for key in row['api_ids']}
-        scope = reachable(sorted(available), modules)
+        related_data: dict[str, list[str]] = {}
+        for row in requirements:
+            for table, columns in row['related_data'].items():
+                related_data[table] = sorted(set(related_data.get(table, [])) | set(columns))
 
         def materialize(value: dict[str, Any]) -> dict[str, Any]:
             requirement = copy.deepcopy(value['requirement'])
+            requirement['related_data'] = copy.deepcopy(related_data)
+            requirement['pending_capabilities'] = copy.deepcopy(value['pending_capabilities'])
+            for gap in requirement['pending_capabilities']:
+                gap['requirement_ids'] = sorted(set(gap['requirement_ids']) | {rid})
             if requirement['requirement_id'] != rid:
                 raise ValueError('Parent requirement id changed')
             if set(requirement['api_ids']) - available:
@@ -479,18 +493,47 @@ class BackendDesignPass:
             except ValueError as exc:
                 return [str(exc)]
 
-        decision = self._decision('parent_composition', rid, PARENT_DESIGN_PROMPT, PARENT_DESIGN_SCHEMA,
-            {'requirement_id': rid, 'requirement': nodes[rid],
+        payload = {'requirement_id': rid, 'requirement': nodes[rid],
              'scenario_ids': sorted(_scenario_ids(nodes[rid], rid)), 'ancestor_context': self.inherited_context,
-             'child_requirements': requirements, 'available_api_ids': sorted(available),
-             'types': base['types'], 'modules': [modules[key] for key in sorted(scope)],
-             'schema': schema}, validate)
+             'child_requirements': [{key: row[key] for key in
+                                    ('requirement_id', 'api_ids', 'pending_capabilities') if key in row}
+                                   for row in requirements], 'available_api_ids': sorted(available),
+             'api_contracts': [module_contract(modules[key]) for key in sorted(available)],
+             'related_data': related_data}
+        payload['types'] = required_types(payload, base['types'])
+        # Only an explicitly empty grouping node can bypass semantic integration.
+        # A parent with prose may contain genuine capabilities missing from its children.
+        if (str(nodes[rid].get('type', '')).upper() in {'CATEGORY', 'GROUP'}
+                and not str(nodes[rid].get('description', '')).strip() and not nodes[rid].get('scenarios')):
+            decision = {'requirement': {'requirement_id': rid,
+                'spec': 'Aggregate completed descendant capabilities.', 'server_state': bool(available),
+                'api_ids': sorted(available), 'related_data': related_data,
+                'acceptance_criteria': [{'id': rid + '.composition', 'given': 'Completed descendant designs.',
+                    'when': 'Their capabilities are composed.',
+                    'then': 'Existing descendant API contracts and behavior are preserved.', 'scenario_ids': []}]},
+                'pending_capabilities': []}
+        else:
+            decision = self._decision('parent_composition', rid, PARENT_DESIGN_PROMPT,
+                                      PARENT_DESIGN_SCHEMA, payload, validate)
         return materialize(decision)
 
     def _finish(self, ir: dict[str, Any], states: dict[str, str], errors: list[str]) -> BackendDesignResult:
         errors = list(dict.fromkeys(errors))
+        pending: dict[str, Any] = {}
+        for row in ir['requirements']:
+            for source in row.get('pending_capabilities', []):
+                gap = copy.deepcopy(source)
+                prior = pending.get(gap['id'], {})
+                gap['requirement_ids'] = sorted(set(prior.get('requirement_ids', [])) | set(gap['requirement_ids']))
+                gap['function_ids'] = sorted(set(prior.get('function_ids', [])) | set(gap['function_ids']))
+                pending[gap['id']] = gap
+        warnings = [f"{gap['id']}: pending backend capability: {gap['capability']} ({gap['reason']})"
+                    for gap in pending.values()]
         write_json_atomic(self.root / 'backend_ir.json', ir)
-        write_json_atomic(self.root / 'report.json', {'errors': errors, 'model_calls': self.sequence,
+        write_json_atomic(self.root / 'report.json', {'errors': errors, 'warnings': warnings,
+                                                    'pending_capabilities': list(pending.values()),
+                                                    'status': 'FAILED' if errors else 'GENERATED_WITH_WARNINGS' if warnings else 'GENERATED',
+                                                    'model_calls': self.sequence,
                                                     'traversal': 'depth_first_postorder', 'node_order': self.node_order})
         self.log.info(f'BACKEND_DESIGN_FINISHED success={not errors} '
                       f'requirements={len(ir["requirements"])} modules={len(ir["modules"])} '
@@ -499,4 +542,4 @@ class BackendDesignPass:
                       f'ir={self.root / "backend_ir.json"} report={self.root / "report.json"}')
         for error in errors:
             self.log.info(f'BACKEND_DESIGN_ERROR {error}')
-        return BackendDesignResult(ir, states, errors)
+        return BackendDesignResult(ir, states, errors, warnings)

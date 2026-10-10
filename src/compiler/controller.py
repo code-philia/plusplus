@@ -471,8 +471,10 @@ class Compiler:
             failed_requirements = {
                 rid for task in frontend.report["failed_tasks"] for rid in task["requirement_ids"]
             }
+            pending_requirements = {rid for gap in frontend.report.get("pending_capabilities", [])
+                                    for rid in gap["requirement_ids"]}
             for rid in requirement_ids:
-                states[rid] = "FRONTEND_IR_GENERATED_WITH_WARNINGS" if rid in failed_requirements else "FRONTEND_IR_GENERATED"
+                states[rid] = "FRONTEND_IR_GENERATED_WITH_WARNINGS" if rid in failed_requirements | pending_requirements else "FRONTEND_IR_GENERATED"
             for warning in frontend.report["warnings"]:
                 await self._log("Compiler", warning, "warning")
             for failure in frontend.report["failed_tasks"]:
@@ -485,7 +487,9 @@ class Compiler:
             failed_requirements = set()
             self._runtime.traceability.merge_frontend_design_links(frontend_ir_traceability(frontend.frontend_ir))
             for rid in requirement_ids:
-                states[rid] = "FRONTEND_IR_GENERATED"
+                states[rid] = ("FRONTEND_IR_GENERATED_WITH_WARNINGS"
+                               if any(rid in gap["requirement_ids"] for gap in frontend.frontend_ir.get("pending_capabilities", []))
+                               else "FRONTEND_IR_GENERATED")
 
         if not frontend.ok:
             await self._log(
@@ -496,7 +500,7 @@ class Compiler:
         if rank < 4:
             checkpoints.save("frontend-ir", backend_routes=backend_glue.route_registry,
                              frontend={"frontend_ir": frontend.frontend_ir,
-                                       "report": {"status": frontend.report["status"], "warnings": [], "failed_tasks": []}})
+                                       "report": frontend.report})
         self._runtime.events.mark_phase_started("FRONTEND_LOWERING", "Lowering frontend IR to React.")
         await self._log("Compiler", "Deterministically lowering React components, types, wiring and behavior placeholders; no model calls.")
         lowered_frontend = FrontendReactLowerer(request.output_dir).lower(

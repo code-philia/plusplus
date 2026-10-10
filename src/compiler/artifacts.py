@@ -77,7 +77,7 @@ class CompilerArtifactStore:
         canonical_path = self.frontend_design_root / "frontend_ir.json"
         write_json_atomic(canonical_path, frontend_ir)
         paths["frontend_ir"] = str(canonical_path)
-        tables = ("ui", "data", "events", "functions", "types")
+        tables = ("ui", "data", "events", "functions", "types", "pending_capabilities")
         for table in tables:
             path = self.frontend_design_root / f"{table}.json"
             write_json_atomic(path, {table: frontend_ir.get(table, [])})

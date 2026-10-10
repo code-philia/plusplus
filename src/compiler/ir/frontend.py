@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Literal, NotRequired, TypedDict
 
 from .backend import BackendField, BackendType, BackendTypeDefinition
+from .integration import PendingCapability
 
 
 JSONValue = str | int | float | bool | None | list["JSONValue"] | dict[str, "JSONValue"]
@@ -119,6 +120,7 @@ class FrontendIR(TypedDict):
     events: list[UIEvent]
     functions: list[UIFunction]
     visual_references: NotRequired[list[UIVisualReference]]
+    pending_capabilities: NotRequired[list[PendingCapability]]
 
 
 __all__ = [
