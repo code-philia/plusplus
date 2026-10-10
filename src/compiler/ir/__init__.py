@@ -14,6 +14,10 @@ from .backend import (
     DatabaseModule, ModuleBase, BackendField, BackendType, BackendTypeDefinition,
     AcceptanceCriterion, ModuleCall, DataAccess, RequirementBlueprint, APIEntryPoint,
 )
+from .frontend import (
+    FrontendIR, UINode, UIData, UIEvent, UIFunction, UICall, UIValue,
+    LiteralValue, ReferenceValue, UIRepeat, UIVisualReference,
+)
 
 __all__ = [
     "ERAttribute", "EREntity", "ERModelIR", "ERRelationship", "SchemaDataType",
@@ -23,4 +27,6 @@ __all__ = [
     "FunctionModule", "DatabaseModule", "ModuleBase", "BackendField",
     "BackendType", "BackendTypeDefinition", "AcceptanceCriterion", "ModuleCall",
     "DataAccess", "RequirementBlueprint", "APIEntryPoint",
+    "FrontendIR", "UINode", "UIData", "UIEvent", "UIFunction", "UICall",
+    "UIValue", "LiteralValue", "ReferenceValue", "UIRepeat", "UIVisualReference",
 ]
