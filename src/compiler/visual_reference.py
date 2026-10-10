@@ -25,6 +25,7 @@ from .visual_contracts import (
     VisualReferenceIssue,
 )
 from .trace_payload import format_payload_trace
+from .model_logs import log_design_call, logged_completion
 from .model_client import (
     completion_request_kwargs,
     describe_model_error,
@@ -133,6 +134,7 @@ class VisualModel:
             transport_retries=_nonnegative_env_int("ARC_MODEL_TRANSPORT_RETRIES", 3),
         )
 
+    @log_design_call
     def generate_visual_json(
         self,
         *,
@@ -149,7 +151,7 @@ class VisualModel:
         response = None
         if not force_json and self._structured_output_mode == "json_schema":
             try:
-                response = self._client.chat.completions.create(
+                response = logged_completion(self._client,
                     **completion_request_kwargs(
                         model=self.model,
                         messages=messages,
@@ -188,7 +190,7 @@ class VisualModel:
         )
         if response is None and (force_json or self._structured_output_mode == "json_object"):
             try:
-                response = self._client.chat.completions.create(
+                response = logged_completion(self._client,
                     **completion_request_kwargs(
                         model=self.model,
                         messages=fallback_messages,
@@ -206,7 +208,7 @@ class VisualModel:
                 self._last_output_mode = "prompt_only"
 
         if response is None:
-            response = self._client.chat.completions.create(
+            response = logged_completion(self._client,
                 **completion_request_kwargs(
                     model=self.model,
                     messages=fallback_messages,
@@ -561,21 +563,49 @@ class VisualReferenceAnalyzer:
 
     def analyze_cached(self, references: Sequence[ResolvedVisualReference], path: Path,
                        *, persist: bool = True) -> VisualReferenceAnalysisResult:
-        """Persist reusable image observations by document-relative path, verified by content."""
+        """Find prior observations by image path, including sibling runs; verify content."""
         try:
             cached = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
         except (OSError, ValueError):
             cached = {}
         if not isinstance(cached, dict):
             cached = {}
+        # Generated runs share an output parent, but each owns its local cache.
+        # Only read other runs; never modify their artifacts or requirement attribution.
+        prior_caches: list[tuple[Path, dict[str, Any]]] | None = None
+
+        def lookup(values: dict[str, Any], reference: ResolvedVisualReference) -> dict[str, Any] | None:
+            return next((values.get(key) for key in [reference.source_path, *reference.aliases]
+                         if isinstance(values.get(key), dict)
+                         and values[key].get("sha256") == reference.sha256
+                         and not _visual_analysis_error(values[key].get("analysis"), reference.id)), None)
+
         records, errors = [], []
         for reference in references:
-            saved = next((cached.get(key) for key in [reference.source_path, *reference.aliases]
-                          if isinstance(cached.get(key), dict)
-                          and cached[key].get("sha256") == reference.sha256
-                          and not _visual_analysis_error(cached[key].get("analysis"), reference.id)), None)
+            saved = lookup(cached, reference)
+            origin = path
+            if saved is None:
+                if prior_caches is None:
+                    prior_caches = []
+                    # path = <output-parent>/<run>/.arc/design/frontend/visual_cache.json
+                    candidates = path.resolve().parents[4].glob("*/.arc/design/frontend/visual_cache.json")
+                    for candidate in sorted(candidates):
+                        if candidate.resolve() == path.resolve():
+                            continue
+                        try:
+                            value = json.loads(candidate.read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            continue
+                        if isinstance(value, dict):
+                            prior_caches.append((candidate, value))
+                for candidate, values in prior_caches:
+                    saved = lookup(values, reference)
+                    if saved is not None:
+                        origin = candidate
+                        break
             if saved is not None:
                 record = reference.to_ir(saved["analysis"])
+                self._log.info(f"VISUAL_CACHE_HIT path={reference.source_path} cache={origin}")
             else:
                 result = self.analyze([reference])
                 errors.extend(result.errors)
@@ -583,9 +613,10 @@ class VisualReferenceAnalyzer:
                     continue  # Failed analysis is not reusable cache content.
                 record = result.references[0]
             records.append(record)
+            # Reuse aliases/content within this batch even when publication is deferred.
+            for key in [reference.source_path, *reference.aliases]:
+                cached[key] = record
             if persist:
-                for key in [reference.source_path, *reference.aliases]:
-                    cached[key] = record
                 write_json_atomic(path, cached)
         return VisualReferenceAnalysisResult(references=records, errors=errors)
 

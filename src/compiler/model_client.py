@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from dotenv import load_dotenv
 from openai import OpenAI
 from .cost_tracking import record_usage as record_cost_usage
+from .model_logs import log_design_call, logged_completion
 
 
 CONTEXT_SEGMENTS_KEY = "context_segments"
@@ -141,6 +142,7 @@ class Model:
             transport_retries=_nonnegative_env_int("ARC_MODEL_TRANSPORT_RETRIES", 3),
         )
 
+    @log_design_call
     def generate_json(
         self,
         *,
@@ -160,7 +162,7 @@ class Model:
         response = None
         if not force_json and self._structured_output_mode == "json_schema":
             try:
-                response = self._client.chat.completions.create(
+                response = logged_completion(self._client,
                     **completion_request_kwargs(
                         model=self.model,
                         messages=messages,
@@ -194,7 +196,7 @@ class Model:
         ]
         if response is None and (force_json or self._structured_output_mode == "json_object"):
             try:
-                response = self._client.chat.completions.create(
+                response = logged_completion(self._client,
                     **completion_request_kwargs(
                         model=self.model,
                         messages=fallback_messages,
@@ -211,7 +213,7 @@ class Model:
                 self._last_output_mode = "prompt_only"
 
         if response is None:
-            response = self._client.chat.completions.create(
+            response = logged_completion(self._client,
                 **completion_request_kwargs(
                     model=self.model,
                     messages=fallback_messages,
