@@ -72,6 +72,13 @@ ANALYSIS_SCHEMA = object_schema({
     "data_operations": schema_for(list[DataAccess]),
     "types": schema_for(list[BackendTypeDefinition]),
     "requested_tables": {"type": "array", "items": {"type": "string"}},
+    "api_capabilities": {"type": "array", "items": object_schema({
+        "operation": {"type": "string"}, "purpose": {"type": "string"},
+        "inputs": {"type": "array", "items": {"type": "string"}},
+        "context": {"type": "array", "items": {"type": "string"}},
+        "outputs": {"type": "array", "items": {"type": "string"}},
+        "scenario_ids": {"type": "array", "items": {"type": "string"}},
+    })},
 })
 DRAFT_SCHEMA = {"anyOf": [], "$defs": MODULE_SCHEMA["$defs"]}
 for reference in MODULE_SCHEMA["anyOf"]:
@@ -93,6 +100,13 @@ Separate trusted context (identity/time/generated IDs) from untrusted inputs. De
 validation, concurrency, atomicity, idempotency and observable failure behavior when required.
 Do not invent business requirements. Acceptance criteria are falsifiable given/when/then statements
 linked to supplied scenario IDs, including negative cases and prohibited writes. Return JSON only.
+Schema IR tables, constraints, defaults and generation are the only storage authority. Treat er_model,
+entities and relationships as traceability views, not additional executable schema definitions.
+Every supplied runtime_rule with responsibility=backend is an explicit obligation: assign it to affected
+write modules and orchestration specs, with transaction boundaries, affected-owner membership checks,
+final-member deletion behavior and acceptance criteria. There is no automatic database-global membership check.
+Regex/email/URL validation and time-relative rules remain backend behavior from the original requirements;
+absence from ER does not waive them. Do not reinterpret operation-specific validation as a storage invariant.
 Treat the supplied database design as an accepted input, not something to audit or repair.
 Do not reject generation for missing UNIQUE/CHECK/foreign-key constraints, indexes, database
 isolation settings, or an unspecified database enforcement mechanism. Keep requirement-backed
@@ -151,6 +165,19 @@ Mandatory validation contract (also applies to fields inside shared object types
 '''
 ANALYSIS_PROMPT = COMMON + """Analyze the current requirement before allocating modules.
 Return behavior, inputs/context/outputs, criteria, logical data_operations, and new shared types.
+Discover api_capabilities from each scenario's COMPLETE observable operation chain, including
+Given setup and Then observations after reload, navigation, a later request or another visitor.
+Do not limit a requirement to one API or infer capabilities only from its name or When action.
+Each capability has operation, purpose, scenario_ids and inputs/context/outputs containing exact
+semantic_ids from the corresponding analysis field catalogs. Different APIs may use different
+subsets of those catalogs; do not require registration fields for a session-read capability.
+Example: registration -> establish a server session -> browser reload -> read the current session
+-> display the username needs registration AND current-session retrieval capabilities. Describe
+how the browser retains a server-issued credential and supplies it on later requests, how trusted
+identity is resolved, and the signed-out result. Persisting a session row alone does not restore UI
+state after reload. Include all necessary account/session reads in data_operations. Reuse supplied
+capabilities when compatible; do not invent unrelated login/logout features merely from this example.
+Criteria must cover later observations through these capabilities, not just assert a successful write.
 Pure presentation/client-local requirements have server_state=false and no data_operations.
 Inspect supporting reads as well as writes. related_data is a candidate scope, not a closed list.
 If a needed table is listed in schema_index but absent from schema_slice, put it in requested_tables;
@@ -178,6 +205,11 @@ Only DB modules have direct data_access. API includes a technology-neutral entry
 Each call specifies purpose, optional business condition, and optional predecessor local call IDs.
 Each draft fixes spec, inputs/context/outputs, calls and direct data_access; do not return criteria yet.
 All new modules must be reachable from api_ids. Non-server requirements return three empty lists.
+Materialize EVERY analysis.api_capabilities entry as an API reachable from this requirement's
+api_ids, reusing compatible APIs where available. Copy its operation exactly to entrypoint.operation
+and use exactly its input/context/output semantic_ids. Multiple API entry points per requirement
+are expected when its complete scenario needs them. Describe session establishment and credential
+transport in specs in a technology-neutral way, including the current-session read after reload.
 """
 ARCHITECTURE_PROMPT += '''Architecture-specific checks:
 new_modules local ids must be unique and match kind: API.GetHomeBanners, FUNC.ListHomeBanners,

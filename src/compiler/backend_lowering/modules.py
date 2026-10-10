@@ -34,6 +34,8 @@ def render_blueprint_module(kind: str, module: dict[str, Any], symbol: dict[str,
             add(row['symbol'], row['path'])
         for operator in DRIZZLE_OPERATORS:
             add(operator, 'drizzle-orm', specifier='drizzle-orm')
+    if kind in {'DB', 'FUNC'}:
+        add('schemaTransaction', 'backend/src/db/client.ts')
     if kind == 'API':
         for value in ('Request', 'Response'):
             add(value, 'express', type_only=True, specifier='express')
@@ -49,6 +51,8 @@ def render_blueprint_module(kind: str, module: dict[str, Any], symbol: dict[str,
         lines.append(f'import {"type " if type_only else ""}{{ {", ".join(names)} }} from {json.dumps(specifier)};')
     blueprint = module['backend_module']
     lines += ['', '/**', f' * @arc-owner {symbol["owner_requirement"]}', f' * @arc-kind {kind}']
+    if kind in {'DB', 'FUNC'}:
+        lines.append(' * Atomic writes use schemaTransaction with a synchronous callback; domain triggers and transaction-boundary relationship checks are compiler-owned.')
     for line in blueprint['spec'].splitlines():
         lines.append(' * ' + line.replace('*/', '* /'))
     for criterion in blueprint['acceptance_criteria']:
@@ -56,6 +60,8 @@ def render_blueprint_module(kind: str, module: dict[str, Any], symbol: dict[str,
     lines += [' */', f'export const {blueprint_name} = {json.dumps(blueprint, ensure_ascii=False, indent=2)} as const;', '']
     runtime = ['HttpError', 'newId', 'now', 'nowIso']
     dep_symbols = [row['symbol'] for row in dependencies] + runtime
+    if kind in {'DB', 'FUNC'}:
+        dep_symbols.append('schemaTransaction')
     if kind == 'DB':
         dep_symbols += ['database'] + [row['symbol'] for row in tables] + list(DRIZZLE_OPERATORS)
     dependency_entries = ["get database() { return database; }" if value == "database" else value

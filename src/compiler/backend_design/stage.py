@@ -180,6 +180,8 @@ class BackendDesignPass:
     def __init__(self, model: StructuredModel, artifact_root: Path) -> None:
         self.model = model
         self.root = Path(artifact_root) / 'design' / 'backend'
+        if hasattr(model, 'set_usage_path'):
+            model.set_usage_path(Path(artifact_root) / 'model_usage.jsonl')
         self.log = SynchronousLog('BackendDesignPass', workspace_root=Path(artifact_root).resolve().parent)
         self.started_at = time.perf_counter()
         self.retries = _budget('ARC_STRUCTURED_OUTPUT_RETRY_COUNT', 2, 10)
@@ -361,6 +363,21 @@ class BackendDesignPass:
                     problems.append('analysis needs nonempty spec and criteria')
                 if not value['server_state'] and (value['data_operations'] or value['context']):
                     problems.append('client-local requirements cannot have server operations/context')
+                capabilities = value['api_capabilities']
+                operations = [row['operation'] for row in capabilities]
+                if (len(operations) != len(set(operations)) or any(not key.strip() for key in operations)
+                        or bool(capabilities) != value['server_state']):
+                    problems.append('server requirements need distinct API capabilities; client-local requirements need none')
+                capability_scenarios = {key for row in capabilities for key in row['scenario_ids']}
+                if value['server_state'] and not own_scenarios <= capability_scenarios:
+                    problems.append('API capabilities must cover every complete own scenario')
+                for capability in capabilities:
+                    if not capability['purpose'].strip() or set(capability['scenario_ids']) - own_scenarios - inherited_scenarios:
+                        problems.append('API capability needs a purpose and supplied scenario IDs')
+                    for direction in ('inputs', 'context', 'outputs'):
+                        ids = capability[direction]
+                        if len(ids) != len(set(ids)) or set(ids) - {row['semantic_id'] for row in value[direction]}:
+                            problems.append(f'API capability {direction} must reference its analysis field catalog')
                 names = {row['name'] for row in schema['tables']}
                 if set(value['requested_tables']) - names:
                     problems.append('requested_tables contains unknown schema tables')
@@ -427,6 +444,15 @@ class BackendDesignPass:
                                           'api_ids': api_ids, 'related_data': related,
                                           'acceptance_criteria': copy.deepcopy(analysis['acceptance_criteria'])})
             modules = {row['id']: row for row in trial['modules']}
+            capabilities = {row['operation']: row for row in analysis['api_capabilities']}
+            entries = [modules[key] for key in api_ids if key in modules and modules[key]['kind'] == 'API']
+            if {row['entrypoint']['operation'] for row in entries} != set(capabilities):
+                raise ValueError('API capability coverage differs from the complete scenario analysis')
+            for entry in entries:
+                capability = capabilities[entry['entrypoint']['operation']]
+                for direction in ('inputs', 'context', 'outputs'):
+                    if {field['semantic_id'] for field in entry[direction]} != set(capability[direction]):
+                        raise ValueError(f'API {entry["id"]} {direction} differs from its analyzed capability')
             used = reachable(api_ids, modules)
             if set(value['reuse_module_ids']) - used:
                 raise ValueError('unused reuse_module_ids')
