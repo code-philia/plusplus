@@ -233,6 +233,14 @@ def complete_legacy_manifests(root: Path, snapshot: dict[str, Any]) -> None:
     payload["database_manifest"] = database.manifest
     if snapshot["stage"] == "backend-ir":
         return
+    if payload["design"].get("ir_kind") == "backend_design":
+        from .backend_lowering import BackendLowerer
+        lowered = checked(BackendLowerer().lower(payload["design"], payload["database"], manifest,
+                                                database.manifest, root, default_port=snapshot["web_port"]))
+        for name, table in lowered.tables.items():
+            write_json_atomic(root / f".arc/lowering/backend/{name}.json", table)
+        payload["backend_routes"] = lowered.route_registry
+        return
     from .backend_design.projection import project_lowering_design
     design = project_lowering_design(payload["design"])
     symbols = checked(GlobalSymbolPlanner().plan(design, payload["database"], manifest))

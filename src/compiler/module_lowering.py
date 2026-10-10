@@ -212,6 +212,7 @@ class ModuleSkeletonLowerer:
                 dependency_rows,
                 database_rows,
                 path,
+                _contract_symbol(binding.get("context_contract_id"), symbols, locations, errors, prefix, module_id),
             )
             sources[path] = source
             manifest_modules.append(
@@ -221,6 +222,11 @@ class ModuleSkeletonLowerer:
                     "function_symbol": str(symbol["symbol"]),
                     "input_contract_id": binding.get("input_contract_id"),
                     "output_contract_id": binding.get("output_contract_id"),
+                    "context_contract_id": binding.get("context_contract_id"),
+                    "requirement_ids": list(module.get("requirement_ids", [])),
+                    "entrypoint": module.get("entrypoint"),
+                    "calls": module.get("calls", []),
+                    "data_access": module.get("data_access", []),
                     "callees": list(module.get("callees", [])),
                     "database_entities": [row["entity"] for row in database_rows],
                     "exports": exports,
@@ -495,7 +501,13 @@ def _render_module(
     dependencies: list[dict[str, str]],
     database_rows: list[dict[str, str]],
     current_path: str,
+    context_contract: dict[str, Any] | None = None,
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
+    if "backend_module" in module:
+        from .backend_lowering.modules import render_blueprint_module
+        return render_blueprint_module(kind, module, function_symbol, input_contract,
+                                       output_contract, context_contract, dependencies,
+                                       database_rows, current_path)
     function_name = str(function_symbol["symbol"])
     input_name = str(input_contract["symbol"]) if input_contract else None
     output_name = str(output_contract["symbol"]) if output_contract else None

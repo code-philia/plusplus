@@ -312,17 +312,19 @@ class GlobalSymbolPlanner:
                     "module_kind": module_kind,
                     "owner_requirement": owner_requirement,
                 },
-                self._module_symbol_base(module, module_kind, local_name),
+                self._module_symbol_base(module, module_kind, local_name) + (_pascal_case(owner_requirement) if "backend_module" in module else ""),
                 qualifier=_pascal_case(owner_requirement),
             )
             input_contract = self._plan_contract(module, module_kind, local_name, "INPUT")
             output_contract = self._plan_contract(module, module_kind, local_name, "OUTPUT")
+            context_contract = self._plan_contract(module, module_kind, local_name, "CONTEXT") if "backend_module" in module else None
             self._module_bindings.append(
                 {
                     "module_id": module_id,
                     "function_symbol": function_symbol,
                     "input_contract_id": input_contract,
                     "output_contract_id": output_contract,
+                    "context_contract_id": context_contract,
                 }
             )
 
@@ -333,7 +335,7 @@ class GlobalSymbolPlanner:
         local_name: str,
         direction: str,
     ) -> str | None:
-        field_key = "inputs" if direction == "INPUT" else "outputs"
+        field_key = {"INPUT": "inputs", "OUTPUT": "outputs", "CONTEXT": "context"}[direction]
         fields = module.get(field_key, [])
         module_id = str(module["id"])
         if not isinstance(fields, list):
@@ -391,7 +393,8 @@ class GlobalSymbolPlanner:
                 "fields": normalized_fields,
                 "consumers": [module_id],
             },
-            self._contract_symbol_base(module_kind, local_name, direction),
+            (f"Backend{_pascal_case(module_kind)}{_pascal_case(direction)}{digest}" if "backend_module" in module
+             else self._contract_symbol_base(module_kind, local_name, direction)),
             qualifier=_pascal_case(module_id.partition("::")[0]),
         )
         self._symbols[contract_id]["symbol"] = symbol
@@ -650,6 +653,8 @@ class GlobalSymbolPlanner:
     @staticmethod
     def _contract_symbol_base(module_kind: str, local_name: str, direction: str) -> str:
         name = _pascal_case(local_name)
+        if direction == "CONTEXT":
+            return name + "Context"
         suffixes = {
             ("API", "INPUT"): "Request",
             ("API", "OUTPUT"): "Response",

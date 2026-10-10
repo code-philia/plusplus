@@ -58,9 +58,11 @@ def project_lowering_design(ir: dict[str, Any]) -> dict[str, Any]:
                                 'data_access': module['data_access'], 'acceptance_criteria': module['acceptance_criteria']},
                                ensure_ascii=False, separators=(',', ':'))
         projected.append({**copy.deepcopy(module), 'owner_requirement': key.split('::', 1)[0],
-                          # Internal functions receive explicit context values
-                          # as parameters. API request contracts stay untrusted.
-                          'inputs': fields(module['inputs'] + (module['context'] if module['kind'] != 'API' else [])),
+                          # Separate context contracts keep trusted values out
+                          # of HTTP input and ordinary input interfaces.
+                          'inputs': fields(module['inputs']),
+                          'context': fields(module['context']),
+                          'backend_module': copy.deepcopy(module),
                           'outputs': fields(module['outputs']),
                           'spec': module['spec'] + '\nImplementation blueprint: ' + blueprint,
                           'effects': effects(key), 'callers': sorted(set(callers[key])),

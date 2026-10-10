@@ -124,6 +124,7 @@ class CodeBindingLowerer:
             owner = str(module.get("owner_requirement", "")).strip()
             input_type = _type_reference(lowered.get("input_contract_id"), type_by_id)
             output_type = _type_reference(lowered.get("output_contract_id"), type_by_id)
+            context_type = _type_reference(lowered.get("context_contract_id"), type_by_id)
             symbol = str(lowered.get("function_symbol", "")).strip()
             route = copy.deepcopy(backend_routes.get(module_id)) if kind == "API" else None
             binding = {
@@ -134,6 +135,7 @@ class CodeBindingLowerer:
                 "symbol": symbol,
                 "input_type": input_type,
                 "output_type": output_type,
+                "context_type": context_type,
                 "props_type": None,
                 "route": _compact_backend_route(route),
                 "callees": _strings(module.get("callees")),

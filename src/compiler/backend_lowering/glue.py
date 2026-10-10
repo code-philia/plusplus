@@ -92,6 +92,16 @@ class BackendGlueLowerer:
             sources, glue_imports, glue_exports = _render_glue(
                 routes, module_rows, default_port,
             )
+            if any("backend_module" in row for row in modules.values()):
+                from .modules import render_context_runtime
+                context_path = "backend/src/runtime/context.ts"
+                sources[context_path] = render_context_runtime()
+                glue_imports[context_path] = [
+                    _import("Response", "express", type_only=True),
+                    _import("HttpError", "./errors.js", source="backend/src/runtime/errors.ts"),
+                    _import("NotImplementedError", "./errors.js", source="backend/src/runtime/errors.ts"),
+                ]
+                glue_exports[context_path] = ["BackendRequestContext", "getRequestContext", "setRequestContext"]
 
         import_plan = _build_import_plan(
             planned_files,
@@ -293,7 +303,8 @@ def _plan_routes(
             errors.append(f"ARC3805 ROUTE_DERIVATION_FAILED: invalid API module id {module_id!r}.")
             continue
         owner, _, local_name = parsed
-        base_path = f"/api/{_kebab_case(local_name)}"
+        operation_name = str(modules[module_id].get("entrypoint", {}).get("operation") or local_name)
+        base_path = f"/api/{_kebab_case(operation_name)}"
         by_base_path.setdefault(base_path, []).append(module_id)
         module = modules[module_id]
         method, method_rule = _derive_http_method(module)
@@ -304,12 +315,14 @@ def _plan_routes(
                 "method": method,
                 "base_path": base_path,
                 "owner_requirement": owner,
+                "requirement_ids": list(module.get("requirement_ids", [owner])),
+                "authentication": module.get("entrypoint", {}).get("authentication", "none"),
                 "handler_symbol": str(row.get("function_symbol", "")),
                 "handler_path": str(row.get("path", "")),
                 "input_source": "query" if method in {"GET", "DELETE"} else "body",
                 "derivation": {
                     "method": method_rule,
-                    "path": "API_MODULE_NAME",
+                    "path": "BUSINESS_OPERATION" if "backend_module" in module else "API_MODULE_NAME",
                 },
             }
         )

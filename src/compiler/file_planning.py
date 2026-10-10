@@ -73,6 +73,9 @@ class GlobalFilePlanner:
             return self._result()
 
         self._reserve_system_files()
+        if any("backend_module" in row for row in modules.values()):
+            self._add_file("backend/src/runtime/context.ts", role="RUNTIME_CONTEXT", owner="SKELETON_COMPILER",
+                           mutability="FROZEN", origin="SYSTEM")
         for path in sorted(set(fixture_paths or [])):
             self._add_file(
                 path,
@@ -248,7 +251,7 @@ class GlobalFilePlanner:
                 self._errors.append(
                     f"ARC3206 MODULE_BINDING_INVALID: module kind mismatch for {module_id}."
                 )
-            for key in ("input_contract_id", "output_contract_id"):
+            for key in ("input_contract_id", "output_contract_id", "context_contract_id"):
                 contract_id = binding.get(key)
                 if contract_id is not None and (
                     contract_id not in symbols
@@ -321,6 +324,16 @@ class GlobalFilePlanner:
                 )
                 continue
             primary = normalized_consumers[0]
+            if "backend_module" in modules[primary]:
+                # Content-addressed contracts remain in the same file when a
+                # later requirement starts sharing them.
+                path = f'shared/src/contracts/backend/{symbol["id"].removeprefix("CONTRACT.").replace(".", "-").lower()}.ts'
+                for consumer in normalized_consumers:
+                    if "backend_module" not in modules[consumer]:
+                        self._errors.append("Mixed legacy and blueprint contract consumers")
+                self._place_symbol(symbol, path, role="DATA_CONTRACT", owner="SKELETON_COMPILER",
+                                   mutability="FROZEN", origin="DESIGN_IR")
+                continue
             contracts_by_primary_consumer.setdefault(primary, []).append(symbol)
 
         for primary in sorted(contracts_by_primary_consumer):
@@ -362,8 +375,11 @@ class GlobalFilePlanner:
                 "FUNC",
                 "module",
             )
+            directory = roots[module_kind]
+            if "backend_module" in modules[module_id]:
+                directory += "/" + _kebab_case(owner)
             path = self._allocate_path(
-                roots[module_kind],
+                directory,
                 _kebab_case(local_name),
                 qualifier=owner,
             )
@@ -385,6 +401,8 @@ class GlobalFilePlanner:
                 "function_symbol": str(binding["function_symbol"]),
                 "input_contract_id": binding.get("input_contract_id"),
                 "output_contract_id": binding.get("output_contract_id"),
+                "context_contract_id": binding.get("context_contract_id"),
+                "requirement_ids": list(modules[module_id].get("requirement_ids", [owner])),
             }
 
     def _allocate_path(self, directory: str, stem: str, *, qualifier: str) -> str:

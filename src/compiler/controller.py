@@ -12,7 +12,7 @@ from arcbench_agent_runtime.runtime import AgentRuntime
 
 from .artifacts import CompilerArtifactStore
 from .checkpoints import CheckpointStore, START_FROM
-from .backend_lowering import BackendGlueLowerer
+from .backend_lowering import lower_backend
 from .code_binding import CodeTargetResolver, CodeBindingLowerer
 from .database_design import (
     DatabaseSchemaPass,
@@ -429,7 +429,7 @@ class Compiler:
             design_stage = DesignPass(model, artifact_store.root)
             await self._log(
                 "Compiler",
-                "Running requirement analysis, incremental module architecture, leaf-first refinement, and global backend review.",
+                "Running requirement analysis, incremental module architecture, leaf-first refinement, and parent composition.",
             )
             design = design_stage.compile(
                 preprocessing.requirement_ir,
@@ -471,242 +471,28 @@ class Compiler:
         backend_blueprint = design.design_ir
         design = SimpleNamespace(design_ir=project_lowering_design(backend_blueprint))
 
-        # ===================================================================
-        #                  Backend Lowering: Symbol Planning
-        # ===================================================================
-
         if rank < 4:
-            self._runtime.events.mark_phase_started(
-                "SKELETON", "ARC skeleton lowering stage started."
+            self._runtime.events.mark_phase_started("SKELETON", "Generating backend framework from Backend IR.")
+            await self._log("Compiler", "Planning backend files, separate input/context/output contracts, module dependencies, and HTTP adapters.")
+            lowered_backend = lower_backend(
+                request.output_dir, artifact_store, project_manifest,
+                blueprint=backend_blueprint, schema=database.schema,
+                database_manifest=lowered_database.manifest, default_port=request.web_port,
             )
-
-            await self._log(
-                "Compiler",
-                "Running deterministic GLOBAL_SYMBOL_PLANNING over Design IR and Database Schema IR.",
-            )
-            symbol_planning = GlobalSymbolPlanner().plan(
-                design.design_ir,
-                database.schema,
-                project_manifest,
-            )
-            for error in symbol_planning.errors:
-                await self._log("Compiler", error, "warning")
-            if not symbol_planning.ok:
-                await self._log(
-                    "Compiler",
-                    "GLOBAL_SYMBOL_PLANNING reported design issues; continuing with the partial symbol registry.",
-                    "warning",
-                )
-            await self._log(
-                "Compiler",
-                "Global Symbol Registry planned.",
-            )
-
-            # ===================================================================
-            #                   Backend Lowering: File Planning
-            # ===================================================================
-
-            await self._log(
-                "Compiler",
-                "Running deterministic GLOBAL_FILE_PLANNING over Design IR and the Symbol Registry.",
-            )
-            file_planning = GlobalFilePlanner(request.output_dir).plan(
-                design.design_ir,
-                symbol_planning.registry,
-                project_manifest,
-                fixture_paths=[],
-            )
-            for error in file_planning.errors:
+            artifacts.update(lowered_backend.artifacts)
+            for warning in lowered_backend.warnings:
+                await self._log("Compiler", warning, "warning")
+            for error in lowered_backend.errors:
                 await self._log("Compiler", error, "error")
-            if not file_planning.ok:
-                await self._log("Compiler", "GLOBAL_FILE_PLANNING pass failed.", "error")
-                return CompilationResult(
-                    ok=False,
-                    root_id=root_id,
-                    states=states,
-                    artifacts=artifacts,
-                )
-            await self._log(
-                "Compiler",
-                "Global File Registry planned.",
-            )
-
-            # ===================================================================
-            #                    Backend Lowering: Type Lowering
-            # ===================================================================
-
-            await self._log(
-                "Compiler",
-                "Running deterministic TYPE_LOWERING for canonical TypeScript definitions.",
-            )
-            type_lowering = TypeLowerer().lower(
-                symbol_planning.registry,
-                file_planning.registry,
-            )
-            for error in type_lowering.errors:
-                await self._log("Compiler", error, "error")
-            if not type_lowering.ok:
-                await self._log("Compiler", "TYPE_LOWERING pass failed.", "error")
-                return CompilationResult(
-                    ok=False,
-                    root_id=root_id,
-                    states=states,
-                    artifacts=artifacts,
-                )
-            artifacts.update(artifact_store.write_generated_sources({
-                path: source for path, source in type_lowering.sources.items()
-                if path.startswith("shared/src/")
-            }))
-            await self._log("Compiler", "Canonical TypeScript type world generated.")
-
-            # ===================================================================
-            #                Skeleton Stage 3.1: DB Module Lowering
-            # ===================================================================
-
-            await self._log(
-                "Compiler",
-                "Running deterministic DB_MODULE_LOWERING from frozen registries.",
-            )
-            module_lowerer = ModuleSkeletonLowerer()
-            db_modules = module_lowerer.lower(
-                "DB",
-                design.design_ir,
-                symbol_planning.registry,
-                file_planning.registry,
-            )
-            for error in db_modules.errors:
-                await self._log("Compiler", error, "error")
-            if not db_modules.ok:
-                await self._log("Compiler", "DB_MODULE_LOWERING pass failed.", "error")
-                return CompilationResult(
-                    ok=False,
-                    root_id=root_id,
-                    states=states,
-                    artifacts=artifacts,
-                )
-            artifacts.update(artifact_store.write_generated_sources(db_modules.sources))
-            await self._log("Compiler", "DB Module Skeletons generated.")
-
-            # ===================================================================
-            #               Skeleton Stage 3.1: FUNC Module Lowering
-            # ===================================================================
-
-            await self._log(
-                "Compiler",
-                "Running deterministic FUNC_MODULE_LOWERING from frozen registries.",
-            )
-            func_modules = module_lowerer.lower(
-                "FUNC",
-                design.design_ir,
-                symbol_planning.registry,
-                file_planning.registry,
-            )
-            for error in func_modules.errors:
-                await self._log("Compiler", error, "error")
-            if not func_modules.ok:
-                await self._log("Compiler", "FUNC_MODULE_LOWERING pass failed.", "error")
-                return CompilationResult(
-                    ok=False,
-                    root_id=root_id,
-                    states=states,
-                    artifacts=artifacts,
-                )
-            artifacts.update(artifact_store.write_generated_sources(func_modules.sources))
-            await self._log("Compiler", "FUNC Module Skeletons generated.")
-
-            # ===================================================================
-            #                Skeleton Stage 3.1: API Module Lowering
-            # ===================================================================
-
-            await self._log(
-                "Compiler",
-                "Running deterministic API_MODULE_LOWERING from frozen registries.",
-            )
-            api_modules = module_lowerer.lower(
-                "API",
-                design.design_ir,
-                symbol_planning.registry,
-                file_planning.registry,
-            )
-            for error in api_modules.errors:
-                await self._log("Compiler", error, "error")
-            if not api_modules.ok:
-                await self._log("Compiler", "API_MODULE_LOWERING pass failed.", "error")
-                return CompilationResult(
-                    ok=False,
-                    root_id=root_id,
-                    states=states,
-                    artifacts=artifacts,
-                )
-            artifacts.update(artifact_store.write_generated_sources(api_modules.sources))
-            await self._log(
-                "Compiler",
-                "API Module Skeletons generated; global Glue Code generation is next.",
-            )
-
-            # ===================================================================
-            #          Skeleton Stage 3.1: Global Glue and Backend Manifest
-            # ===================================================================
-
-            await self._log(
-                "Compiler",
-                "Running deterministic GLOBAL_GLUE_LOWERING with Route and Import Planning.",
-            )
-            backend_glue = BackendGlueLowerer().lower(
-                design.design_ir,
-                symbol_planning.registry,
-                file_planning.registry,
-                {
-                    "type": type_lowering.manifest,
-                    "database": lowered_database.manifest,
-                    "DB": db_modules.manifest,
-                    "FUNC": func_modules.manifest,
-                    "API": api_modules.manifest,
-                },
-                default_port=request.web_port,
-            )
-            for error in backend_glue.errors:
-                await self._log("Compiler", error, "error")
-            if not backend_glue.ok:
-                await self._log("Compiler", "GLOBAL_GLUE_LOWERING pass failed.", "error")
-                return CompilationResult(
-                    ok=False,
-                    root_id=root_id,
-                    states=states,
-                    artifacts=artifacts,
-                )
-            artifacts.update(artifact_store.write_generated_sources(backend_glue.sources))
-            artifacts.update(artifact_store.write_backend_lowering(
-                report={
-                    "status": "LOWERED",
-                    "errors": list(backend_glue.errors),
-                    "warnings": [],
-                    "files": sorted(backend_glue.sources),
-                    "manifest": backend_glue.manifest,
-                    "import_plan": backend_glue.import_plan,
-                    "route_registry": backend_glue.route_registry,
-                },
-                sources=backend_glue.sources,
-                tables={
-                    "symbols": symbol_planning.registry,
-                    "files": file_planning.registry,
-                    "types": type_lowering.manifest,
-                    "database": lowered_database.manifest,
-                    "modules_db": db_modules.manifest,
-                    "modules_func": func_modules.manifest,
-                    "modules_api": api_modules.manifest,
-                    "routes": backend_glue.route_registry,
-                    "imports": backend_glue.import_plan,
-                },
-            ))
-            await self._log(
-                "Compiler",
-                "Global Glue Code, Route Registration, Barrel Export, Import Plan, and Backend Manifest generated.",
-            )
+            if not lowered_backend.ok:
+                return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
+            backend_glue = SimpleNamespace(route_registry=lowered_backend.route_registry)
+            await self._log("Compiler", "Backend framework generated; business bodies remain for implementation.")
             history.commit("3.2 backend lowering", [".arc/lowering/backend", "backend/src", "shared/src"])
             stage_checkpoint(request.output_dir, "backend-lowering")
             failed_gate = await self._build_gate(request, "3.2 backend lowering", root_id, states, artifacts)
-
+            if failed_gate is not None:
+                return failed_gate
         else:
             backend_glue = SimpleNamespace(route_registry=saved["backend_routes"])
 
@@ -865,12 +651,21 @@ class Compiler:
                 if not result.ok:
                     raise ValueError("; ".join(result.errors))
                 return result
-            symbols = checked(GlobalSymbolPlanner().plan(design_ir, database_schema, project_manifest))
-            files = checked(GlobalFilePlanner(request.output_dir).plan(
-                design_ir, symbols.registry, project_manifest, fixture_paths=[]))
-            types = checked(TypeLowerer().lower(symbols.registry, files.registry))
-            modules = {kind: checked(ModuleSkeletonLowerer().lower(
-                kind, design_ir, symbols.registry, files.registry)).manifest for kind in ("DB", "FUNC", "API")}
+            backend_tables = artifact_store.backend_lowering_root
+            if (backend_tables / 'manifest.json').is_file():
+                read_table = lambda name: json.loads((backend_tables / f'{name}.json').read_text())
+                symbols = SimpleNamespace(registry=read_table('symbols'))
+                files = SimpleNamespace(registry=read_table('files'))
+                types = SimpleNamespace(manifest=read_table('types'))
+                modules = {kind: read_table('modules_' + {'DB': 'db', 'FUNC': 'func', 'API': 'api'}[kind])
+                           for kind in ('DB', 'FUNC', 'API')}
+            else:
+                symbols = checked(GlobalSymbolPlanner().plan(design_ir, database_schema, project_manifest))
+                files = checked(GlobalFilePlanner(request.output_dir).plan(
+                    design_ir, symbols.registry, project_manifest, fixture_paths=[]))
+                types = checked(TypeLowerer().lower(symbols.registry, files.registry))
+                modules = {kind: checked(ModuleSkeletonLowerer().lower(
+                    kind, design_ir, symbols.registry, files.registry)).manifest for kind in ('DB', 'FUNC', 'API')}
             report_path = request.output_dir / ".arc/lowering/frontend/lowering.json"
             if not report_path.is_file():
                 report_path = request.output_dir / ".arc/code/frontend/lowering.json"
