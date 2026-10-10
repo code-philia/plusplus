@@ -128,7 +128,6 @@ class RequirementBlueprint(TypedDict):
 
 class BackendIR(TypedDict):
     ir_kind: Literal["backend_design"]
-    status: Literal["PROPOSED", "RESOLVED"]
     schema_ref: str
     schema_hash: str
     types: list[BackendTypeDefinition]

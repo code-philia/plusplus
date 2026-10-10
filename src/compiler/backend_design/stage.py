@@ -6,15 +6,18 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from arcbench_agent_runtime.jsonio import write_json_atomic
+from core.logging import SynchronousLog
 from ..model_client import StructuredModel, describe_model_error
 from .contracts import (
     ANALYSIS_SCHEMA, ARCHITECTURE_SCHEMA, MODULE_SCHEMA, AUDIT_SCHEMA,
     ANALYSIS_PROMPT, ARCHITECTURE_PROMPT, REFINEMENT_PROMPT, AUDIT_PROMPT,
+    PARENT_CONTEXT_SCHEMA, PARENT_DESIGN_SCHEMA, PARENT_CONTEXT_PROMPT, PARENT_DESIGN_PROMPT,
 )
 from .validation import shape_errors, validate_data_access, validate_backend_ir, access_set, reachable
 
@@ -28,7 +31,7 @@ class BackendDesignResult:
 
     @property
     def ok(self) -> bool:
-        return not self.errors and self.design_ir.get('status') == 'RESOLVED'
+        return not self.errors
 
 
 def _hash(value: Any) -> str:
@@ -91,6 +94,34 @@ def _preorder(requirement_ir: dict[str, Any]) -> list[str]:
     return order
 
 
+def _tree_events(requirement_ir: dict[str, Any]) -> list[tuple[str, str]]:
+    """Ancestor context on entry; composition on exit, in document order."""
+    _preorder(requirement_ir)  # Validate references/cycles before any model calls.
+    nodes = requirement_ir['nodes']
+    atomic = set(requirement_ir.get('atomic_units', []))
+    seen: set[str] = set()
+    events: list[tuple[str, str]] = []
+
+    def visit(key: str) -> None:
+        if key in seen:
+            return
+        seen.add(key)
+        if key in atomic:
+            events.append(('atomic', key))
+            return
+        events.append(('enter', key))
+        for child in nodes[key].get('children_ids', []):
+            visit(child)
+        events.append(('exit', key))
+
+    root = requirement_ir.get('root_id')
+    if root:
+        visit(root)
+    for key in [*requirement_ir.get('node_order', []), *requirement_ir.get('atomic_units', [])]:
+        visit(key)
+    return events
+
+
 def project_design_context(schema: dict[str, Any], requirement_id: str, dependencies: dict[str, Any]) -> dict[str, Any]:
     """Select associated authoritative tables, then include direct FK neighbors."""
     wanted = {requirement_id} | _closure(requirement_id, dependencies)
@@ -149,6 +180,8 @@ class BackendDesignPass:
     def __init__(self, model: StructuredModel, artifact_root: Path) -> None:
         self.model = model
         self.root = Path(artifact_root) / 'design' / 'backend'
+        self.log = SynchronousLog('BackendDesignPass', workspace_root=Path(artifact_root).resolve().parent)
+        self.started_at = time.perf_counter()
         self.retries = _budget('ARC_STRUCTURED_OUTPUT_RETRY_COUNT', 2, 10)
         self.reopen_budget = _budget('ARC_DESIGN_REOPEN_COUNT', 2, 6)
         self.sequence = 0
@@ -161,8 +194,14 @@ class BackendDesignPass:
             if feedback:
                 request['validation_feedback'] = feedback
             self.sequence += 1
+            call_sequence = self.sequence
             trace = {'phase': phase, 'unit': unit, 'attempt': attempt + 1, 'input': request,
                      'instructions': prompt, 'output_schema': schema}
+            started = time.perf_counter()
+            self.log.info(
+                f'MODEL_REQUEST phase={phase} call={self.sequence} '
+                f'attempt={attempt + 1}/{self.retries + 1} '
+                f'input_chars={len(json.dumps(request, ensure_ascii=False))}', node_id=unit)
             try:
                 value = self.model.generate_json(schema_name=f'arc_backend_{phase}', instructions=prompt,
                                                  input_payload=request,
@@ -175,43 +214,104 @@ class BackendDesignPass:
                 feedback = [describe_model_error(exc)]
                 trace['errors'] = feedback
                 value = None
-            write_json_atomic(self.root / 'passes' / f'{self.sequence:05d}_{phase}.json', trace)
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            trace['duration_ms'] = duration_ms
+            trace_path = self.root / 'passes' / f'{call_sequence:05d}_{phase}.json'
+            write_json_atomic(trace_path, trace)
             if not feedback:
+                self.log.info(f'MODEL_ACCEPTED phase={phase} duration_ms={duration_ms} trace={trace_path}', node_id=unit)
                 return value
+            self.log.info(f'MODEL_REJECTED phase={phase} duration_ms={duration_ms} '
+                          f'errors={len(feedback)} trace={trace_path}', node_id=unit)
+            for error in feedback:
+                self.log.info(f'VALIDATION_FEEDBACK phase={phase}: {error}', node_id=unit)
+        self.log.info(f'MODEL_FAILED phase={phase} attempts={self.retries + 1}', node_id=unit)
         raise ValueError(f'{phase} {unit}: ' + '; '.join(feedback))
 
     def compile(self, requirement_ir: dict[str, Any], dependency_graph: dict[str, Any], database_schema: dict[str, Any]) -> BackendDesignResult:
-        ir = {'ir_kind': 'backend_design', 'status': 'PROPOSED',
+        ir = {'ir_kind': 'backend_design',
               'schema_ref': '.arc/design/database/schema.json', 'schema_hash': _hash(database_schema),
               'types': [], 'requirements': [], 'modules': []}
         states, errors = {}, []
         self.sequence = 0
+        self.parent_contexts = {}
+        self.inherited_context = []
+        self.started_at = time.perf_counter()
         nodes = requirement_ir.get('nodes', {})
+        self.requirement_nodes = nodes
         atomic = list(dict.fromkeys(requirement_ir.get('atomic_units', [])))
         dependencies = dependency_graph.get('atomic_dependencies', {})
+        self.log.info(f'BACKEND_DESIGN_STARTED requirements={len(atomic)} '
+                      f'tables={len(database_schema.get("tables", []))} traversal=ancestor_context_then_postorder_composition '
+                      f'output={self.root}')
         try:
-            order = _preorder(requirement_ir)
+            events = _tree_events(requirement_ir)
+            order = [key for phase, key in events if phase == 'atomic']
         except ValueError as exc:
             errors.append(str(exc))
             order = []
-        scenarios = set().union(*(_scenario_ids(nodes.get(rid, {}), rid) for rid in atomic)) if atomic else set()
+            events = []
+        scenarios = set().union(*(_scenario_ids(nodes.get(rid, {}), rid) for rid in nodes)) if nodes else set()
         if database_schema.get('status') != 'RESOLVED' or not isinstance(database_schema.get('tables'), list):
             errors.append('Backend design requires a RESOLVED database-neutral schema with tables')
         if errors:
             return self._finish(ir, states, errors)
         analyses = {}
-        for rid in order:
+        index = 0
+        for event, rid in events:
+            self.inherited_context = []
+            ancestor = nodes[rid].get('parent_id')
+            while ancestor:
+                if ancestor in self.parent_contexts:
+                    self.inherited_context.insert(0, {'requirement_id': ancestor, **self.parent_contexts[ancestor]})
+                ancestor = nodes[ancestor].get('parent_id')
+            if event == 'enter':
+                try:
+                    self.log.info('PARENT_CONTEXT_STARTED', node_id=rid)
+                    self.parent_contexts[rid] = self._decision(
+                        'parent_context', rid, PARENT_CONTEXT_PROMPT, PARENT_CONTEXT_SCHEMA,
+                        {'requirement': nodes[rid], 'scenario_ids': sorted(_scenario_ids(nodes[rid], rid)),
+                         'ancestor_context': self.inherited_context},
+                        lambda value: ['Parent criteria reference unknown scenarios']
+                        if {key for row in value['acceptance_criteria'] for key in row['scenario_ids']} - _scenario_ids(nodes[rid], rid) else [])
+                    states[rid] = 'CONTEXT_READY'
+                except ValueError as exc:
+                    states[rid] = 'FAILED'
+                    errors.append(f'{rid}: {exc}')
+                continue
+            if event == 'exit':
+                try:
+                    if states.get(rid) == 'FAILED' or any(states.get(child) != 'DESIGN_VALIDATED' for child in nodes[rid].get('children_ids', [])):
+                        raise ValueError('Parent cannot finalize: context or child design failed')
+                    ir = self._compose_parent(ir, rid, nodes, database_schema, scenarios, analyses)
+                    states[rid] = 'DESIGN_VALIDATED'
+                    write_json_atomic(self.root / 'backend_ir.json', ir)
+                    self.log.info('PARENT_DESIGN_COMMITTED', node_id=rid)
+                except ValueError as exc:
+                    states[rid] = 'FAILED'
+                    errors.append(f'{rid}: {exc}')
+                    self.log.info(f'PARENT_DESIGN_FAILED {exc}', node_id=rid)
+                continue
+            index += 1
+            self.log.info(f'REQUIREMENT_STARTED progress={index}/{len(order)} '
+                          f'name={nodes.get(rid, {}).get("name", "")}', node_id=rid)
             if rid not in nodes:
                 states[rid] = 'FAILED'
                 errors.append(f'{rid}: missing requirement node')
+                self.log.info('REQUIREMENT_FAILED missing requirement node', node_id=rid)
                 continue
             try:
                 analysis, context = self._analyze(ir, rid, nodes[rid], database_schema, dependencies)
                 analyses[rid] = analysis
+                self.log.info(f'ANALYSIS_COMPLETED server_state={analysis["server_state"]} '
+                              f'data_operations={len(analysis["data_operations"])} '
+                              f'criteria={len(analysis["acceptance_criteria"])}', node_id=rid)
                 feedback = []
                 for reopen in range(self.reopen_budget + 1):
                     try:
                         trial = self._architecture(ir, rid, analysis, context, database_schema, dependencies, scenarios, feedback)
+                        self.log.info(f'ARCHITECTURE_COMPLETED new_modules={len(trial["modules"]) - len(ir["modules"])} '
+                                      f'total_modules={len(trial["modules"])}', node_id=rid)
                         self._refine(trial, ir, rid, analysis, context, database_schema, scenarios)
                         problems = validate_backend_ir(trial, database_schema, scenarios)
                         if problems:
@@ -220,18 +320,26 @@ class BackendDesignPass:
                         ir = trial
                         states[rid] = 'DESIGN_VALIDATED'
                         write_json_atomic(self.root / 'backend_ir.json', ir)
+                        self.log.info(f'REQUIREMENT_VALIDATED progress={index}/{len(order)} '
+                                      f'total_modules={len(ir["modules"])}', node_id=rid)
                         break
                     except ValueError as exc:
                         feedback = [str(exc)]
+                        self.log.info(f'ARCHITECTURE_REJECTED round={reopen + 1}/{self.reopen_budget + 1} '
+                                      f'feedback={exc}', node_id=rid)
                         if reopen == self.reopen_budget:
                             raise
+                        self.log.info('ARCHITECTURE_REOPEN retrying module design', node_id=rid)
             except ValueError as exc:
                 states[rid] = 'FAILED'
                 errors.append(f'{rid}: {exc}')
+                self.log.info(f'REQUIREMENT_FAILED {exc}', node_id=rid)
+        self.log.info(f'GLOBAL_VALIDATION_STARTED requirements={len(ir["requirements"])} modules={len(ir["modules"])}')
         errors += validate_backend_ir(ir, database_schema, scenarios)
-        if set(atomic) != {row['requirement_id'] for row in ir['requirements']}:
-            errors.append('Final backend IR does not cover every atomic requirement')
+        if {key for _, key in events} != {row['requirement_id'] for row in ir['requirements']}:
+            errors.append('Final backend IR does not cover every requirement tree node')
         if not errors:
+            self.log.info('GLOBAL_REVIEW_STARTED reviewing related requirement groups')
             # Bounded semantic groups: each requirement plus related prior/current
             # requirements, including all descendants of the selected entries.
             for requirement in ir['requirements']:
@@ -247,6 +355,8 @@ class BackendDesignPass:
                         modules = {row['id']: row for row in ir['modules']}
                         scope = reachable([key for row in group for key in row['api_ids']], modules)
                         group_tables = {access['table'] for key in scope for access in modules[key]['data_access']}
+                        self.log.info(f'GLOBAL_REVIEW_GROUP group={start // 8 + 1} '
+                                      f'requirements={len(group)} modules={len(scope)}', node_id=rid)
                         self._decision('global_review', rid, AUDIT_PROMPT, AUDIT_SCHEMA,
                                        {'requirements': group, 'types': ir['types'],
                                         'modules': [modules[key] for key in sorted(scope)],
@@ -257,8 +367,7 @@ class BackendDesignPass:
                 except ValueError as exc:
                     errors.append(str(exc))
                     states[rid] = 'FAILED'
-        if not errors:
-            ir['status'] = 'RESOLVED'
+                    self.log.info(f'GLOBAL_REVIEW_FAILED {exc}', node_id=rid)
         return self._finish(ir, states, errors)
 
     def _analyze(self, ir: dict[str, Any], rid: str, requirement: dict[str, Any], schema: dict[str, Any], dependencies: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -266,15 +375,21 @@ class BackendDesignPass:
         related = _related_data(schema, rid)
         payload = {'requirement_id': rid, 'requirement': requirement,
                    'scenario_ids': sorted(_scenario_ids(requirement, rid)), 'related_data': related,
+                   'ancestor_context': self.inherited_context,
                    'schema_index': [{'name': row['name'], 'description': row['description']} for row in schema['tables']],
                    'types': ir['types'], 'dependency_requirements': [row for row in ir['requirements'] if row['requirement_id'] in _closure(rid, dependencies)],
                    'existing_modules': _candidates(ir, rid, dependencies, set(related), str(requirement))}
+        self.log.info(f'ANALYSIS_CONTEXT tables={len(context["tables"])} '
+                      f'existing_modules={len(payload["existing_modules"])}', node_id=rid)
         for _ in range(3):
             def validate(value: dict[str, Any]) -> list[str]:
                 problems = validate_data_access(value['data_operations'], schema)
                 covered = {key for row in value['acceptance_criteria'] for key in row['scenario_ids']}
-                if covered != _scenario_ids(requirement, rid):
-                    problems.append('analysis criteria must cover exactly the supplied scenario IDs')
+                own_scenarios = _scenario_ids(requirement, rid)
+                inherited_scenarios = {key for context_row in self.inherited_context
+                                       for criterion in context_row['acceptance_criteria'] for key in criterion['scenario_ids']}
+                if not own_scenarios <= covered or covered - own_scenarios - inherited_scenarios:
+                    problems.append('analysis criteria must cover own scenarios and reference only own/inherited scenarios')
                 if not value['acceptance_criteria'] or not value['spec'].strip():
                     problems.append('analysis needs nonempty spec and criteria')
                 if not value['server_state'] and (value['data_operations'] or value['context']):
@@ -294,6 +409,8 @@ class BackendDesignPass:
             if not requested:
                 return analysis, context
             context['tables'] += [copy.deepcopy(row) for row in schema['tables'] if row['name'] in requested]
+            self.log.info(f'SCHEMA_EXPANDED added_tables={sorted(requested)} '
+                          f'total_tables={len(context["tables"])}', node_id=rid)
         raise ValueError('schema expansion budget exhausted')
 
     def _architecture(self, base: dict[str, Any], rid: str, analysis: dict[str, Any], context: dict[str, Any], schema: dict[str, Any], dependencies: dict[str, Any], scenarios: set[str], feedback: list[str]) -> dict[str, Any]:
@@ -362,7 +479,8 @@ class BackendDesignPass:
                 return [str(exc)]
         decision = self._decision('architecture', rid, ARCHITECTURE_PROMPT, ARCHITECTURE_SCHEMA,
                                   {'requirement_id': rid, 'analysis': analysis, 'schema_slice': context,
-                                   'existing_modules': candidates, 'architecture_feedback': feedback}, validate)
+                                   'existing_modules': candidates, 'architecture_feedback': feedback,
+                                   'ancestor_context': self.inherited_context}, validate)
         return materialize(decision)
 
     def _refine(self, trial: dict[str, Any], base: dict[str, Any], rid: str, analysis: dict[str, Any], context: dict[str, Any], schema: dict[str, Any], scenarios: set[str]) -> None:
@@ -375,6 +493,8 @@ class BackendDesignPass:
             module = modules[key]
             for call in module['calls']:
                 refine(call['module_id'])
+            self.log.info(f'MODULE_REFINEMENT_STARTED kind={module["kind"]} '
+                          f'callees={len(module["calls"])}', node_id=key)
             def validate(value: dict[str, Any]) -> list[str]:
                 mutable = {'spec', 'acceptance_criteria'} | ({'data_access'} if module['kind'] == 'DB' else set())
                 errors = [f'fixed module field changed: {field}' for field in module if field not in mutable and value[field] != module[field]]
@@ -385,10 +505,12 @@ class BackendDesignPass:
                 return errors + validate_backend_ir(candidate, schema, scenarios)
             value = self._decision('refinement', key, REFINEMENT_PROMPT, MODULE_SCHEMA,
                                    {'fixed_module': module, 'analysis': analysis, 'schema_slice': context,
+                                    'ancestor_context': self.inherited_context,
                                     'types': trial['types'], 'callees': [modules[call['module_id']] for call in module['calls']]}, validate)
             module.clear()
             module.update(value)
             done.add(key)
+            self.log.info(f'MODULE_REFINEMENT_COMPLETED criteria={len(module["acceptance_criteria"])}', node_id=key)
         for module in list(modules.values()):
             refine(module['id'])
 
@@ -396,13 +518,154 @@ class BackendDesignPass:
         requirement = next(row for row in trial['requirements'] if row['requirement_id'] == rid)
         modules = {row['id']: row for row in trial['modules']}
         scope = reachable(requirement['api_ids'], modules)
+        inherited = []
+        ancestor = self.requirement_nodes[rid].get('parent_id')
+        while ancestor:
+            if ancestor in self.parent_contexts:
+                inherited.insert(0, {'requirement_id': ancestor, **self.parent_contexts[ancestor]})
+            ancestor = self.requirement_nodes[ancestor].get('parent_id')
         self._decision('coverage_review', rid, AUDIT_PROMPT, AUDIT_SCHEMA,
                        {'analysis': analysis, 'requirement': requirement, 'types': trial['types'],
+                        'ancestor_context': inherited,
                         'modules': [modules[key] for key in sorted(scope)]}, lambda value: value['issues'])
+
+    def _compose_parent(self, base: dict[str, Any], rid: str, nodes: dict[str, Any], schema: dict[str, Any], scenarios: set[str], analyses: dict[str, Any]) -> dict[str, Any]:
+        self.log.info('PARENT_COMPOSITION_STARTED', node_id=rid)
+        descendants = set()
+        pending = list(nodes[rid].get('children_ids', []))
+        while pending:
+            key = pending.pop()
+            descendants.add(key)
+            pending.extend(nodes[key].get('children_ids', []))
+        requirements = [row for row in base['requirements'] if row['requirement_id'] in descendants]
+        modules = {row['id']: row for row in base['modules']}
+        scope = reachable([key for row in requirements for key in row['api_ids']], modules)
+        # Include reverse transitive callers: modifying a shared leaf affects
+        # users outside the current parent's subtree as well.
+        editable = set(scope)
+        while True:
+            expanded = editable | {key for key, module in modules.items()
+                                   if any(call['module_id'] in editable for call in module['calls'])}
+            if expanded == editable:
+                break
+            editable = expanded
+        supplied = reachable(list(editable), modules)
+
+        def materialize(value: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
+            trial = copy.deepcopy(base)
+            requirement = copy.deepcopy(value['requirement'])
+            if requirement['requirement_id'] != rid:
+                raise ValueError('Parent requirement id changed')
+            covered = {key for row in requirement['acceptance_criteria'] for key in row['scenario_ids']}
+            if not _scenario_ids(nodes[rid], rid) <= covered:
+                raise ValueError('Parent scenarios are not fully covered')
+            definitions = {row['id']: row for row in trial['types']}
+            for row in value['new_types']:
+                if row['id'] in definitions:
+                    raise ValueError('Parent cannot redefine an existing type')
+                definitions[row['id']] = row
+            trial['types'] = list(definitions.values())
+            mapping = {}
+            for module in value['new_modules']:
+                key = module['id']
+                if not re.fullmatch(r'(API|FUNC|DB)\.[A-Za-z][A-Za-z0-9_]*', key) or not key.startswith(module['kind'] + '.'):
+                    raise ValueError(f'Invalid new local module id {key}')
+                if key in mapping:
+                    raise ValueError('Duplicate new module id')
+                mapping[key] = f'{rid}::{key}'
+            if value['role'] == 'CATEGORY' and value['new_modules']:
+                raise ValueError('Category parents do not create orchestration modules')
+            updated = set()
+            targets = {row['id']: row for row in trial['modules']}
+            for change in value['updates']:
+                replacement = copy.deepcopy(change)
+                key = replacement['id']
+                if key not in editable or key in updated:
+                    raise ValueError(f'Invalid or duplicate module update {key}')
+                original = targets[key]
+                for prop in ('id', 'kind', 'name'):
+                    if replacement[prop] != original[prop]:
+                        raise ValueError(f'Cannot change module identity {key}.{prop}')
+                if not all(row in replacement['acceptance_criteria'] for row in original['acceptance_criteria']):
+                    raise ValueError(f'Update must preserve existing acceptance criteria {key}')
+                updated.add(key)
+                replacement['requirement_ids'] = original['requirement_ids']
+                targets[key] = replacement
+            for draft in value['new_modules']:
+                module = copy.deepcopy(draft)
+                module['id'] = mapping[module['id']]
+                module['requirement_ids'] = [rid]
+                targets[module['id']] = module
+            for key in updated | set(mapping.values()):
+                for call in targets[key]['calls']:
+                    call['module_id'] = mapping.get(call['module_id'], call['module_id'])
+                    if call['module_id'] not in supplied | set(mapping.values()):
+                        raise ValueError('Parent references an unsupplied module')
+            requirement['api_ids'] = [mapping.get(key, key) for key in requirement['api_ids']]
+            if set(requirement['api_ids']) - supplied - set(mapping.values()):
+                raise ValueError('Parent references an unsupplied API')
+            trial['requirements'].append(requirement)
+            trial['modules'] = list(targets.values())
+            # Derive associations afresh after call graph changes, not just add
+            # memberships. Preserved criteria keep their original provenance.
+            for module in targets.values():
+                module['requirement_ids'] = []
+            for row in trial['requirements']:
+                for key in reachable(row['api_ids'], targets):
+                    targets[key]['requirement_ids'].append(row['requirement_id'])
+            affected = {rid}
+            for row in base['requirements']:
+                before = reachable(row['api_ids'], modules)
+                after = reachable(row['api_ids'], targets)
+                if before & updated or after & updated or before != after:
+                    affected.add(row['requirement_id'])
+            return trial, affected
+
+        def validate(value: dict[str, Any]) -> list[str]:
+            try:
+                trial, affected = materialize(value)
+                problems = validate_backend_ir(trial, schema, scenarios)
+                if problems:
+                    return problems
+                self.log.info(f'PARENT_CHANGE_REVALIDATION updated_modules={len(value["updates"])} '
+                              f'rechecking_requirements={len(affected)}', node_id=rid)
+                for key in sorted(affected):
+                    row = next(item for item in trial['requirements'] if item['requirement_id'] == key)
+                    if key in analyses:
+                        self._review(key, analyses[key], trial)
+                    else:
+                        graph = {item['id']: item for item in trial['modules']}
+                        used = reachable(row['api_ids'], graph)
+                        self._decision('parent_revalidation', key, AUDIT_PROMPT, AUDIT_SCHEMA,
+                                       {'requirement': nodes[key], 'blueprint': row,
+                                        'parent_context': self.parent_contexts.get(key, {}),
+                                        'proposed_changes': value['updates'],
+                                        'types': trial['types'], 'schema': schema,
+                                        'modules': [graph[item] for item in sorted(used)]},
+                                       lambda decision: decision['issues'])
+                return []
+            except ValueError as exc:
+                return [str(exc)]
+
+        decision = self._decision('parent_composition', rid, PARENT_DESIGN_PROMPT, PARENT_DESIGN_SCHEMA,
+                                  {'requirement_id': rid, 'requirement': nodes[rid],
+                                   'parent_context': self.parent_contexts[rid], 'ancestor_context': self.inherited_context,
+                                   'child_requirements': requirements, 'types': base['types'],
+                                   'editable_modules': sorted(editable),
+                                   'modules': [modules[key] for key in sorted(supplied)],
+                                   'schema': schema}, validate)
+        trial, _ = materialize(decision)
+        return trial
 
     def _finish(self, ir: dict[str, Any], states: dict[str, str], errors: list[str]) -> BackendDesignResult:
         errors = list(dict.fromkeys(errors))
         write_json_atomic(self.root / 'backend_ir.json', ir)
-        write_json_atomic(self.root / 'report.json', {'status': ir['status'], 'errors': errors, 'node_states': states,
-                                                   'model_calls': self.sequence})
+        write_json_atomic(self.root / 'report.json', {'errors': errors, 'model_calls': self.sequence})
+        self.log.info(f'BACKEND_DESIGN_FINISHED success={not errors} '
+                      f'requirements={len(ir["requirements"])} modules={len(ir["modules"])} '
+                      f'model_calls={self.sequence} errors={len(errors)} '
+                      f'duration_seconds={time.perf_counter() - self.started_at:.1f} '
+                      f'ir={self.root / "backend_ir.json"} report={self.root / "report.json"}')
+        for error in errors:
+            self.log.info(f'BACKEND_DESIGN_ERROR {error}')
         return BackendDesignResult(ir, states, errors)

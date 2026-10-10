@@ -460,9 +460,6 @@ class Compiler:
 
         else:
             design = SimpleNamespace(design_ir=saved["design"])
-            if design.design_ir.get("ir_kind") == "backend_design" and design.design_ir.get("status") != "RESOLVED":
-                await self._log("Compiler", "Checkpoint backend blueprint is not RESOLVED.", "error")
-                return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
             self._runtime.traceability.merge_design_links(design_traceability(design.design_ir))
 
         if rank < 3:

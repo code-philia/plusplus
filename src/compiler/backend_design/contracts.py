@@ -126,3 +126,35 @@ Flag incompatible shared behavior and contradictory state transitions across req
 Do not demand generic CRUD or unspecified business rules. Return issues=[] only when no specific
 requirement-backed defect remains. Issues must state the violated criterion and needed repair.
 """
+
+PARENT_CONTEXT_SCHEMA = object_schema({
+    'shared_rules': {'type': 'array', 'items': {'type': 'string'}},
+    'acceptance_criteria': schema_for(list[AcceptanceCriterion]),
+})
+from ..ir.backend import RequirementBlueprint
+PARENT_DESIGN_SCHEMA = object_schema({
+    'role': {'enum': ['CATEGORY', 'WORKFLOW']},
+    'requirement': schema_for(RequirementBlueprint),
+    'new_types': schema_for(list[BackendTypeDefinition]),
+    'new_modules': schema_for(list[BackendModule]),
+    'updates': schema_for(list[BackendModule]),
+})
+PARENT_CONTEXT_PROMPT = COMMON + '''Read this parent requirement before its children.
+Extract only explicit inherited business rules, terminology and falsifiable parent criteria.
+Do not invent modules. Criteria scenario_ids may reference only supplied parent scenarios;
+use [] for rules without an explicit scenario. Preserve the inherited ancestor rules.
+'''
+PARENT_DESIGN_PROMPT = COMMON + '''Review the parent after its children have completed.
+CATEGORY means grouping/context: associate relevant existing child APIs, create no new modules.
+Repairs of existing child modules are allowed for inherited rule conflicts.
+WORKFLOW means an explicit whole business operation: add orchestration only for uncovered
+parent behavior. Tree containment is not itself a module call. Prefer existing interfaces.
+Return the parent requirement blueprint, new types/modules, and full module replacements.
+New ids must be local KIND.Name; calls/API refs may use these or exact supplied existing ids.
+Update existing interfaces only if required by a specific inherited/parent criterion; prefer composition/new orchestration when sufficient.
+Include ALL caller changes required by a replacement, including callers outside this subtree.
+Preserve existing module id/kind/name and criteria; preserve old behavior and semantic identities
+needed by other requirements. Update only modules supplied in editable_modules.
+Do not remove modules or change existing requirement contracts. Never silently redefine types.
+The compiler derives usage associations and verifies all affected requirements before commit.
+'''
