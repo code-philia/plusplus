@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "design_path", nargs="?",
-        help="Design workspace, directory containing schema.json and er_model.json, or schema.json; defaults to output workspace",
+        help="Design workspace, directory containing schema.json, or schema.json; defaults to output workspace",
     )
     parser.add_argument("-o", "--output-dir", required=True, help="Output project workspace")
     parser.add_argument("--port", type=int, help="Web port used when initializing the project")
@@ -55,9 +55,8 @@ def main(argv: list[str] | None = None) -> int:
         output = Path(args.output_dir).expanduser().resolve()
         store = CompilerArtifactStore(output)
         source = _design_root(Path(args.design_path) if args.design_path else output)
-        # Read both inputs before initialization or publishing any artifacts.
-        schema = _read_object(source / "schema.json")
-        er_model = _read_object(source / "er_model.json")
+        # Validate the input before initialization; design artifacts remain read-only.
+        _read_object(source / "schema.json")
         print(f"Database lowering workspace: {output}", flush=True)
 
         manifest_path = store.root / "project" / "project-manifest.json"
@@ -72,10 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         if error or manifest is None:
             raise ValueError(error or "Missing initialized project manifest")
 
-        # External design artifacts become the canonical inputs in this project.
-        if source != store.database_root:
-            store.write_database_schema(schema, er_model=er_model)
-        result = lower_database(output, store, manifest)
+        result = lower_database(output, store, manifest, schema_path=source / "schema.json")
         for warning in result.warnings:
             print(f"WARNING: {warning}")
         for error in result.errors:
