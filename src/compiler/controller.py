@@ -233,8 +233,12 @@ class Compiler:
             self._runtime.traceability.merge_frontend_design_links(frontend_ir_traceability(saved["frontend"]["frontend_ir"]))
             for rid in requirement_ids:
                 states[rid] = "FRONTEND_LOWERED"
+            failed_gate = None
             if not request.resume:
-                await self._build_gate(request, "Restart from lowered", root_id, states, artifacts)
+                failed_gate = await self._build_gate(request, "Restart from lowered", root_id, states, artifacts)
+            if request.stop_after_lowering:
+                await self._log("Compiler", "Stopped after lowering; design artifacts and generated sources are ready for inspection.")
+                return failed_gate or CompilationResult(ok=True, root_id=root_id, states=states, artifacts=artifacts)
             return await self._continue_after_lowering(
                 request=request, artifact_store=artifact_store, preprocessing=preprocessing,
                 database_schema=saved["database"], design_ir=project_lowering_design(saved["design"]),
@@ -529,7 +533,8 @@ class Compiler:
                 states[rid] = "FRONTEND_BUILD_FAILED"
             await self._log(
                 "Compiler",
-                "Frontend build/typecheck failed; continuing to TDD for repair.",
+                "Frontend build/typecheck failed; stopping for inspection."
+                if request.stop_after_lowering else "Frontend build/typecheck failed; continuing to TDD for repair.",
                 "warning",
             )
         history.commit("4.3 frontend build accepted", [".arc/lowering/frontend"])
@@ -539,9 +544,16 @@ class Compiler:
             "Compiler",
             "Frontend React lowering completed; build and typecheck passed."
             if failed_gate is None
-            else "Frontend React lowering completed; build/typecheck feedback deferred to TDD.",
+            else ("Frontend React lowering completed; build/typecheck failed."
+                  if request.stop_after_lowering else "Frontend React lowering completed; build/typecheck feedback deferred to TDD."),
             "success" if failed_gate is None else "warning",
         )
+        if request.stop_after_lowering:
+            await self._log("Compiler", "Stopped after lowering; design artifacts and generated sources are ready for inspection.")
+            return failed_gate or CompilationResult(
+                ok=frontend.ok, root_id=root_id, states=states,
+                failed_nodes=sorted(failed_requirements), artifacts=artifacts,
+            )
         return await self._continue_after_lowering(
             request=request, artifact_store=artifact_store, preprocessing=preprocessing,
             database_schema=database.schema, design_ir=design.design_ir,

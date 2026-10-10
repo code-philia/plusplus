@@ -100,6 +100,8 @@ def build_compile_parser(subparsers) -> None:
     parser.add_argument("--restart-output", help="New worktree directory; default: sibling of the source project")
     parser.add_argument("--resume", action="store_true",
                         help="Continue only unstarted TDD requirements in the existing output project")
+    parser.add_argument("--stop-after-lowering", action="store_true",
+                        help="Stop after database/backend/frontend design and lowering, before test generation and TDD")
     parser.set_defaults(func=cmd_compile)
 
 
@@ -182,6 +184,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         log_cb=cli_log,
         start_from=args.start_from,
         resume=args.resume,
+        stop_after_lowering=args.stop_after_lowering,
     )
     result = await workflow_manager.start_compilation()
     
