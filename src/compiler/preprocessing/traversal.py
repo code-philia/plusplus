@@ -36,8 +36,9 @@ def postorder(requirement_ir: dict[str, Any]) -> list[str]:
         result.append(key)
 
     root = requirement_ir.get('root_id')
-    if root:
-        visit(root)
-    for key in dict.fromkeys([*requirement_ir.get('node_order', []), *nodes]):
-        visit(key)
+    if root not in nodes:
+        raise ValueError(f'Missing requirement root {root}')
+    visit(root)
+    if missing := set(nodes) - visited:
+        raise ValueError(f'Requirements unreachable from root: {sorted(missing)}')
     return result

@@ -133,8 +133,8 @@ RELATIONSHIP_DECISION_SCHEMA: dict[str, Any] = {
 
 
 ENTITY_INSTRUCTIONS = """You are an ER-modeling specialist focused on persistent domain entities.
-Your task is to discover entities in the shared ER model for one atomic requirement.
-For exactly one atomic requirement, decide which persistent entities it reuses and which persistent entities must
+Your task is to discover entities in the shared ER model for one requirement.
+For exactly one requirement, decide which persistent entities it reuses and which persistent entities must
 be introduced. Existing entities are compiler symbols: reuse them when their meaning fits. Do not produce fields,
 relationships, constraints, APIs, modules, or SQL. Entity keys are singular snake_case. Case-only name differences
 are the same symbol. Terms explicitly paired by the requirement, such as "journey/train", are aliases: reuse the
@@ -211,7 +211,7 @@ RELATIONSHIP_INSTRUCTIONS = ER_SCOPE + """You are an ER-modeling specialist disc
 The analysis unit is focus_entity, not a single requirement. Read its complete fields and all associated
 related_requirements together; they describe the domain meaning of this entity across the application.
 The er_graph contains every entity's name, description, attribute headers and requirement IDs, plus existing
-relationships. requirement_catalog contains bounded excerpts for all atomic requirements; related_requirements
+relationships. requirement_catalog contains bounded excerpts for all requirements; related_requirements
 contains full requirements associated with the focus entity and their direct prerequisite requirements.
 Use the graph to discover plausible endpoint entities, then use requirement evidence to establish relationships.
 Emit only relationships incident to focus_entity. Endpoints may be any existing graph entity, including itself.

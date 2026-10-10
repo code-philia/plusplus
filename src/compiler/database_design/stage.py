@@ -12,6 +12,8 @@ from typing import Any, Callable
 
 from utils.logging import SynchronousLog
 
+from compiler.preprocessing.traversal import postorder
+
 from ..ir import ERModelIR, SchemaIR
 from model.contracts import StructuredModel
 from model.client import describe_model_error
@@ -65,12 +67,9 @@ class DatabaseSchemaPass:
         dependency_graph: dict[str, Any] | None = None,
     ) -> DatabasePassResult:
         nodes = requirement_ir.get("nodes", {})
-        requirements = [
-            node_id
-            for wave in _ordered_waves(requirement_ir.get("atomic_units", []), dependency_graph or {})
-            for node_id in wave
-        ]
-        effective_dependencies = (dependency_graph or {}).get("atomic_dependencies", {})
+        requirements = postorder(requirement_ir)
+        effective_dependencies = (dependency_graph or {}).get("requirement_dependencies", {})
+        self._trace(f"DESIGN_ORDER traversal=depth_first_postorder requirements={requirements}")
         states = {node_id: "DISCOVERED" for node_id in requirements}
         errors: list[str] = []
         state = DatabaseSchemaState()
@@ -85,7 +84,7 @@ class DatabaseSchemaPass:
             for node_id in requirements:
                 node = nodes.get(node_id)
                 if not isinstance(node, dict):
-                    errors.append(_format_error("ARC2101", "Atomic requirement is missing from Requirement IR.", node_id=node_id))
+                    errors.append(_format_error("ARC2101", "Requirement is missing from Requirement IR.", node_id=node_id))
                     states[node_id] = "FAILED"
                     continue
                 decision = self._run_unit(
@@ -123,7 +122,8 @@ class DatabaseSchemaPass:
             # controller will continue with the partial result.
 
         # Pass 3 is scheduled by ER entities, never by requirement nodes.
-        entity_keys = sorted(state.entities)
+        # Entity discovery follows requirement postorder; retain that order here.
+        entity_keys = list(state.entities)
         self._trace(f"PASS_START phase=pass3_relationships entities={len(entity_keys)}")
         for entity_key in entity_keys:
             decision = self._run_unit(
@@ -325,25 +325,6 @@ def _node_context(
         "dependencies": copy.deepcopy(effective_dependencies),
         "ancestors": ancestors,
     }
-
-
-def _ordered_waves(atomic_ids: Any, dependency_graph: dict[str, Any]) -> list[list[str]]:
-    declared = {str(item) for item in atomic_ids if str(item)} if isinstance(atomic_ids, list) else set()
-    result: list[list[str]] = []
-    seen: set[str] = set()
-    raw_waves = dependency_graph.get("atomic_implementation_waves")
-    if not isinstance(raw_waves, list) or not raw_waves:
-        raw_waves = dependency_graph.get("implementation_waves", [])
-    for raw_wave in raw_waves:
-        if not isinstance(raw_wave, list):
-            continue
-        wave = sorted(({str(item) for item in raw_wave} & declared) - seen)
-        if wave:
-            result.append(wave)
-            seen.update(wave)
-    if declared - seen:
-        result.append(sorted(declared - seen))
-    return result
 
 
 def _context_audit(

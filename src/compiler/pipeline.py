@@ -26,6 +26,7 @@ from compiler.backend_lowering.projection import project_lowering_design
 from compiler.frontend_design import FrontendIRGenerationPass, frontend_ir_traceability
 from compiler.frontend_lowering import FrontendReactLowerer
 from compiler.runtime.history import GitStageError, ProjectGitHistory
+from compiler.preprocessing.traversal import postorder
 from compiler.preprocessing.stage import RequirementPreprocessor, PreprocessingResult
 from model.contracts import StructuredModel
 from model.client import Model, ModelConfigurationError
@@ -55,34 +56,12 @@ async def _default_log_cb(agent_name: str, message: str, status: str | None = No
 
 
 def _tdd_postorder(requirement_ir: dict[str, Any]) -> list[str]:
-    """Schedule the requirement tree in document order, without dependency waves."""
-    nodes = requirement_ir.get("nodes", {})
-    root = requirement_ir.get("root_id")
+    """Use the same document-order DFS postorder as all design passes."""
     targets = set(requirement_ir.get("atomic_units", [])) | set(requirement_ir.get("folder_nodes", []))
-    visited: set[str] = set()
-    active: set[str] = set()
-    order: list[str] = []
-
-    def visit(node_id: str) -> None:
-        if node_id in active:
-            raise ValueError(f"Requirement tree cycle at {node_id}")
-        if node_id in visited:
-            return
-        node = nodes.get(node_id)
-        if not isinstance(node, dict):
-            raise ValueError(f"Unknown requirement tree node {node_id}")
-        active.add(node_id)
-        for child_id in node.get("children_ids", []):
-            visit(child_id)
-        active.remove(node_id)
-        visited.add(node_id)
-        if node_id in targets:
-            order.append(node_id)
-
-    visit(root)
-    if missing := targets - visited:
+    order = postorder(requirement_ir)
+    if missing := targets - set(order):
         raise ValueError(f"Requirements unreachable from root: {sorted(missing)}")
-    return order
+    return [node_id for node_id in order if node_id in targets]
 
 
 class Compiler:
@@ -482,7 +461,7 @@ class Compiler:
                 artifacts["frontend_visual_references"] = str(visual_path)
             await self._log(
                 "Compiler",
-                "Generating frontend IR in depth-first postorder: four local passes per leaf; ancestors provide context only; no review or validation.",
+                "Generating frontend IR in depth-first postorder: four local passes per node, including parent composition; no review or validation.",
             )
             frontend = FrontendIRGenerationPass(model, artifact_store.root).compile(
                 preprocessing.requirement_ir,

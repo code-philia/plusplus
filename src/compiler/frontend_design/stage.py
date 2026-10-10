@@ -1,4 +1,4 @@
-"""Leaf frontend passes with explicit direct ownership and reuse associations."""
+"""Postorder frontend passes with explicit direct ownership and reuse associations."""
 from __future__ import annotations
 
 import base64
@@ -50,7 +50,7 @@ class FrontendIRGenerationPass:
         backend_design_ir = backend_design_ir.get("backend_blueprint", backend_design_ir)
         self.nodes = requirement_ir.get("nodes", {})
         self.children = children_by_id(requirement_ir)
-        order = [rid for rid in postorder(requirement_ir) if not self.children[rid]]
+        order = postorder(requirement_ir)
         self.dependencies = dependency_graph.get("requirement_dependencies", {})
         self.batches, self.failures, self.warnings = [], [], []
         self.apis = [copy.deepcopy(row) for row in backend_design_ir.get("modules", []) if row.get("kind") == "API"]
@@ -85,7 +85,7 @@ class FrontendIRGenerationPass:
         self.ir["pending_capabilities"] = list(gaps.values())
         if self.visuals:
             self.ir["visual_references"] = [{"id": row["id"], "path": row["path"]} for row in self.visuals]
-        # Ancestors provide scope context only; schedule each leaf once.
+        # Design children before their parent; schedule every requirement once.
         for rid in order:
             phases = ("topology", "ui", "data", "interaction")
             for phase in phases:
@@ -103,7 +103,7 @@ class FrontendIRGenerationPass:
         report = {"status": status, "warnings": self.warnings, "failed_tasks": self.failures,
                   "pending_capabilities": copy.deepcopy(self.ir["pending_capabilities"]),
                   "requirement_links": copy.deepcopy(self.ir["requirement_links"]),
-                  "traversal": "depth_first_postorder_leaves", "node_order": order,
+                  "traversal": "depth_first_postorder", "node_order": order,
                   "task_counts": {phase: sum(row["phase"] == phase for row in self.batches) for phase in PHASE_TABLES},
                   "requirement_entities": {rid: [key for name, values in traceability[rid].items()
                                                 if name.endswith("_ids") and name != "api_ids" for key in values]

@@ -134,10 +134,10 @@ visual analysis; behavior passes receive visible controls and should rely on the
 
 PROMPTS = {
     "topology": COMMON + """
-Pass 1: plan the current leaf requirement topology, using ancestor requirements as unprocessed context. Create only screens and shared
+Pass 1: plan the current requirement topology, using ancestors as scope context and completed child designs as composition inputs. Create only screens and shared
 structural groups. Give screens logical routes when required. Compose them under the existing root.
 Identify common navigation/header/footer regions once, at the appropriate shared ancestor.
-Attribute surfaces to the current leaf requirement. Ancestors supply context, not additional scheduled tasks.
+Attribute new behavior to the current requirement. For NON_LEAF tasks, reuse completed child surfaces and add only parent-level composition or behavior; do not duplicate child designs.
 Do not enumerate leaf controls, data, events or functions. If a surface already exists, refine/reuse it.
 This is a design pass, not a review. Use a minimal hierarchy that later requirements can expand.
 """,
