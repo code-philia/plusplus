@@ -14,36 +14,28 @@ from pathlib import Path
 # Allow direct execution without installing the compiler package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from cli.commands import build_compile_parser, _ensure_dotenv_loaded, _locate_requirement_file
+from cli.commands import _ensure_dotenv_loaded, _locate_requirement_file
 from compiler.runtime.artifacts import CompilerArtifactStore
 from compiler.frontend_design import FrontendIRGenerationPass
-from model.client import Model
+from model.client import Model, ModelConfigurationError
 from compiler.preprocessing.visual import VisualReferenceResolver, VisualReferenceAnalyzer
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers()
-    build_compile_parser(subparsers)
-    command = subparsers.choices["compile"]
-    command.prog = parser.prog
-    command.description = (
+    parser = argparse.ArgumentParser(description=(
         "Generate only frontend design using existing preprocessing, database schema "
-        "and backend IR. No lowering, implementation or design validation. "
-        "Existing frontend design results are overwritten; --port is accepted but unused."
-    )
-    command.add_argument("--no-visuals", action="store_true",
-                         help="Ignore optional reference images and their cached analyses.")
-    args = command.parse_args(argv)
-    if args.clean or args.resume or args.start_from != "zero" or args.checkpoint_ref or args.restart_output:
-        command.error(
-            "Frontend-only design reads the existing output directory directly; "
-            "--clean, --resume and checkpoint/restart options are not supported."
-        )
+        "and backend IR. Incrementally maintain the semantic UI tree and UI-owned events. "
+        "Only frontend design artifacts are updated. No project initialization or lowering."
+    ))
+    parser.add_argument("requirement_path", help="Requirements directory or .yaml/.yml file")
+    parser.add_argument("-o", "--output-dir", required=True, help="Existing design workspace")
+    parser.add_argument("--no-visuals", action="store_true",
+                        help="Ignore optional reference images and their cached analyses.")
+    args = parser.parse_args(argv)
 
     try:
         _ensure_dotenv_loaded()
-        requirement = Path(_locate_requirement_file(args.requirement_path))
+        requirement = Path(_locate_requirement_file(str(Path(args.requirement_path).expanduser())))
         output = Path(args.output_dir).expanduser().resolve()
         store = CompilerArtifactStore(output)
 
@@ -56,10 +48,15 @@ def main(argv: list[str] | None = None) -> int:
 
         requirements = read("preprocessing/requirement_ir.json")
         dependencies = read("preprocessing/dependency_graph.json")
-        # The backend blueprint already encapsulates the database-facing design.
+        # The backend IR already encapsulates the database-facing design.
         # Require the existing database artifact, without regenerating/auditing it.
         read("design/database/schema.json")
         backend = read("design/backend/backend_ir.json")
+        if backend.get("ir_kind") != "backend_design":
+            raise ValueError("Expected current Backend IR; run scripts/design_backend.py first")
+        backend_report = store.backend_design_root / "report.json"
+        if backend_report.is_file() and read("design/backend/report.json").get("errors"):
+            raise ValueError("Backend design report contains unresolved errors")
         if requirements.get("source", {}).get("sha256") != hashlib.sha256(requirement.read_bytes()).hexdigest():
             raise ValueError(
                 "Requirement file differs from the existing preprocessing artifacts; "
@@ -67,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         print(f"Frontend design workspace: {output}", flush=True)
+        model = Model.from_env()
         visuals, analyses, warnings = [], [], []
         if not args.no_visuals:
             resolved = VisualReferenceResolver().resolve(requirement, requirements)
@@ -80,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
                 analyses = analyzed.references
                 warnings.extend(issue.format() for issue in analyzed.errors)
 
-        result = FrontendIRGenerationPass(Model.from_env(), store.root).compile(
+        result = FrontendIRGenerationPass(model, store.root).compile(
             requirements, dependencies, backend, visuals, analyses,
         )
         result.report["warnings"].extend(warnings)
@@ -97,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
         for failure in result.report["failed_tasks"]:
             print(f"ERROR: {failure['task_id']}: {failure['message']}", file=sys.stderr)
         return 0 if result.ok and not result.report["failed_tasks"] else 1
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (ModelConfigurationError, OSError, ValueError, KeyError, TypeError) as exc:
         print(f"Frontend design error: {exc}", file=sys.stderr)
         return 1
 
