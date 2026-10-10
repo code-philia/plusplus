@@ -77,7 +77,7 @@ class CompilerArtifactStore:
         associations_path = self.frontend_design_root / 'requirement_links.json'
         write_json_atomic(associations_path, {'requirement_links': frontend_ir.get('requirement_links', {})})
         paths['frontend_requirement_links'] = str(associations_path)
-        tables = ("ui", "data", "events", "functions", "types", "pending_capabilities")
+        tables = ("ui", "data", "functions", "types", "pending_capabilities")
         for table in tables:
             path = self.frontend_design_root / f"{table}.json"
             write_json_atomic(path, {table: frontend_ir.get(table, [])})

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from compiler.ir.frontend import frontend_events
+
 import copy
 import re
 from dataclasses import dataclass, field
@@ -115,7 +117,7 @@ class CodeBindingLowerer:
             locations = {row["entity_id"]: row for row in (frontend_lowering_report or {}).get("bindings", [])}
             ui_units = (frontend_lowering_report or {}).get('ui_plan', {}).get('ui_units', {})
             for table, kind in (("ui", "UI"), ("events", "UI_EVENT"), ("functions", "UI_FUNC")):
-                for item in frontend_ir.get(table, []):
+                for item in (frontend_events(frontend_ir) if table == "events" else frontend_ir.get(table, [])):
                     identity = item["id"]
                     frontend_items[identity] = item
                     location = locations.get(identity)

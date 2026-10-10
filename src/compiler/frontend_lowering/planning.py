@@ -1,6 +1,8 @@
 """Deterministic React file boundaries derived from the semantic UI tree."""
 from __future__ import annotations
 
+from compiler.ir.frontend import frontend_events
+
 import hashlib
 import re
 from collections import Counter
@@ -16,14 +18,9 @@ def _pascal(value: str) -> str:
 def _semantic_name(row: dict[str, Any], root: str) -> str:
     if row['id'] == root:
         return 'ApplicationShell'
-    value = str(row.get('name', '')).strip()
+    value = str(row['name']).strip()
     if not value:
-        # Compatibility for IR without names: discard requirement/compiler prefixes.
-        value = re.split(r'(?:^|[.:])ui[.:]', row['id'], flags=re.IGNORECASE)[-1]
-        value = re.sub(r'^.*?topology\d*\.', '', value)
-        value = re.sub(r'^(?:screen|group)\.', '', value)
-        value = re.sub(r'^(?:ROOT|REQ[-_][\d._-]+)[.:]*', '', value, flags=re.IGNORECASE)
-        value = re.sub(r'\b(?:registration|register)\b', 'registration', value)
+        raise ValueError(f"UI requires a semantic name: {row['id']}")
     name = _pascal(value)
     if row['kind'] == 'screen' and not name.endswith('Page'):
         name += 'Page'
@@ -112,8 +109,8 @@ def plan_ui_units(ir: dict[str, Any]) -> dict[str, Any]:
 def plan_behavior(ir: dict[str, Any], ui_plan: dict[str, Any]) -> dict[str, Any]:
     functions = {row['id']: row for row in ir['functions']}
     users: dict[str, set[str]] = {key: set() for key in functions}
-    event_files = {row['id']: ui_plan['ui_files'][row['ui_id']] for row in ir['events']}
-    for event in ir['events']:
+    event_files = {row['id']: ui_plan['ui_files'][row['ui_id']] for row in frontend_events(ir)}
+    for event in frontend_events(ir):
         pending, seen = [call['target_id'] for call in event['handlers']], set()
         while pending:
             key = pending.pop()
@@ -136,7 +133,7 @@ def plan_behavior(ir: dict[str, Any], ui_plan: dict[str, Any]) -> dict[str, Any]
                 pending.append(target)
     symbols: dict[str, str] = {}
     occupied = {name.casefold() for name in ui_plan['ui_symbols'].values()}
-    for row in sorted([*ir['functions'], *ir['events']], key=lambda row: row['id']):
+    for row in sorted([*ir['functions'], *frontend_events(ir)], key=lambda row: row['id']):
         value = row.get('name') if row['id'] in functions else None
         if not value:
             value = re.split(r'(?:^|[.:])(?:fn|function|event)[.:]', row['id'])[-1]

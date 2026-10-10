@@ -1,6 +1,8 @@
 """Read-only context selection for the canonical frontend IR."""
 from __future__ import annotations
 
+from compiler.ir.frontend import frontend_events
+
 import copy
 import json
 import posixpath
@@ -56,7 +58,7 @@ def frontend_subgraph(ir: dict[str, Any], requirement_id: str, target_ids: set[s
     if ir.get("ir_kind") == "frontend_design":
         from compiler.frontend_design.context import value_references, required_types
         tables = ("ui", "data", "events", "functions")
-        rows = {row["id"]: row for table in tables for row in ir.get(table, [])}
+        rows = {row["id"]: row for table in tables for row in (frontend_events(ir) if table == "events" else ir.get(table, []))}
         ui = {row["id"]: row for row in ir["ui"]}
         parents = {child: row["id"] for row in ui.values() for child in row["children"]}
         selected = (target_ids & rows.keys()) | {key for key, row in rows.items()
@@ -84,11 +86,11 @@ def frontend_subgraph(ir: dict[str, Any], requirement_id: str, target_ids: set[s
             refs.update(row.get("writes", []))
             refs.update(call["target_id"] for call in [*row.get("calls", []), *row.get("handlers", [])]
                         if call["kind"] == "FUNC")
-            refs.update(event["id"] for event in ir["events"] if event["ui_id"] == key)
+            refs.update(event["id"] for event in frontend_events(ir) if event["ui_id"] == key)
             new = refs - selected
             selected.update(new)
             pending.extend(new)
-        result = {table: [copy.deepcopy(row) for row in ir[table] if row["id"] in selected] for table in tables}
+        result = {table: [copy.deepcopy(row) for row in (frontend_events(ir) if table == "events" else ir[table]) if row["id"] in selected] for table in tables}
         result['structural_ui'] = [copy.deepcopy(row) for row in ir['ui'] if row['id'] in structural - selected]
         result['requirement_links'] = copy.deepcopy(ir.get('requirement_links', {}).get(requirement_id, {}))
         result.update(ir_kind="frontend_design", root_ui_id=ir["root_ui_id"], backend_ref=ir["backend_ref"],

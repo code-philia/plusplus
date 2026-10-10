@@ -3,7 +3,6 @@
 Flat UI records form a tree through ordered children IDs. Components, framework
 lifecycle hooks, DOM elements, HTTP endpoints and source files belong to lowering.
 These TypedDicts describe JSON contracts, not runtime validation.
-See compiler/frontend_lowering/README.md for React lowering semantics.
 """
 
 from __future__ import annotations
@@ -30,28 +29,31 @@ class ReferenceValue(TypedDict):
     path: NotRequired[list[str | int]]
 
 
-UIValue = LiteralValue | ReferenceValue
+ValueSource = LiteralValue | ReferenceValue
 
 
 class UIRepeat(TypedDict):
-    source: UIValue
+    source: ValueSource
     # Evaluated in this node's item context; must be stable and unique.
-    key: UIValue
+    key: ValueSource
 
 
 class UINode(TypedDict):
     id: str
     # Semantic responsibility, independent of requirement IDs and framework names.
-    name: NotRequired[str]
+    name: str
     kind: Literal[
         "screen", "group", "text", "input", "choice", "action", "image",
         "list", "feedback",
+        "form", "field", "navigation", "section", "dialog", "tabs", "tab",
+        "table", "row", "cell", "heading", "link", "progress",
     ]
     spec: str
     requirement_ids: list[str]
     children: list[str]
     # Semantic properties: label, value, options, visible, enabled, etc.
-    bindings: dict[str, UIValue]
+    bindings: dict[str, ValueSource]
+    events: list["UIEvent"]
     # Optional screen location; no router or URL serialization policy.
     route: NotRequired[str]
     # Visual intent, not CSS or framework properties.
@@ -60,7 +62,7 @@ class UINode(TypedDict):
     repeat: NotRequired[UIRepeat]
 
 
-class UIData(TypedDict):
+class FrontendState(TypedDict):
     id: str
     name: str
     type: BackendType
@@ -72,20 +74,20 @@ class UIData(TypedDict):
     initial: NotRequired[JSONValue]
 
 
+
 class UICall(TypedDict):
     id: str
     # Event handlers call FUNC only; functions may call FUNC or backend API.
     kind: Literal["FUNC", "API"]
     target_id: str
     # Keys are exact target input semantic_ids; missing optional inputs omitted.
-    arguments: dict[str, UIValue]
+    arguments: dict[str, ValueSource]
     # Business conditions stay prose; evaluation is specified by the caller.
     condition: NotRequired[str]
 
 
 class UIEvent(TypedDict):
     id: str
-    ui_id: str
     # Semantic triggers, e.g. activate, change, submit, enter; not DOM names.
     name: str
     spec: str
@@ -123,16 +125,22 @@ class FrontendIR(TypedDict):
     types: list[BackendTypeDefinition]
     root_ui_id: str
     ui: list[UINode]
-    data: list[UIData]
-    events: list[UIEvent]
+    data: list[FrontendState]
     functions: list[UIFunction]
     visual_references: NotRequired[list[UIVisualReference]]
     pending_capabilities: NotRequired[list[PendingCapability]]
     requirement_links: NotRequired[dict[str, RequirementUIAssociation]]
 
 
+def frontend_events(ir: dict) -> list[dict]:
+    """Project nested events with their owner for lowering and source bindings."""
+    return [{**event, "ui_id": ui["id"]}
+            for ui in ir["ui"] for event in ui["events"]]
+
+
 __all__ = [
-    "FrontendIR", "UINode", "UIData", "UIEvent", "UIFunction", "UICall",
-    "UIValue", "LiteralValue", "ReferenceValue", "UIRepeat", "UIVisualReference",
+    "FrontendIR", "UINode", "FrontendState", "UIEvent", "UIFunction", "UICall",
+    "ValueSource", "LiteralValue", "ReferenceValue", "UIRepeat", "UIVisualReference",
     "RequirementUIAssociation",
+    "frontend_events",
 ]

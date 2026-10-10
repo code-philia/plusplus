@@ -1,6 +1,8 @@
 """Deterministic native React/TypeScript lowering; no model calls or prose execution."""
 from __future__ import annotations
 
+from compiler.ir.frontend import frontend_events
+
 import copy
 import posixpath
 from dataclasses import dataclass, field
@@ -62,7 +64,7 @@ class FrontendReactLowerer:
             self.event_files = self.result.ui_plan['event_files']
             self.ui_imports: dict[str, list[str]] = {}
             self.ui_bodies: dict[str, list[str]] = {}
-            self.events = {row["id"]: row for row in ir["events"]}
+            self.events = {row["id"]: row for row in frontend_events(ir)}
             self.functions = {row["id"]: row for row in ir["functions"]}
             self.data = {row["id"]: row for row in ir["data"]}
             self.routes = {row["module_id"]: row for row in backend_routes.get("routes", [])}
@@ -75,7 +77,7 @@ class FrontendReactLowerer:
             self._api()
             for row in ir["functions"]:
                 self._function(row)
-            for row in ir["events"]:
+            for row in frontend_events(ir):
                 self._event(row)
             for row in ir["ui"]:
                 self._ui(row)
@@ -216,7 +218,7 @@ class FrontendReactLowerer:
             child_name = self.ui_symbols[child]
             if self.ui_files[child] != path:
                 lines.append(f'import {{ {child_name} }} from "{relative(self.ui_files[child])}";')
-        events = [event for event in self.ir["events"] if event["ui_id"] == row["id"]]
+        events = [event for event in frontend_events(self.ir) if event["ui_id"] == row["id"]]
         for event in events:
             if event["name"] not in {"activate", "change", "submit", "enter", "focus", "blur"}:
                 self.result.warnings.append(f"{event['id']}: semantic trigger {event['name']} requires a UI adapter implementation.")

@@ -4,18 +4,18 @@ from __future__ import annotations
 import types
 from typing import Any, ForwardRef, Literal, NotRequired, Required, Union, get_args, get_origin, get_type_hints, is_typeddict
 
-from ..ir.frontend import UINode, UIData, UIEvent, UIFunction
+from ..ir.frontend import UINode, FrontendState, UIFunction
 from ..ir.backend import BackendTypeDefinition
 from ..ir.integration import PendingCapability
 
-TABLE_TYPES = {"ui": UINode, "data": UIData, "events": UIEvent,
+TABLE_TYPES = {"ui": UINode, "data": FrontendState,
                "functions": UIFunction, "types": BackendTypeDefinition,
                "pending_capabilities": PendingCapability}
 PHASE_TABLES = {
     "topology": ("ui",),
     "ui": ("ui",),
     "data": ("ui", "data", "types", "pending_capabilities"),
-    "interaction": ("ui", "data", "types", "events", "functions", "pending_capabilities"),
+    "interaction": ("ui", "data", "types", "functions", "pending_capabilities"),
 }
 
 
@@ -65,6 +65,7 @@ def patch_schema(phase: str) -> dict[str, Any]:
         "deletes": obj({table: strings for table in tables}),
         "reuse_ids": strings,
         "implements_ids": strings,
+        "load_ui_ids": strings,
     })
     return {**schema, "$defs": defs, "x-arc-output-mode": "json_object"}
 
@@ -80,6 +81,13 @@ of existing objects unless their responsibility changes. IDs remain stable when 
 Use supplied exact IDs for existing objects; use the supplied new_id_prefix plus meaningful suffixes
 for new objects (e.g. <prefix>ui.query, <prefix>fn.search, <prefix>data.query).
 For every changed/new object return its COMPLETE final record in upserts, not a field patch.
+Preserve existing embedded events during UI/layout/data edits; only interaction changes event behavior.
+If you need a UI absent from existing/structural_ui, return load_ui_ids with exact catalog/children IDs
+and an otherwise empty delta. List all existing UI records you need for the next attempt; this
+replaces the prior explicit selection to allow switching regions. The compiler loads records and asks
+again. Otherwise use []. At most four context requests are allowed per phase; work on a small region.
+Never edit an existing UI that has not been loaded. Missing descendants remain unchanged.
+For large trees work on the current semantic region; ask to load another region when necessary.
 For unchanged reused objects return their IDs in reuse_ids, not duplicate records.
 deletes contains only IDs intentionally superseded by your design changes. Otherwise use empty lists.
 requirement_ids means DIRECT implementation, not use, tree containment or scheduling history.
@@ -100,8 +108,9 @@ application shell, screens and regions; one screen may implement several require
 requirement may affect several screens. Ancestors supply context, not additional feature tasks.
 Do not create login/search/booking surfaces just because an ancestor mentions them during a leaf task.
 When building shared shell structure, add only the regions needed to host the current leaf surface.
-structural_ui contains ancestor attachment records: preserve their sibling IDs without loading or
-redesigning siblings. ui_catalog is discovery only; absent subtrees are not implicitly editable.
+structural_ui contains compact ancestor summaries for discovery only. Before updating an ancestor,
+request its full record with load_ui_ids, then preserve all sibling IDs and events.
+ui_catalog is discovery only; absent subtrees are not implicitly editable.
 Every non-root UI has ONE parent. Reusing the same surface means referencing/updating its existing
 node at its existing position, never attaching it to a second parent. Similar controls at different
 locations are distinct UI instances; reuse their data/functions where appropriate. Repeated items
@@ -116,8 +125,16 @@ current/ancestor repeat UI ID. No executable expressions; derived values use ord
 Fields: semantic_id,name,type,required,nullable,description. Types use scalar/array/named exactly
 as backend IR. Scalars: string,integer,number,boolean,date,datetime,json,uuid.
 Reuse backend named types; put only frontend-specific definitions in types.
-UI kinds: screen,group,text,input,choice,action,image,list,feedback.
+UI kinds: screen,group,section,form,field,navigation,dialog,tabs,tab,table,row,cell,heading,link,progress,text,input,choice,action,image,list,feedback.
+Use form for a submission unit, field for a labeled input region, navigation for shared navigation,
+section for a meaningful page region, dialog for an overlay, and table/row/cell for tabular information.
+Do not mirror every DOM wrapper: each node must have a meaningful visible or interaction responsibility.
+Each UI owns events:[]; events are embedded records, never a separate top-level table.
+An event keeps its stable id and DIRECT requirement_ids independently from its UI owner.
 bindings keys are semantic attributes such as label,value,options,visible,enabled,items.
+Additional semantic attributes: heading level, link destination, tab selected, progress maximum,
+cell header, action submits_form. A table contains rows, rows contain cells.
+Do not use DOM/CSS properties or framework lifecycle names.
 presentation is optional natural-language layout/visual intent. Reference images are optional;
 use only supplied visual_reference_ids and preserve their relevant layout and visual cues.
 The backend API catalog is the capability boundary. For every required server behavior with no
@@ -157,16 +174,18 @@ Cover user input, display results, loading, empty/error/selection states as requ
 Include initialization rules in data spec. Omitted initial means uninitialized, not null.
 Use supplied backend API types for data crossing the API boundary, preserving named type IDs.
 Complete repeat source and stable item keys, dynamic visible/enabled/value/items bindings.
-If a derived value is needed, define its data slot and describe the required computation for the
-interaction pass. Never insert code or expression strings. Do not create events or functions yet.
+Do not duplicate state merely to store a label or a formatting convenience. Use literals for static
+content; store derived values only when their lifecycle requires persistence. Describe display-only
+derivation in UI spec for implementation, rather than adding an executable expression language. Never insert code or expression strings. Do not create events or functions yet.
 """,
     "interaction": COMMON + """
-Pass 4: mount semantic events on existing UI nodes and connect ordered frontend function calls.
+Pass 4: update events arrays embedded in existing UI nodes and connect ordered frontend function calls.
 Complete the full interaction: payload -> function arguments -> state reads -> backend API calls ->
 result/state writes -> bound UI, including initialization/enter, derived state recomputation,
 local-only actions, navigation and applicable success/failure/loading/empty behavior.
 Reuse an existing function only when its interface and responsibilities match; otherwise create one.
-Events use name activate/change/submit/enter etc., payload fields, handlers (ordered FUNC calls only).
+Embedded events use id,name,spec,requirement_ids,payload fields,handlers (ordered FUNC calls only); no ui_id.
+An event can implement a requirement independently of the containing UI. Preserve other requirements' events.
 Functions have inputs/outputs, direct reads/writes of data IDs, and ordered calls (FUNC or API).
 API target_id must copy a supplied backend API ID exactly. arguments keys are its INPUT semantic_ids.
 Never call backend FUNC/DB or pass backend trusted context as client arguments. Copy output types.
@@ -180,3 +199,20 @@ functions while still designing the local UI/interaction. Do not invent an API o
 This pass generates behavior; do not audit or reject the existing design.
 """,
 }
+
+
+DISCOVERY_PROMPT = """Discover existing UI surfaces for one requirement before designing any changes.
+This is a read-only navigation step, not UI generation. The catalog is a page of a semantic UI tree.
+Choose select_ids for existing surfaces/controls that should be reused or refined.
+Choose expand_ids for containers whose children you need to inspect. Use exact supplied IDs.
+A page may implement many requirements; match responsibility, route and position, not requirement ID.
+Different locations are distinct UI instances. Prefer existing screens, shared navigation and regions.
+Directory nodes are summaries, not editable full records. The compiler paginates children automatically.
+Return empty lists when no existing region is relevant. Do not invent IDs.
+"""
+
+def discovery_schema() -> dict[str, Any]:
+    return {"type": "object", "additionalProperties": False,
+            "properties": {key: {"type": "array", "items": {"type": "string"}}
+                           for key in ("select_ids", "expand_ids")},
+            "required": ["select_ids", "expand_ids"], "x-arc-output-mode": "json_object"}

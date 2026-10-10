@@ -1,6 +1,9 @@
 """Stable TypeScript names and lossless frontend/backend value types."""
 from __future__ import annotations
 
+from compiler.ir.frontend import frontend_events
+from compiler.ir.backend import module_fields
+
 import hashlib
 import json
 import re
@@ -19,9 +22,11 @@ def symbol(prefix: str, identity: str) -> str:
 class Types:
     def __init__(self, ir: dict[str, Any], backend: dict[str, Any]) -> None:
         self.ir = ir
-        self.backend = backend.get("backend_blueprint", backend)
+        self.backend = backend
         self.definitions = {row["id"]: row for row in [*self.backend.get("types", []), *ir["types"]]}
-        self.apis = {row["id"]: row for row in self.backend.get("modules", []) if row.get("kind") == "API"}
+        self.apis = {row["id"]: {**row, "inputs": module_fields(row, "inputs"),
+                                "outputs": module_fields(row, "outputs")}
+                     for row in self.backend.get("modules", []) if row.get("kind") == "API"}
 
     def value(self, value: Any, nullable: bool = False) -> str:
         if isinstance(value, str):
@@ -53,7 +58,7 @@ class Types:
             value = self.fields(row["fields"], semantic=False) if row["kind"] == "object" else " | ".join(js(v) for v in row["values"]) or "never"
             lines.append(f"export type {symbol('Type', key)} = {value};")
         for table, ins, outs in (("functions", "inputs", "outputs"), ("events", "payload", None)):
-            for row in self.ir[table]:
+            for row in (frontend_events(self.ir) if table == "events" else self.ir[table]):
                 lines.append(f"export type {symbol('Input', row['id'])} = {self.fields(row[ins])};")
                 if outs:
                     lines.append(f"export type {symbol('Output', row['id'])} = {self.fields(row[outs])};")

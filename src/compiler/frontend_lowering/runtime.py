@@ -201,7 +201,7 @@ function MountedUI(props: Props) {
     if (props.node.kind === "text") return <span {...common}>{text}{children}</span>;
     if (props.node.kind === "feedback") return <div {...common} role="status">{text}{children}</div>;
     if (props.node.kind === "image") return <img {...common} src={bindings.src == null ? undefined : String(bindings.src)} alt={String(bindings.alt ?? bindings.label ?? "")} />;
-    if (props.node.kind === "action") return <button {...common} type="button" disabled={bindings.enabled === false}>{text}{children}</button>;
+    if (props.node.kind === "action") return <button {...common} type={bindings.submits_form === true ? "submit" : "button"} disabled={bindings.enabled === false}>{text}{children}</button>;
     if (props.node.kind === "input") {
         const value = bindings.value;
         return <label>{text}<input {...common}
@@ -221,7 +221,22 @@ function MountedUI(props: Props) {
             })}
         </select>{children}</label>;
     }
-    if (props.events.some(event => event.name === "submit")) return <form {...common}>{children}</form>;
+    if (props.node.kind === "heading") {
+        const level = Math.max(1, Math.min(6, Number(bindings.level ?? 2)));
+        return React.createElement(`h${level}`, common, text, children);
+    }
+    if (props.node.kind === "link") return <a {...common} href={bindings.destination == null ? undefined : String(bindings.destination)}>{text}{children}</a>;
+    if (props.node.kind === "navigation") return <nav {...common}>{text}{children}</nav>;
+    if (props.node.kind === "section") return <section {...common}>{text}{children}</section>;
+    if (props.node.kind === "field") return <div {...common} role="group">{text}{children}</div>;
+    if (props.node.kind === "dialog") return <div {...common} role="dialog" aria-modal={true}>{text}{children}</div>;
+    if (props.node.kind === "tabs") return <div {...common} role="tablist">{children}</div>;
+    if (props.node.kind === "tab") return <button {...common} type="button" role="tab" aria-selected={bindings.selected === true} disabled={bindings.enabled === false}>{text}{children}</button>;
+    if (props.node.kind === "table") return <table {...common}><tbody>{children}</tbody></table>;
+    if (props.node.kind === "row") return <tr {...common}>{children}</tr>;
+    if (props.node.kind === "cell") return bindings.header === true ? <th {...common}>{text}{children}</th> : <td {...common}>{text}{children}</td>;
+    if (props.node.kind === "progress") return <progress {...common} max={Number(bindings.maximum ?? 100)} value={bindings.value == null ? undefined : Number(bindings.value)}>{text}</progress>;
+    if (props.node.kind === "form" || props.events.some(event => event.name === "submit")) return <form {...common}>{children}</form>;
     if (props.node.kind === "screen") return <main {...common}>{children}</main>;
     // Lists preserve their explicit repeat/child structure; no fabricated item schema.
     return <div {...common}>{text}{children}</div>;

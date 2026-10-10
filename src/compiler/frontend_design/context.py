@@ -4,9 +4,11 @@ from __future__ import annotations
 import copy
 import json
 import re
+
+from compiler.ir.frontend import frontend_events
 from typing import Any
 
-TABLES = ("ui", "data", "events", "functions", "types")
+TABLES = ("ui", "data", "functions", "types")
 
 
 def ranked(rows: list[dict[str, Any]], query: Any, count: int) -> list[dict[str, Any]]:
@@ -51,7 +53,7 @@ def frontend_ir_traceability(ir: dict[str, Any]) -> dict[str, dict[str, Any]]:
     links: dict[str, dict[str, Any]] = {}
     for table, name in (("ui", "ui_ids"), ("data", "data_ids"),
                         ("events", "event_ids"), ("functions", "function_ids")):
-        for row in ir.get(table, []):
+        for row in (frontend_events(ir) if table == "events" else ir.get(table, [])):
             for rid in row.get("requirement_ids", []):
                 link = links.setdefault(rid, {"ui_scope": "UI_AFFECTING"})
                 link.setdefault(name, []).append(row["id"])
@@ -77,8 +79,11 @@ def frontend_ir_traceability(ir: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
-                  related_ids: set[str]) -> dict[str, Any]:
+                  related_ids: set[str], requested_ui_ids: set[str] | None = None,
+                  max_chars: int = 48000) -> dict[str, Any]:
     rows = {row["id"]: row for table in TABLES for row in ir[table]}
+    events = frontend_events(ir)
+    rows.update({event["id"]: event for event in events})
     ui = {row["id"]: row for row in ir["ui"]}
     parents = {child: row["id"] for row in ui.values() for child in row.get("children", [])}
     # Direct ownership is never inherited through a requirement or UI ancestor.
@@ -90,7 +95,11 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
     candidates += ranked([row for row in ui.values() if row["id"] != ir["root_ui_id"]], requirement, 8)
     shared_functions = ranked(ir["functions"], requirement, 4)
     shared_data = ranked(ir["data"], requirement, 4)
-    selected = owned | (used & rows.keys())
+    requested = (requested_ui_ids or set()) & ui.keys()
+    if len(ui) <= 64 and sum(len(json.dumps(row, ensure_ascii=False)) for row in ui.values()) <= 24000:
+        requested = set(ui)
+    selected = owned | (used & rows.keys()) | requested
+    selected.update(event["ui_id"] for event in events if event["id"] in selected)
     selected.update(row["id"] for row in [*candidates, *shared_functions, *shared_data])
     # Candidate screen/group records expose children IDs, never all sibling features.
     # Expand a small non-screen region only; owned controls are already complete.
@@ -105,7 +114,7 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
         pending.extend(child for child in ui[key].get("children", [])
                        if ui.get(child, {}).get("kind") != "screen")
     # Events follow the selected semantic controls, not attachment ancestors.
-    selected.update(event["id"] for event in ir["events"] if event.get("ui_id") in selected)
+    selected.update(event["id"] for event in events if event.get("ui_id") in selected)
     pending, visited = list(selected), set()
     while pending:
         key = pending.pop()
@@ -116,7 +125,8 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
         references = value_references(row, "data") | value_references(row, "item")
         references.update(row.get("reads", []))
         references.update(row.get("writes", []))
-        references.update(call["target_id"] for call in [*row.get("calls", []), *row.get("handlers", [])]
+        references.update(call["target_id"] for call in [*row.get("calls", []), *row.get("handlers", []),
+                          *[call for event in row.get("events", []) for call in event.get("handlers", [])]]
                           if call.get("kind") == "FUNC")
         fresh = (references & rows.keys()) - selected
         selected.update(fresh)
@@ -131,20 +141,45 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
             key = parents[key]
             if key not in selected:
                 structural.add(key)
-    records = {table: [copy.deepcopy(row) for row in ir[table] if row["id"] in selected]
-               for table in TABLES if table != "types"}
-    # Compact catalogs expose the rest of the system without sending every full subtree.
+    # Fit full records to a serialized context budget. Requested UI records are
+    # mandatory; other candidates remain discoverable by ID when omitted.
+    records = {table: [] for table in TABLES if table != "types"}
+    size, loaded = 0, set()
+    candidates = [(table, row) for table in records for row in ir[table]
+                  if row["id"] in selected]
+    candidates.sort(key=lambda pair: (pair[1]["id"] not in requested,
+                                      pair[1]["id"] not in owned, pair[1]["id"]))
+    for table, row in candidates:
+        cost = len(json.dumps(row, ensure_ascii=False))
+        if size + cost > max_chars:
+            if row["id"] in requested:
+                raise ValueError("Requested UI context exceeds budget; select fewer UI nodes")
+            continue
+        records[table].append(copy.deepcopy(row))
+        loaded.add(row["id"])
+        size += cost
+    # Structural attachment records are compact, not permission to replace
+    # unloaded behavior. Full sibling/event data is fetched before any edit.
+    structural_records = [ui_summary(ui[key], parents) for key in sorted(structural - loaded)]
     return {
         "root_ui_id": ir["root_ui_id"], "existing": records,
-        "structural_ui": [copy.deepcopy(row) for row in ir["ui"] if row["id"] in structural - selected],
+        "structural_ui": structural_records,
         "requirement_links": copy.deepcopy(ir.get("requirement_links", {}).get(rid, {"implements": [], "uses": []})),
-        "ui_catalog": [{"id": row["id"], "kind": row["kind"],
-                        "spec": row.get("spec", "")[:180], "parent_id": parents.get(row["id"]),
-                        "requirement_ids": row.get("requirement_ids", [])}
-                       for row in ranked(list(ui.values()), requirement, 24)],
+        "ui_catalog": [ui_summary(row, parents) for row in ranked(list(ui.values()), requirement, 24)],
+        "omitted_ids": sorted((selected & rows.keys()) - loaded - {event["id"] for event in events}),
+        "context_budget_chars": max_chars,
         "function_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}
                              for row in shared_functions],
     }
+
+
+def ui_summary(row: dict[str, Any], parents: dict[str, str]) -> dict[str, Any]:
+    return {"id": row["id"], "name": row.get("name", ""), "kind": row["kind"],
+            "spec": row.get("spec", "")[:180], "parent_id": parents.get(row["id"]),
+            "route": row.get("route"), "child_count": len(row.get("children", [])),
+            "children": list(row.get("children", []))[:48],
+            "children_truncated": len(row.get("children", [])) > 48,
+            "requirement_ids": list(row.get("requirement_ids", []))}
 
 
 def required_types(values: Any, definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
