@@ -179,7 +179,7 @@ class Model:
         )
         fallback_messages = [
             {"role": "system", "content": fallback_instructions},
-            *user_messages,
+            *user_inputs,
         ]
         if response is None and (force_json or self._structured_output_mode == "json_object"):
             try:

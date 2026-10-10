@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         result = DatabaseSchemaPass(model, store.root).compile(
             preprocessing.requirement_ir, preprocessing.dependency_graph,
         )
-        schema_path = store.write_database_schema(result.schema)
+        schema_path = store.write_database_schema(result.schema, er_model=result.er_model)
         report_path = store.database_root / "report.json"
         write_json_atomic(report_path, {
             "status": result.schema["status"],
