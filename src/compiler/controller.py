@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
@@ -19,24 +18,20 @@ from .database_design import (
     database_traceability,
 )
 from .database_lowering import lower_database
-from .design_stage import DesignPass, design_traceability
+from .backend_design import BackendDesignPass, design_traceability
 from .backend_design.projection import project_lowering_design
-from .file_planning import GlobalFilePlanner
-from .frontend_generation import FrontendIRGenerationPass, frontend_ir_traceability
+from .frontend_design import FrontendIRGenerationPass, frontend_ir_traceability
 from .frontend_lowering import FrontendReactLowerer
 from .git_history import GitStageError, ProjectGitHistory
 from .preprocessing_stage import RequirementPreprocessor, PreprocessingResult
 from .model_client import Model, ModelConfigurationError, StructuredModel
 from .cost_tracking import stage_checkpoint
 from .models import CompilationRequest, CompilationResult
-from .module_lowering import ModuleSkeletonLowerer
 from .project_build import ProjectBuilder
 from .project_initialization import (
     ProjectInitializer,
     validate_frontend_environment,
 )
-from .skeleton_lowering import TypeLowerer
-from .symbol_planning import GlobalSymbolPlanner
 from .tdd_orchestrator import NodeTDDOrchestrator
 from .tdd_progress import TDDProgress, load_tdd_manifest
 from .test_generation import RequirementTestGenerationPass, TestEnvironmentInitializer
@@ -97,9 +92,6 @@ class Compiler:
     async def compile(self, request: CompilationRequest) -> CompilationResult:
         visual_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="arc-visual-analysis")
         try:
-            # TEMP(database-only-debug): remove this switch and helper before release.
-            if os.environ.get("ARC_DEBUG_DATABASE_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}:
-                return await self._compile_database_only_debug(request)
             return await self._compile(request, visual_executor)
         except GitStageError as exc:
             await self._log("Compiler", str(exc), "error")
@@ -113,78 +105,6 @@ class Compiler:
             return CompilationResult(ok=False)
         finally:
             await asyncio.to_thread(visual_executor.shutdown, wait=True)
-
-    async def _compile_database_only_debug(self, request: CompilationRequest) -> CompilationResult:
-        """TEMP(database-only-debug): remove before release; no full-pipeline checkpoint."""
-        artifacts: dict[str, str] = {}
-        if request.resume or request.start_from != "zero":
-            await self._log("Compiler", "ARC_DEBUG_DATABASE_ONLY requires a fresh run (no resume/start-from).", "error")
-            return CompilationResult(ok=False)
-        store = CompilerArtifactStore(request.output_dir)
-        await self._log("Compiler", "TEMP database-only debug: preprocessing -> database design -> project initialization -> SQLite lowering -> stop.")
-        preprocessing = self._preprocessor.compile(request.requirement_path)
-        ir = preprocessing.requirement_ir or {}
-        root_id = ir.get("root_id")
-        requirement_ids = list(ir.get("node_order", []))
-        states = {node_id: "DISCOVERED" for node_id in requirement_ids}
-        artifacts.update(store.write_preprocessing(
-            requirement_ir=preprocessing.requirement_ir,
-            dependency_graph=preprocessing.dependency_graph,
-        ))
-        if requirement_ids:
-            self._runtime.traceability.store_requirement_ids(requirement_ids)
-        if not preprocessing.ok:
-            for error in preprocessing.errors:
-                await self._log("Compiler", error, "error")
-            return CompilationResult(ok=False, root_id=root_id, states=states,
-                                     failed_nodes=requirement_ids, artifacts=artifacts)
-
-        self._runtime.events.mark_phase_started("DATABASE", "Database-only debug: designing ER and relational schema.")
-        try:
-            model = self._model or Model.from_env()
-            if hasattr(model, "set_usage_path"):
-                model.set_usage_path(store.root / "model_usage.jsonl")
-        except ModelConfigurationError as exc:
-            await self._log("Compiler", str(exc), "error")
-            return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
-        database = DatabaseSchemaPass(model, store.root).compile(
-            preprocessing.requirement_ir, preprocessing.dependency_graph,
-        )
-        states.update(database.node_states)
-        artifacts["database_schema"] = store.write_database_schema(database.schema)
-        artifacts["database_schema_ir"] = artifacts["database_schema"]
-        artifacts["database_er_model"] = str(store.database_root / "er_model.json")
-        self._runtime.traceability.merge_database_schema_links(database_traceability(database.schema))
-        for warning in database.warnings:
-            await self._log("Compiler", warning, "warning")
-        for error in database.errors:
-            await self._log("Compiler", error, "error")
-        if not database.ok:
-            return CompilationResult(ok=False, root_id=root_id, states=states,
-                                     failed_nodes=sorted(key for key, value in states.items() if value == "FAILED"),
-                                     artifacts=artifacts)
-
-        self._runtime.events.mark_phase_started("PROJECT", "Database-only debug: initializing project after database design.")
-        project = ProjectInitializer(request.output_dir, web_port=request.web_port).initialize()
-        artifacts.update(project.artifacts)
-        if not project.ok:
-            for error in project.errors:
-                await self._log("Compiler", error, "error")
-            return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
-        manifest, error = store.read_project_manifest()
-        if error or manifest is None:
-            await self._log("Compiler", error or "Missing project manifest.", "error")
-            return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
-
-        self._runtime.events.mark_phase_started("DATABASE", "Database-only debug: generating SQLite sources.")
-        lowered = lower_database(request.output_dir, store, manifest)
-        artifacts.update(lowered.artifacts)
-        for warning in lowered.warnings:
-            await self._log("Compiler", warning, "warning")
-        for error in lowered.errors:
-            await self._log("Compiler", error, "error")
-        await self._log("Compiler", "TEMP database-only debug stopped after SQLite lowering; backend/frontend design, build and TDD skipped.")
-        return CompilationResult(ok=lowered.ok, root_id=root_id, states=states, artifacts=artifacts)
 
     async def _compile(self, request: CompilationRequest,
                        visual_executor: ThreadPoolExecutor) -> CompilationResult:
@@ -202,12 +122,12 @@ class Compiler:
             artifacts["checkpoint"] = str(request.output_dir / ".arc/checkpoints/current.json")
             for name, relative in {
                 "project_manifest": ".arc/project/project-manifest.json",
-                "database_schema": ".arc/design/database/schema.json", "fixture_ir": ".arc/design/database/fixture_ir.json",
+                "database_schema": ".arc/design/database/schema.json",
                 "database_er_model": ".arc/design/database/er_model.json",
                 "database_schema_ir": ".arc/design/database/schema.json",
                 "database_lowering_report": ".arc/lowering/database/report.json",
                 "database_lowering_manifest": ".arc/lowering/database/manifest.json",
-                "design_ir": ".arc/design/backend/modules.json", "frontend_design_ir": ".arc/design/frontend/components.json",
+                "design_ir": ".arc/design/backend/backend_ir.json", "frontend_design_ir": ".arc/design/frontend/frontend_ir.json",
                 "backend_ir": ".arc/design/backend/backend_ir.json",
                 "backend_design_report": ".arc/design/backend/report.json",
                 "frontend_traceability": ".arc/design/frontend/requirements.json",
@@ -319,7 +239,7 @@ class Compiler:
                 request=request, artifact_store=artifact_store, preprocessing=preprocessing,
                 database_schema=saved["database"], design_ir=project_lowering_design(saved["design"]),
                 frontend_ir=saved["frontend"]["frontend_ir"], backend_routes=saved["backend_routes"],
-                fixture_ir=saved["fixture_ir"], project_manifest=project_manifest,
+                project_manifest=project_manifest,
                 root_id=root_id, states=states, artifacts=artifacts,
             )
 
@@ -346,8 +266,8 @@ class Compiler:
                 artifacts=artifacts,
             )
         if rank < 2:
-            database_stage = DatabaseSchemaPass(model, artifact_store.root)
-            database = database_stage.compile(
+            database_design = DatabaseSchemaPass(model, artifact_store.root)
+            database = database_design.compile(
                 preprocessing.requirement_ir,
                 preprocessing.dependency_graph,
             )
@@ -386,10 +306,6 @@ class Compiler:
         # ===================================================================
 
         if rank < 3:
-            # Fixtures are deferred. Keep an empty IR for checkpoint and
-            # downstream interfaces while lowering only schema and connections.
-            fixture_ir: dict[str, Any] = {"fixture_sets": []}
-            artifacts["fixture_ir"] = artifact_store.write_fixture_ir(fixture_ir)
             lowered_database = lower_database(
                 request.output_dir, artifact_store, project_manifest,
             )
@@ -414,7 +330,6 @@ class Compiler:
             failed_gate = await self._build_gate(request, "2.2 database schema lowering", root_id, states, artifacts)
 
         else:
-            fixture_ir = saved["fixture_ir"]
             lowered_database = SimpleNamespace(manifest=saved["database_manifest"])
 
         # ===================================================================
@@ -426,12 +341,12 @@ class Compiler:
         )
 
         if rank < 3:
-            design_stage = DesignPass(model, artifact_store.root)
+            backend_design = BackendDesignPass(model, artifact_store.root)
             await self._log(
                 "Compiler",
                 "Running requirement analysis, incremental module architecture, leaf-first refinement, and parent composition.",
             )
-            design = design_stage.compile(
+            design = backend_design.compile(
                 preprocessing.requirement_ir,
                 preprocessing.dependency_graph,
                 database.schema,
@@ -463,8 +378,7 @@ class Compiler:
             self._runtime.traceability.merge_design_links(design_traceability(design.design_ir))
 
         if rank < 3:
-            checkpoints.save("backend-ir", fixture_ir=fixture_ir,
-                             database_manifest=lowered_database.manifest, design=design.design_ir)
+            checkpoints.save("backend-ir", database_manifest=lowered_database.manifest, design=design.design_ir)
 
         # Keep canonical blueprints in design artifacts/checkpoints. Existing
         # consumers receive a deterministic view, never a second model design.
@@ -540,7 +454,7 @@ class Compiler:
                 frontend.report["warnings"].append(issue.format())
             if frontend.report["warnings"] and frontend.report["status"] == "GENERATED":
                 frontend.report["status"] = "GENERATED_WITH_WARNINGS"
-            # Always preserve partial design work; the old Thin validator does not apply.
+            # Preserve partial design work for subsequent lowering and implementation.
             artifacts.update(artifact_store.write_frontend_design(
                 frontend_ir=frontend.frontend_ir,
                 report=frontend.report,
@@ -632,13 +546,13 @@ class Compiler:
             request=request, artifact_store=artifact_store, preprocessing=preprocessing,
             database_schema=database.schema, design_ir=design.design_ir,
             frontend_ir=frontend.frontend_ir, backend_routes=backend_glue.route_registry,
-            fixture_ir=fixture_ir, project_manifest=project_manifest,
+            project_manifest=project_manifest,
             root_id=root_id, states=states, artifacts=artifacts, model=model,
         )
 
     async def _continue_after_lowering(
         self, *, request, artifact_store, preprocessing, database_schema, design_ir,
-        frontend_ir, backend_routes, fixture_ir, project_manifest, root_id, states, artifacts,
+        frontend_ir, backend_routes, project_manifest, root_id, states, artifacts,
         model=None,
     ) -> CompilationResult:
         """Restore deterministic binding metadata without regenerating installed source files."""
@@ -652,32 +566,21 @@ class Compiler:
                     raise ValueError("; ".join(result.errors))
                 return result
             backend_tables = artifact_store.backend_lowering_root
-            if (backend_tables / 'manifest.json').is_file():
-                read_table = lambda name: json.loads((backend_tables / f'{name}.json').read_text())
-                symbols = SimpleNamespace(registry=read_table('symbols'))
-                files = SimpleNamespace(registry=read_table('files'))
-                types = SimpleNamespace(manifest=read_table('types'))
-                modules = {kind: read_table('modules_' + {'DB': 'db', 'FUNC': 'func', 'API': 'api'}[kind])
-                           for kind in ('DB', 'FUNC', 'API')}
-            else:
-                symbols = checked(GlobalSymbolPlanner().plan(design_ir, database_schema, project_manifest))
-                files = checked(GlobalFilePlanner(request.output_dir).plan(
-                    design_ir, symbols.registry, project_manifest, fixture_paths=[]))
-                types = checked(TypeLowerer().lower(symbols.registry, files.registry))
-                modules = {kind: checked(ModuleSkeletonLowerer().lower(
-                    kind, design_ir, symbols.registry, files.registry)).manifest for kind in ('DB', 'FUNC', 'API')}
-            report_path = request.output_dir / ".arc/lowering/frontend/lowering.json"
-            if not report_path.is_file():
-                report_path = request.output_dir / ".arc/code/frontend/lowering.json"
+            if not (backend_tables / 'manifest.json').is_file():
+                raise ValueError("Missing backend lowering registries; run the current backend lowering stage first.")
+            read_table = lambda name: json.loads((backend_tables / f'{name}.json').read_text())
+            symbols = SimpleNamespace(registry=read_table('symbols'))
+            types = SimpleNamespace(manifest=read_table('types'))
+            modules = {kind: read_table('modules_' + {'DB': 'db', 'FUNC': 'func', 'API': 'api'}[kind])
+                       for kind in ('DB', 'FUNC', 'API')}
+            report_path = artifact_store.frontend_lowering_root / "lowering.json"
             report = json.loads(report_path.read_text(encoding="utf-8"))
             bindings = checked(CodeBindingLowerer().lower(
                 output_root=request.output_dir, requirement_ir=preprocessing.requirement_ir,
                 dependency_graph=preprocessing.dependency_graph, design_ir=design_ir, frontend_ir=frontend_ir,
                 backend_symbol_registry=symbols.registry, backend_type_manifest=types.manifest,
                 backend_module_manifests=modules, backend_route_registry=backend_routes,
-                frontend_symbol_registry={"symbols": []},
-                frontend_file_registry={"ui_locations": [], "store_locations": [], "api_client_locations": []},
-                frontend_route_registry={"routes": []}, frontend_lowering_report=report,
+                frontend_lowering_report=report,
             ))
         except (ModelConfigurationError, OSError, ValueError, KeyError) as exc:
             await self._log("Compiler", f"TDD handoff failed: {exc}", "error")
@@ -848,8 +751,7 @@ class Compiler:
                 has_screen = any(
                     isinstance(screen, dict)
                     and requirement_id in screen.get("requirement_ids", [])
-                    for screen in frontend_ir.get("ui" if frontend_ir.get("ir_kind") == "frontend_design" else
-                                                  "components" if "root_component_id" in frontend_ir else "screens", [])
+                    for screen in frontend_ir.get("ui", [])
                 )
                 if not targets["owned_targets"] and not has_screen:
                     states[requirement_id] = "AGGREGATE_NO_UI"

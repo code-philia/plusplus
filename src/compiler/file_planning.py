@@ -60,7 +60,6 @@ class GlobalFilePlanner:
         design_ir: dict[str, Any],
         symbol_registry: dict[str, Any],
         project_manifest: dict[str, Any],
-        fixture_paths: list[str] | None = None,
     ) -> FilePlanningResult:
         self._reset()
         self._validate_project_manifest(project_manifest)
@@ -76,14 +75,6 @@ class GlobalFilePlanner:
         if any("backend_module" in row for row in modules.values()):
             self._add_file("backend/src/runtime/context.ts", role="RUNTIME_CONTEXT", owner="SKELETON_COMPILER",
                            mutability="FROZEN", origin="SYSTEM")
-        for path in sorted(set(fixture_paths or [])):
-            self._add_file(
-                path,
-                role="FIXTURE_SET",
-                owner="SKELETON_COMPILER",
-                mutability="FROZEN",
-                origin="FIXTURE_IR",
-            )
         self._plan_entity_files(symbols)
         self._plan_contract_files(symbols, modules)
         self._plan_module_files(symbols, modules, bindings)
@@ -175,6 +166,9 @@ class GlobalFilePlanner:
                 self._errors.append(
                     "ARC3205 DESIGN_IR_INVALID: modules must contain only objects."
                 )
+                continue
+            if not isinstance(row.get("backend_module"), dict):
+                self._errors.append("ARC3205 DESIGN_IR_INVALID: expected a projected canonical Backend IR module.")
                 continue
             module_id = str(row.get("id", "")).strip()
             parsed = _parse_module_id(module_id)
@@ -303,7 +297,6 @@ class GlobalFilePlanner:
         symbols: dict[str, dict[str, Any]],
         modules: dict[str, dict[str, Any]],
     ) -> None:
-        contracts_by_primary_consumer: dict[str, list[dict[str, Any]]] = {}
         rows = sorted(
             (symbol for symbol in symbols.values() if symbol.get("kind") == "DATA_CONTRACT"),
             key=lambda value: str(value.get("id", "")),
@@ -323,35 +316,10 @@ class GlobalFilePlanner:
                     f"unknown consumers {missing}."
                 )
                 continue
-            primary = normalized_consumers[0]
-            if "backend_module" in modules[primary]:
-                # Content-addressed contracts remain in the same file when a
-                # later requirement starts sharing them.
-                path = f'shared/src/contracts/backend/{symbol["id"].removeprefix("CONTRACT.").replace(".", "-").lower()}.ts'
-                for consumer in normalized_consumers:
-                    if "backend_module" not in modules[consumer]:
-                        self._errors.append("Mixed legacy and blueprint contract consumers")
-                self._place_symbol(symbol, path, role="DATA_CONTRACT", owner="SKELETON_COMPILER",
-                                   mutability="FROZEN", origin="DESIGN_IR")
-                continue
-            contracts_by_primary_consumer.setdefault(primary, []).append(symbol)
-
-        for primary in sorted(contracts_by_primary_consumer):
-            owner, _, local_name = _parse_module_id(primary) or ("generated", "", "contract")
-            path = self._allocate_path(
-                "shared/src/contracts",
-                _kebab_case(local_name),
-                qualifier=owner,
-            )
-            for symbol in contracts_by_primary_consumer[primary]:
-                self._place_symbol(
-                    symbol,
-                    path,
-                    role="DATA_CONTRACT",
-                    owner="SKELETON_COMPILER",
-                    mutability="FROZEN",
-                    origin="DESIGN_IR",
-                )
+            # Content-addressed contracts keep their path when another module shares them.
+            path = f'shared/src/contracts/backend/{symbol["id"].removeprefix("CONTRACT.").replace(".", "-").lower()}.ts'
+            self._place_symbol(symbol, path, role="DATA_CONTRACT", owner="SKELETON_COMPILER",
+                               mutability="FROZEN", origin="DESIGN_IR")
 
     def _plan_module_files(
         self,
@@ -376,8 +344,7 @@ class GlobalFilePlanner:
                 "module",
             )
             directory = roots[module_kind]
-            if "backend_module" in modules[module_id]:
-                directory += "/" + _kebab_case(owner)
+            directory += "/" + _kebab_case(owner)
             path = self._allocate_path(
                 directory,
                 _kebab_case(local_name),

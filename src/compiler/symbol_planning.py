@@ -264,6 +264,9 @@ class GlobalSymbolPlanner:
             key=lambda value: str(value.get("id", "")),
         )
         for module in ordered:
+            if not isinstance(module.get("backend_module"), dict):
+                self._errors.append("ARC3103 DESIGN_IR_INVALID: expected a projected canonical Backend IR module.")
+                continue
             module_id = str(module.get("id", "")).strip()
             module_kind = str(module.get("kind", "")).strip().upper()
             parsed = _parse_module_id(module_id)
@@ -312,12 +315,12 @@ class GlobalSymbolPlanner:
                     "module_kind": module_kind,
                     "owner_requirement": owner_requirement,
                 },
-                self._module_symbol_base(module, module_kind, local_name) + (_pascal_case(owner_requirement) if "backend_module" in module else ""),
+                self._module_symbol_base(module, module_kind, local_name) + _pascal_case(owner_requirement),
                 qualifier=_pascal_case(owner_requirement),
             )
             input_contract = self._plan_contract(module, module_kind, local_name, "INPUT")
             output_contract = self._plan_contract(module, module_kind, local_name, "OUTPUT")
-            context_contract = self._plan_contract(module, module_kind, local_name, "CONTEXT") if "backend_module" in module else None
+            context_contract = self._plan_contract(module, module_kind, local_name, "CONTEXT")
             self._module_bindings.append(
                 {
                     "module_id": module_id,
@@ -393,8 +396,7 @@ class GlobalSymbolPlanner:
                 "fields": normalized_fields,
                 "consumers": [module_id],
             },
-            (f"Backend{_pascal_case(module_kind)}{_pascal_case(direction)}{digest}" if "backend_module" in module
-             else self._contract_symbol_base(module_kind, local_name, direction)),
+            f"Backend{_pascal_case(module_kind)}{_pascal_case(direction)}{digest}",
             qualifier=_pascal_case(module_id.partition("::")[0]),
         )
         self._symbols[contract_id]["symbol"] = symbol
@@ -649,21 +651,6 @@ class GlobalSymbolPlanner:
                     return f"{operation.lower()}{_pascal_case(target)}Record"
             return local
         return local
-
-    @staticmethod
-    def _contract_symbol_base(module_kind: str, local_name: str, direction: str) -> str:
-        name = _pascal_case(local_name)
-        if direction == "CONTEXT":
-            return name + "Context"
-        suffixes = {
-            ("API", "INPUT"): "Request",
-            ("API", "OUTPUT"): "Response",
-            ("FUNC", "INPUT"): "Command",
-            ("FUNC", "OUTPUT"): "Result",
-            ("DB", "INPUT"): "Input",
-            ("DB", "OUTPUT"): "Result",
-        }
-        return f"{name}{suffixes[(module_kind, direction)]}"
 
     def _result(self) -> SymbolPlanningResult:
         for value in self._semantic_values.values():

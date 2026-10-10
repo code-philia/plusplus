@@ -37,12 +37,6 @@ class CompilerArtifactStore:
         write_json_atomic(paths["dependency_graph"], dependency_graph)
         return {name: str(path) for name, path in paths.items()}
 
-    def write_fixture_ir(self, fixture_ir: dict[str, Any]) -> str:
-        path = self.database_root / "fixture_ir.json"
-        write_json_atomic(path, fixture_ir)
-        return str(path)
-
-
     def write_database_schema(self, schema: dict[str, Any]) -> str:
         path = self.database_root / "schema.json"
         write_json_atomic(path, schema)
@@ -52,6 +46,8 @@ class CompilerArtifactStore:
 
 
     def write_design(self, *, design_ir: dict[str, Any]) -> dict[str, str]:
+        if design_ir.get("ir_kind") != "backend_design":
+            raise ValueError("Expected the current canonical Backend IR")
         requirements = design_ir.get("requirements", [])
         modules = design_ir.get("modules", [])
         paths = {
@@ -61,10 +57,9 @@ class CompilerArtifactStore:
             "design_modules_func": self.backend_design_root / "modules_func.json",
             "design_modules_api": self.backend_design_root / "modules_api.json",
         }
-        if design_ir.get("ir_kind") == "backend_design":
-            paths["backend_ir"] = self.backend_design_root / "backend_ir.json"
-            write_json_atomic(paths["backend_ir"], design_ir)
-            paths["backend_design_report"] = self.backend_design_root / "report.json"
+        paths["backend_ir"] = self.backend_design_root / "backend_ir.json"
+        write_json_atomic(paths["backend_ir"], design_ir)
+        paths["backend_design_report"] = self.backend_design_root / "report.json"
         write_json_atomic(paths["design_requirements"], {"requirements": requirements})
         write_json_atomic(paths["design_modules"], {"modules": modules})
         for kind, key in (("DB", "design_modules_db"), ("FUNC", "design_modules_func"), ("API", "design_modules_api")):
@@ -76,23 +71,20 @@ class CompilerArtifactStore:
         batches: list[dict[str, Any]],
         traceability: dict[str, Any],
     ) -> dict[str, str]:
-        """Persist incremental design, including partial results, without the legacy validator."""
-        from .frontend_generation import ui_data_associations
+        """Persist the canonical frontend design and its derived tables."""
+        from .frontend_design import ui_data_associations
         paths: dict[str, str] = {}
-        canonical = frontend_ir.get("ir_kind") == "frontend_design"
-        if canonical:
-            canonical_path = self.frontend_design_root / "frontend_ir.json"
-            write_json_atomic(canonical_path, frontend_ir)
-            paths["frontend_ir"] = str(canonical_path)
-        tables = ("ui", "data", "events", "functions", "types") if canonical else (
-            "components", "data", "ui", "properties", "events", "handlers", "effects", "api_dependencies")
+        canonical_path = self.frontend_design_root / "frontend_ir.json"
+        write_json_atomic(canonical_path, frontend_ir)
+        paths["frontend_ir"] = str(canonical_path)
+        tables = ("ui", "data", "events", "functions", "types")
         for table in tables:
             path = self.frontend_design_root / f"{table}.json"
             write_json_atomic(path, {table: frontend_ir.get(table, [])})
             paths[f"frontend_{table}"] = str(path)
         metadata_path = self.frontend_design_root / "metadata.json"
         write_json_atomic(metadata_path, {key: frontend_ir[key] for key in
-            ("ir_kind", "backend_ref", "root_ui_id", "root_component_id") if key in frontend_ir})
+            ("ir_kind", "backend_ref", "root_ui_id") if key in frontend_ir})
         paths["frontend_metadata"] = str(metadata_path)
         visual_path = self.frontend_design_root / "visual_references.json"
         write_json_atomic(visual_path, {"visual_references": frontend_ir.get("visual_references", [])})

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import posixpath
 import re
 from dataclasses import dataclass, field
@@ -34,20 +33,6 @@ RUNTIME_FILES = (
     RUNTIME_IDS_PATH,
     RUNTIME_CLOCK_PATH,
 )
-
-# Zero value per design type.  A stub answers with the emptiest well-typed value
-# its contract allows, so a caller that only needs the shape keeps working while a
-# caller that needs real data still fails its assertion.
-ZERO_VALUES: dict[str, str] = {
-    "string": '""',
-    "date": '""',
-    "datetime": '""',
-    "uuid": '""',
-    "integer": "0",
-    "number": "0",
-    "boolean": "false",
-    "json": "[]",
-}
 
 # Every backend module receives the same cross-cutting runtime. Owning these here
 # keeps identity, time and error handling out of the implementation agent's
@@ -278,7 +263,8 @@ def _index_modules(
     for row in rows:
         module_id = str(row.get("id", "")).strip() if isinstance(row, dict) else ""
         kind = str(row.get("kind", "")).strip() if isinstance(row, dict) else ""
-        if not module_id or module_id in result or kind not in MODULE_KINDS:
+        if (not module_id or module_id in result or kind not in MODULE_KINDS
+                or not isinstance(row.get("backend_module"), dict)):
             errors.append(f"{prefix}1 DESIGN_IR_INVALID: invalid or duplicate module {module_id!r}.")
             continue
         result[module_id] = row
@@ -503,224 +489,10 @@ def _render_module(
     current_path: str,
     context_contract: dict[str, Any] | None = None,
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
-    if "backend_module" in module:
-        from .backend_lowering.modules import render_blueprint_module
-        return render_blueprint_module(kind, module, function_symbol, input_contract,
-                                       output_contract, context_contract, dependencies,
-                                       database_rows, current_path)
-    function_name = str(function_symbol["symbol"])
-    input_name = str(input_contract["symbol"]) if input_contract else None
-    output_name = str(output_contract["symbol"]) if output_contract else None
-    dependency_name = f"{function_name}Dependencies"
-    exports = [function_name]
-    if kind in {"FUNC", "API"}:
-        exports.append(dependency_name)
-
-    imports: list[dict[str, Any]] = []
-    for contract, symbol in (
-        (input_contract, input_name),
-        (output_contract, output_name),
-    ):
-        if contract is not None and symbol is not None:
-            imports.append(
-                {
-                    "symbol": symbol,
-                    "from": str(contract["source_path"]),
-                    "specifier": "@arc/shared",
-                    "type_only": True,
-                }
-            )
-    if kind == "API":
-        imports.extend(
-            {
-                "symbol": symbol,
-                "from": "express",
-                "specifier": "express",
-                "type_only": True,
-            }
-            for symbol in ("Request", "Response")
-        )
-        imports.append(
-            {
-                "symbol": "ApiErrorBody",
-                "from": "shared/src/contracts/runtime.ts",
-                "specifier": "@arc/shared",
-                "type_only": True,
-            }
-        )
-        imports.append(
-            {
-                "symbol": "sendError",
-                "from": RUNTIME_ERRORS_PATH,
-                "specifier": _relative_specifier(current_path, RUNTIME_ERRORS_PATH),
-                "type_only": False,
-            }
-        )
-    runtime_symbols = [
-        {
-            "symbol": symbol,
-            "from": source_path,
-            "specifier": _relative_specifier(current_path, source_path),
-            "type_only": False,
-        }
-        for symbol, source_path in RUNTIME_IMPORTS
-    ]
-    imports.extend(runtime_symbols)
-    # DB modules always use the single compiler-owned connection.  The table
-    # imports below are schema descriptions only; keeping the connection as a
-    # real import prevents the generated skeleton from accidentally treating a
-    # Drizzle table as an in-memory repository.
-    if kind == "DB" and database_rows:
-        database_client_path = "backend/src/db/client.ts"
-        imports.append(
-            {
-                "symbol": "database",
-                "from": database_client_path,
-                "specifier": _relative_specifier(current_path, database_client_path),
-                "type_only": False,
-            }
-        )
-        for operator in DRIZZLE_OPERATORS:
-            imports.append(
-                {
-                    "symbol": operator,
-                    "from": "drizzle-orm",
-                    "specifier": "drizzle-orm",
-                    "type_only": False,
-                }
-            )
-    for row in [*dependencies, *database_rows]:
-        imports.append(
-            {
-                "symbol": row["symbol"],
-                "from": row["path"],
-                "specifier": row["specifier"],
-                "type_only": False,
-            }
-        )
-
-    lines = ["// Generated by ARC. Edit only requirement-owned source bodies."]
-    for type_only, specifier, names in _group_imports(imports):
-        keyword = "import type" if type_only else "import"
-        lines.append(f'{keyword} {{ {", ".join(names)} }} from "{specifier}";')
-    lines.extend(
-        [
-            "",
-            "/**",
-            f" * @arc-owner {function_symbol.get('owner_requirement', '')}",
-            f" * @arc-requirement {function_symbol.get('owner_requirement', '')}",
-            f" * @arc-kind {kind}",
-            " * @arc-generated skeleton",
-            *[" * " + line.replace("*/", "* /") for line in str(module.get("spec", "")).splitlines()],
-            " */",
-        ]
-    )
-
-    if kind in {"FUNC", "API"}:
-        dependency_symbols = ", ".join(
-            [
-                *(row["symbol"] for row in dependencies),
-                "HttpError",
-                "newId",
-                "now",
-                "nowIso",
-            ]
-        )
-        dependency_object = f"{{ {dependency_symbols} }}" if dependency_symbols else "{}"
-        lines.extend(
-            [
-                f"export const {dependency_name} = {dependency_object} as const;",
-                "",
-            ]
-        )
-    elif database_rows:
-        lines.extend(
-            [
-                "// The imported database is the compiler-owned Drizzle client.",
-                "// Use database.select/insert/update/delete with the schema table imports.",
-                "",
-            ]
-        )
-
-    module_id = str(module.get("id", ""))
-    if kind == "API":
-        request_body = input_name or "unknown"
-        response_body = f"{output_name} | ApiErrorBody" if output_name else "ApiErrorBody"
-        # The envelope is compiler-owned: whatever the region throws leaves the
-        # process as one ApiErrorBody, so the frontend never has to guess.
-        #
-        # An unimplemented route answers with the zero value of its own contract
-        # rather than a 501.  A node whose screens merely traverse a not-yet-built
-        # route then still renders.
-        lines.extend(
-            [
-                f"export async function {function_name}(",
-                f"  req: Request<Record<string, string>, {response_body}, {request_body}>,",
-                f"  res: Response<{response_body}>,",
-                "): Promise<void> {",
-                "  void req;",
-                "  void res;",
-                "  try {",
-                *_stub_response_lines(output_contract, output_name),
-                "  } catch (error) {",
-                "    sendError(res, error);",
-                "  }",
-                "}",
-                "",
-            ]
-        )
-        return "\n".join(lines), exports, imports
-
-    parameter = f"input: {input_name}" if input_name else ""
-    return_type = output_name or "void"
-    lines.append(
-        f"export async function {function_name}({parameter}): Promise<{return_type}> {{"
-    )
-    if input_name:
-        lines.append("  void input;")
-    lines.extend(
-        [
-            f'  throw new NotImplementedError("{module_id}");',
-            "}",
-            "",
-        ]
-    )
-    return "\n".join(lines), exports, imports
-
-
-def _stub_response_lines(
-    output_contract: dict[str, Any] | None,
-    output_name: str | None,
-) -> list[str]:
-    """Render the skeleton reply for a route nobody has implemented yet."""
-
-    fields = (output_contract or {}).get("fields")
-    if output_name is None or not isinstance(fields, list) or not fields:
-        return ["    res.status(204).end();", "    return;"]
-    seen: set[str] = set()
-    properties: list[str] = []
-    for field_item in fields:
-        if not isinstance(field_item, dict):
-            continue
-        name = str(field_item.get("name", "")).strip()
-        # An optional property stays absent: exactOptionalPropertyTypes rejects an
-        # explicit undefined, and a zero value would be indistinguishable from data.
-        if not name or name in seen or not bool(field_item.get("required", True)):
-            continue
-        seen.add(name)
-        zero = ZERO_VALUES.get(str(field_item.get("type", "")))
-        if zero is None:
-            return ["    res.status(204).end();", "    return;"]
-        properties.append(f"      {json.dumps(name)}: {zero},")
-    if not properties:
-        return ["    res.status(204).end();", "    return;"]
-    return [
-        f"    const stub: {output_name} = {{",
-        *properties,
-        "    };",
-        "    res.status(200).json(stub);",
-        "    return;",
-    ]
+    from .backend_lowering.modules import render_blueprint_module
+    return render_blueprint_module(kind, module, function_symbol, input_contract,
+                                   output_contract, context_contract, dependencies,
+                                   database_rows, current_path)
 
 
 def _group_imports(

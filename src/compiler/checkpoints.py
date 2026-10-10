@@ -7,7 +7,6 @@ import os
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from arcbench_agent_runtime.jsonio import write_json_atomic
 from .git_history import GitStageError, ProjectGitHistory
@@ -19,9 +18,9 @@ SNAPSHOT = ".arc/checkpoints/current.json"
 REQUIRED = {
     "initialized": set(),
     "database": {"preprocessing", "database"},
-    "backend-ir": {"preprocessing", "database", "fixture_ir", "database_manifest", "design"},
-    "frontend-ir": {"preprocessing", "database", "fixture_ir", "database_manifest", "design", "backend_routes", "frontend"},
-    "lowered": {"preprocessing", "database", "fixture_ir", "database_manifest", "design", "backend_routes", "frontend"},
+    "backend-ir": {"preprocessing", "database", "database_manifest", "design"},
+    "frontend-ir": {"preprocessing", "database", "database_manifest", "design", "backend_routes", "frontend"},
+    "lowered": {"preprocessing", "database", "database_manifest", "design", "backend_routes", "frontend"},
 }
 
 
@@ -54,9 +53,9 @@ class CheckpointStore:
             committed = json.loads(history._run(["show", f"HEAD:{SNAPSHOT}"]))
             if committed != snapshot:
                 raise ValueError("Checkpoint snapshot differs from HEAD; select a committed checkpoint.")
-            protected = ([".arc/design", ".arc/preprocessing", ".arc/database", ".arc/fixtures"] if resume else
+            protected = ([".arc/design", ".arc/preprocessing"] if resume else
                          ["backend", "frontend", "shared", "package.json", "package-lock.json", ".arc/design",
-                          ".arc/lowering", ".arc/database", ".arc/fixtures", ".arc/code", ".arc/preprocessing", ".arc/project"])
+                          ".arc/lowering", ".arc/preprocessing", ".arc/project"])
             changed = history._run(["diff", "--name-only", "HEAD", "--", *protected])
             if changed:
                 raise ValueError("Checkpoint source has uncommitted changes: " + changed)
@@ -80,11 +79,13 @@ def validate_snapshot(snapshot: Any, stage: str) -> None:
             raise ValueError("Checkpoint has no complete preprocessing artifacts")
         if not preprocessing["requirement_ir"].get("root_id"):
             raise ValueError("Checkpoint Requirement IR has no root")
+    if stage in {"backend-ir", "frontend-ir", "lowered"} and payload["design"].get("ir_kind") != "backend_design":
+        raise ValueError("Checkpoint requires the current Backend IR; regenerate backend design.")
     if stage in {"frontend-ir", "lowered"} and payload["frontend"]["report"]["status"] not in {"GENERATED", "GENERATED_WITH_WARNINGS"}:
         raise ValueError("Partial frontend IR cannot be used as a checkpoint")
     if stage in {"frontend-ir", "lowered"}:
         frontend = payload["frontend"].get("frontend_ir")
-        if not isinstance(frontend, dict) or not (frontend.get("root_ui_id") or frontend.get("root_component_id")):
+        if not isinstance(frontend, dict) or (frontend.get("ir_kind") != "frontend_design" or not frontend.get("root_ui_id")):
             raise ValueError("Checkpoint has no frontend UI root")
 
 
@@ -103,19 +104,11 @@ def prepare_restart(source: Path, stage: str, revision: str | None = None,
     else:
         commit = history._run(["log", "-1", "--format=%H", "--fixed-strings",
                                "--grep", f"ARC: checkpoint {stage}", "HEAD"])
-        if not commit:
-            old_stages = {"initialized": "0 project initialization", "database": "2.1 database schema design",
-                          "backend-ir": "3.1 backend design", "frontend-ir": "4.1 frontend IR generation",
-                          "lowered": "4.3 frontend build accepted"}
-            commit = history._run(["log", "-1", "--format=%H", "--fixed-strings",
-                                   "--grep", f"ARC: {old_stages[stage]}", "HEAD"])
     if not commit:
         raise GitStageError(f"No completed {stage} checkpoint found in HEAD history")
-    legacy = not history._run(["ls-tree", "--name-only", commit, "--", SNAPSHOT])
     try:
-        snapshot = legacy_snapshot(history, commit, stage) if legacy else json.loads(history._run(["show", f"{commit}:{SNAPSHOT}"]))
-        if not legacy:
-            validate_snapshot(snapshot, stage)
+        snapshot = json.loads(history._run(["show", f"{commit}:{SNAPSHOT}"]))
+        validate_snapshot(snapshot, stage)
         if requested_port is not None and requested_port != int(snapshot["web_port"]):
             raise ValueError(f"Checkpoint requires --port {snapshot['web_port']}")
         if requirement_path is not None and stage != "initialized":
@@ -128,131 +121,7 @@ def prepare_restart(source: Path, stage: str, revision: str | None = None,
     if target.exists() or target == source or source in target.parents:
         raise GitStageError("Restart output must be a new directory outside the source project")
     history._run(["worktree", "add", "-b", f"arc/restart/{stage}/{suffix}", str(target), commit])
-    if legacy:
-        try:
-            complete_legacy_manifests(target, snapshot)
-            if stage == "initialized" and requirement_path is not None:
-                snapshot["requirement_sha256"] = hashlib.sha256(requirement_path.read_bytes()).hexdigest()
-            validate_snapshot(snapshot, stage)
-            write_json_atomic(target / SNAPSHOT, snapshot)
-            ProjectGitHistory(target).commit(f"checkpoint {stage}", [SNAPSHOT])
-        except Exception as exc:
-            raise GitStageError(f"Cannot import historical checkpoint; worktree retained at {target}: {exc}") from exc
     return target, int(snapshot["web_port"]), commit
-
-
-def legacy_snapshot(history: ProjectGitHistory, commit: str, stage: str) -> dict[str, Any]:
-    """Read actual historical artifacts, never today's copies or a guessed successful stage."""
-    expected = {"initialized": "0 project initialization", "database": "2.1 database schema design",
-                "backend-ir": "3.1 backend design", "frontend-ir": "4.1 frontend IR generation",
-                "lowered": "4.3 frontend build accepted"}
-    subject = history._run(["show", "-s", "--format=%s", commit])
-    if subject != f"ARC: {expected[stage]}":
-        raise ValueError(f"Expected historical stage commit 'ARC: {expected[stage]}', got {subject!r}")
-    def read(path: str) -> dict[str, Any]:
-        return json.loads(history._run(["show", f"{commit}:{path}"]))
-
-    def read_first(*paths: str) -> dict[str, Any]:
-        last: Exception | None = None
-        for path in paths:
-            try:
-                return read(path)
-            except Exception as exc:
-                last = exc
-        raise last or ValueError("No historical artifact path supplied")
-    manifest = read(".arc/project/project-manifest.json")
-    port = urlparse(manifest["deployment"]["e2eBaseUrl"]).port
-    if port is None:
-        raise ValueError("Historical project manifest has no deployment port")
-    payload: dict[str, Any] = {}
-    digest = ""
-    if stage != "initialized":
-        requirements = read(".arc/preprocessing/requirement_ir.json")
-        payload["preprocessing"] = {"requirement_ir": requirements,
-                                    "dependency_graph": read(".arc/preprocessing/dependency_graph.json")}
-        digest = requirements["source"]["sha256"]
-        payload["database"] = read_first(".arc/design/database/schema.json", ".arc/database/schema.json")
-    if stage in {"backend-ir", "frontend-ir", "lowered"}:
-        payload["fixture_ir"] = read_first(".arc/design/database/fixture_ir.json", ".arc/fixtures/fixture_ir.json")
-        requirements = read_first(".arc/design/backend/requirements.json", ".arc/design/design.json")
-        modules = read_first(".arc/design/backend/modules.json", ".arc/design/design.json")
-        payload["design"] = {"requirements": requirements.get("requirements", []),
-                              "modules": modules.get("modules", [])}
-        if "modules" not in modules and "requirements" in modules:
-            payload["design"] = modules
-        try:
-            payload["design"] = read(".arc/design/backend/backend_ir.json")
-        except Exception:
-            pass  # Historical projects predating backend blueprints.
-    if stage in {"frontend-ir", "lowered"}:
-        try:
-            frontend_ir = read(".arc/design/frontend/frontend_ir.json")
-        except Exception:
-            frontend_tables = {}
-            for table in ("components", "data", "ui", "properties", "events", "handlers", "effects", "api_dependencies"):
-                frontend_tables[table] = read_first(
-                    f".arc/design/frontend/{table}.json",
-                    ".arc/design/frontend/frontend.json",
-                ).get(table, [])
-            metadata = read_first(".arc/design/frontend/metadata.json", ".arc/design/frontend/frontend.json")
-            frontend_ir = {"root_component_id": metadata.get("root_component_id") or next(
-                (row["id"] for row in frontend_tables["components"] if row.get("name") == "App"), None
-            ), **frontend_tables}
-            visual = read_first(".arc/design/frontend/visual_references.json", ".arc/design/frontend/visual-references.json")
-            frontend_ir["visual_references"] = visual.get("visual_references", [])
-        payload["frontend"] = {"frontend_ir": frontend_ir,
-                               "report": read_first(".arc/design/frontend/report.json")}
-        if payload["frontend"]["report"]["status"] not in {"GENERATED", "GENERATED_WITH_WARNINGS"}:
-            raise ValueError("Historical frontend IR is partial; select backend-ir instead")
-        if not (frontend_ir.get("root_ui_id") or frontend_ir.get("root_component_id")):
-            raise ValueError("Historical Thin Frontend IR is not supported")
-    if stage == "lowered" and read_first(".arc/lowering/frontend/lowering.json", ".arc/code/frontend/lowering.json").get("build_status") != "PASSED":
-        raise ValueError("Historical lowering has no successful build record")
-    return {"stage": stage, "web_port": port, "requirement_sha256": digest, "payload": payload}
-
-
-def complete_legacy_manifests(root: Path, snapshot: dict[str, Any]) -> None:
-    """Rebuild missing planning metadata deterministically, without model calls or source writes."""
-    if snapshot["stage"] in {"initialized", "database"}:
-        return
-    from .symbol_planning import GlobalSymbolPlanner
-    from .file_planning import GlobalFilePlanner
-    from .skeleton_lowering import TypeLowerer
-    from .database_lowering import DatabaseLowerer
-    from .module_lowering import ModuleSkeletonLowerer
-    from .backend_lowering import BackendGlueLowerer
-
-    def checked(result: Any) -> Any:
-        if not result.ok:
-            raise ValueError("; ".join(result.errors))
-        return result
-    payload = snapshot["payload"]
-    manifest = json.loads((root / ".arc/project/project-manifest.json").read_text(encoding="utf-8"))
-    database = checked(DatabaseLowerer().lower(payload["database"], manifest, root))
-    payload["fixture_ir"] = {"fixture_sets": []}
-    payload["database_manifest"] = database.manifest
-    if snapshot["stage"] == "backend-ir":
-        return
-    if payload["design"].get("ir_kind") == "backend_design":
-        from .backend_lowering import BackendLowerer
-        lowered = checked(BackendLowerer().lower(payload["design"], payload["database"], manifest,
-                                                database.manifest, root, default_port=snapshot["web_port"]))
-        for name, table in lowered.tables.items():
-            write_json_atomic(root / f".arc/lowering/backend/{name}.json", table)
-        payload["backend_routes"] = lowered.route_registry
-        return
-    from .backend_design.projection import project_lowering_design
-    design = project_lowering_design(payload["design"])
-    symbols = checked(GlobalSymbolPlanner().plan(design, payload["database"], manifest))
-    files = checked(GlobalFilePlanner(root).plan(design, symbols.registry, manifest,
-                    fixture_paths=[]))
-    types = checked(TypeLowerer().lower(symbols.registry, files.registry))
-    manifests = {"type": types.manifest, "database": database.manifest}
-    for kind in ("DB", "FUNC", "API"):
-        manifests[kind] = checked(ModuleSkeletonLowerer().lower(kind, design, symbols.registry, files.registry)).manifest
-    glue = checked(BackendGlueLowerer().lower(design, symbols.registry, files.registry, manifests,
-                                             default_port=snapshot["web_port"]))
-    payload["backend_routes"] = glue.route_registry
 
 
 def install_restart_dependencies(root: Path) -> None:

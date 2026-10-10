@@ -36,9 +36,6 @@ class CodeBindingLowerer:
         backend_type_manifest: dict[str, Any],
         backend_module_manifests: dict[str, dict[str, Any]],
         backend_route_registry: dict[str, Any],
-        frontend_symbol_registry: dict[str, Any],
-        frontend_file_registry: dict[str, Any],
-        frontend_route_registry: dict[str, Any],
         frontend_lowering_report: dict[str, Any] | None = None,
     ) -> CodeBindingResult:
         errors: list[str] = []
@@ -77,38 +74,6 @@ class CodeBindingLowerer:
                     )
                 lowered_backend[module_id] = row
 
-        frontend_symbols = _index_rows(
-            frontend_symbol_registry.get("symbols"),
-            "id",
-            "frontend symbols",
-            errors,
-        )
-        frontend_ui_locations = _index_rows(
-            frontend_file_registry.get("ui_locations"),
-            "ui_id",
-            "frontend UI locations",
-            errors,
-        )
-        frontend_store_locations = _index_rows(
-            frontend_file_registry.get("store_locations"),
-            "store_id",
-            "frontend Store locations",
-            errors,
-        )
-        frontend_api_locations = _index_rows(
-            frontend_file_registry.get("api_client_locations"),
-            "api_id",
-            "frontend API client locations",
-            errors,
-        )
-        frontend_routes = _index_rows(
-            frontend_route_registry.get("routes"),
-            "page_id",
-            "frontend routes",
-            errors,
-        )
-
-        owner_map = _frontend_owner_map(frontend_ir)
         type_bindings = _backend_type_bindings(type_definitions)
         type_by_id = {str(row["type_id"]): row for row in type_bindings}
 
@@ -142,16 +107,8 @@ class CodeBindingLowerer:
             }
             bindings.append(binding)
 
-        ui_tables = {
-            "LAYOUT": "layouts",
-            "PAGE": "pages",
-            "COMPONENT": "components",
-        }
-        if "root_component_id" in frontend_ir:
-            ui_tables = {}
         frontend_items: dict[str, dict[str, Any]] = {}
         if frontend_ir.get("ir_kind") == "frontend_design":
-            ui_tables = {}
             locations = {row["entity_id"]: row for row in (frontend_lowering_report or {}).get("bindings", [])}
             for table, kind in (("ui", "UI"), ("events", "UI_EVENT"), ("functions", "UI_FUNC")):
                 for item in frontend_ir.get(table, []):
@@ -182,137 +139,11 @@ class CodeBindingLowerer:
                     "route": _compact_backend_route(backend_routes.get(api_id)), "callees": [api_id]})
                 type_bindings.extend(_frontend_declared_types([
                     location[key] for key in ("input_type", "output_type") if isinstance(location.get(key), dict)]))
-        if "root_component_id" in frontend_ir:
-            locations = {row["entity_id"]: row for row in (frontend_lowering_report or {}).get("bindings", [])}
-            from .frontend_context import component_requirement_owners
-            component_owners = component_requirement_owners(frontend_ir)
-            for component in frontend_ir.get("components", []):
-                cid = component["id"]
-                frontend_items[cid] = component
-                location = locations.get(cid)
-                if location is None:
-                    errors.append(f"ARC4302 CODE_BINDING_COVERAGE_INVALID: no lowered source for {cid}.")
-                    continue
-                owners = component_owners.get(cid, set())
-                callees = {row["component_ref"] for row in frontend_ir.get("ui", [])
-                           if row.get("component_id") == cid and row.get("kind") == "COMPONENT"}
-                callees.update(row["target"] for row in frontend_ir.get("effects", [])
-                               if row.get("component_id") == cid and row.get("kind") == "REQUEST"
-                               and row.get("target") in backend_modules)
-                bindings.append({"module_id": cid, "owner_requirements": sorted(owners),
-                                 "kind": "COMPONENT", "file": location["file"], "symbol": location["symbol"],
-                                 "input_type": None, "output_type": None, "props_type": None,
-                                 "route": None, "callees": sorted(callees)})
-        for kind, table in ui_tables.items():
-            rows = _index_rows(frontend_ir.get(table), "id", f"Frontend {table}", errors)
-            for ui_id, item in sorted(rows.items()):
-                frontend_items[ui_id] = item
-                location = frontend_ui_locations.get(ui_id)
-                if location is None:
-                    errors.append(
-                        f"ARC4302 CODE_BINDING_COVERAGE_INVALID: no lowered source for {ui_id}."
-                    )
-                    continue
-                props_type = _frontend_type_reference(
-                    location.get("props_symbol_id"), frontend_symbols, location.get("path")
-                )
-                symbol = str(location.get("function_symbol", "")).strip()
-                owners = sorted(owner_map.get(ui_id, set()))
-                relationships = _frontend_relationships(item)
-                bindings.append(
-                    {
-                        "module_id": ui_id,
-                        "owner_requirements": owners,
-                        "kind": kind,
-                        "file": str(location.get("path", "")),
-                        "symbol": symbol,
-                        "input_type": None,
-                        "output_type": None,
-                        "props_type": props_type,
-                        "route": _compact_frontend_route(frontend_routes.get(ui_id)),
-                        "callees": relationships,
-                    }
-                )
-
-        store_rows = _index_rows(frontend_ir.get("stores", []), "id", "Frontend stores", errors)
-        for store_id in sorted(store_rows):
-            location = frontend_store_locations.get(store_id)
-            if location is None:
-                errors.append(
-                    f"ARC4302 CODE_BINDING_COVERAGE_INVALID: no lowered source for {store_id}."
-                )
-                continue
-            owners = sorted(owner_map.get(store_id, set()))
-            store_types = [
-                _frontend_type_reference(location.get(key), frontend_symbols, location.get("path"))
-                for key in ("state_symbol_id", "actions_symbol_id", "value_symbol_id")
-            ]
-            store_types = [row for row in store_types if row is not None]
-            type_bindings.extend(
-                _frontend_declared_types(store_types)
-            )
-            bindings.append(
-                {
-                    "module_id": store_id,
-                    "owner_requirements": owners,
-                    "kind": "STORE",
-                    "file": str(location.get("path", "")),
-                    "symbol": str(location.get("runtime_symbol", "")),
-                    "input_type": None,
-                    "output_type": None,
-                    "props_type": None,
-                    "route": None,
-                    "callees": [],
-                    "store_types": store_types,
-                }
-            )
-
-        for api_id, location in sorted(frontend_api_locations.items()):
-            backend_module = backend_modules.get(api_id, {})
-            owner = str(backend_module.get("owner_requirement", "")).strip()
-            input_type = _frontend_contract_reference(
-                location.get("input_contract_id"),
-                location.get("input_type_symbol"),
-                type_by_id,
-            )
-            output_type = _frontend_contract_reference(
-                location.get("output_contract_id"),
-                location.get("output_type_symbol"),
-                type_by_id,
-            )
-            client_id = f"API_CLIENT::{api_id}"
-            symbol = str(location.get("client_symbol", "")).strip()
-            bindings.append(
-                {
-                    "module_id": client_id,
-                    "source_ir_id": api_id,
-                    "owner_requirements": _strings(backend_module.get("requirement_ids")) or ([owner] if owner else []),
-                    "kind": "API_CLIENT",
-                    "file": str(location.get("path", "")),
-                    "symbol": symbol,
-                    "input_type": input_type,
-                    "output_type": output_type,
-                    "props_type": None,
-                    "route": _compact_backend_route(backend_routes.get(api_id)),
-                    "callees": [api_id],
-                }
-            )
-
-        ui_type_rows: list[dict[str, Any]] = []
-        for ui_id, location in sorted(frontend_ui_locations.items()):
-            reference = _frontend_type_reference(
-                location.get("props_symbol_id"), frontend_symbols, location.get("path")
-            )
-            if reference is not None:
-                ui_type_rows.extend(
-                    _frontend_declared_types([reference])
-                )
-        type_bindings.extend(ui_type_rows)
         type_bindings = _deduplicate_type_bindings(type_bindings, errors)
 
         bindings.sort(key=lambda row: str(row.get("module_id", "")))
         binding_by_id = _unique_bindings(bindings, errors)
-        _validate_coverage(backend_modules, frontend_items, store_rows, binding_by_id, errors)
+        _validate_coverage(backend_modules, frontend_items, binding_by_id, errors)
         _validate_sources(root, bindings, type_bindings, errors)
 
         requirement_targets = _requirement_targets(
@@ -458,35 +289,6 @@ def _type_reference(type_id: Any, types: dict[str, dict[str, Any]]) -> dict[str,
     }
 
 
-def _frontend_type_reference(
-    type_id: Any,
-    symbols: dict[str, dict[str, Any]],
-    file: Any,
-) -> dict[str, Any] | None:
-    normalized = str(type_id or "").strip()
-    if not normalized:
-        return None
-    symbol = symbols.get(normalized)
-    if symbol is None:
-        return None
-    return {
-        "type_id": normalized,
-        "symbol": str(symbol.get("symbol", "")),
-        "file": str(file or ""),
-    }
-
-
-def _frontend_contract_reference(
-    type_id: Any,
-    type_symbol: Any,
-    types: dict[str, dict[str, Any]],
-) -> dict[str, Any] | None:
-    reference = _type_reference(type_id, types)
-    if reference is not None and not reference.get("symbol") and type_symbol:
-        reference["symbol"] = str(type_symbol)
-    return reference
-
-
 def _compact_backend_route(route: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(route, dict):
         return None
@@ -494,47 +296,6 @@ def _compact_backend_route(route: dict[str, Any] | None) -> dict[str, Any] | Non
         key: copy.deepcopy(route.get(key))
         for key in ("route_id", "method", "path", "input_source")
     }
-
-
-def _compact_frontend_route(route: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(route, dict):
-        return None
-    return {
-        key: copy.deepcopy(route.get(key))
-        for key in ("route_id", "path", "layout_id", "navigation")
-    }
-
-
-def _frontend_owner_map(frontend_ir: dict[str, Any]) -> dict[str, set[str]]:
-    owners: dict[str, set[str]] = {}
-    for table in ("layouts", "pages", "components", "stores"):
-        for item in frontend_ir.get(table, []):
-            if not isinstance(item, dict):
-                continue
-            symbol_id = str(item.get("id", "")).strip()
-            if symbol_id:
-                owners.setdefault(symbol_id, set()).update(
-                    _strings(item.get("requirement_ids"))
-                )
-    for link in frontend_ir.get("requirement_links", []):
-        if not isinstance(link, dict):
-            continue
-        requirement_id = str(link.get("requirement_id", "")).strip()
-        if not requirement_id:
-            continue
-        for symbol_id in _strings(link.get("symbol_ids")):
-            owners.setdefault(symbol_id, set()).add(requirement_id)
-    return owners
-
-
-def _frontend_relationships(item: dict[str, Any]) -> list[str]:
-    result = _strings(item.get("component_ids"))
-    layout_id = str(item.get("layout_id", "")).strip()
-    if layout_id:
-        result.append(layout_id)
-    result.extend(_strings(item.get("store_dependencies")))
-    result.extend(_strings(item.get("api_dependencies")))
-    return sorted(set(result))
 
 
 def _requirement_targets(
@@ -596,7 +357,7 @@ def _requirement_targets(
         for requirement_id in requirement_ids
     }
     for binding in bindings:
-        if binding.get("kind") not in {"PAGE", "COMPONENT", "STORE", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"}:
+        if binding.get("kind") not in {"UI", "UI_EVENT", "UI_FUNC"}:
             continue
         module_id = str(binding.get("module_id", ""))
         atomic_owners = {
@@ -605,7 +366,7 @@ def _requirement_targets(
             and str(nodes[owner].get("type", "")).upper() == "ATOMIC"
         }
         if atomic_owners:
-            if binding.get("kind") in {"PAGE", "COMPONENT", "STORE", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"}:
+            if binding.get("kind") in {"UI", "UI_EVENT", "UI_FUNC"}:
                 for owner in _strings(binding.get("owner_requirements")):
                     if owner in owned_by_requirement:
                         owned_by_requirement[owner].add(module_id)
@@ -615,7 +376,7 @@ def _requirement_targets(
                 for owner in atomic_owners:
                     owned_by_requirement[owner].add(module_id)
         else:
-            # Seven-entity frontend records are intentionally editable from
+            # Shared frontend records are intentionally editable from
             # every requirement that semantically references the component or
             # one of its UI/behavior descendants.  Backend modules retain the
             # single-writer policy below; this branch only expands the
@@ -798,7 +559,7 @@ def _validate_requirement_permissions(
             if value in known_requirements
         }
         owners = sorted(set(writable_owners.get(module_id, [])))
-        if binding.get("kind") in {"PAGE", "COMPONENT", "STORE", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"}:
+        if binding.get("kind") in {"UI", "UI_EVENT", "UI_FUNC"}:
             if semantic_owners and not owners:
                 errors.append(
                     "ARC4306 CODE_BINDING_OWNERSHIP_INVALID: "
@@ -827,11 +588,10 @@ def _validate_requirement_permissions(
 def _validate_coverage(
     backend_modules: dict[str, dict[str, Any]],
     frontend_items: dict[str, dict[str, Any]],
-    stores: dict[str, dict[str, Any]],
     bindings: dict[str, dict[str, Any]],
     errors: list[str],
 ) -> None:
-    expected = set(backend_modules) | set(frontend_items) | set(stores)
+    expected = set(backend_modules) | set(frontend_items)
     missing = sorted(expected - set(bindings))
     if missing:
         errors.append(

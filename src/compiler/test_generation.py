@@ -88,11 +88,8 @@ api_contracts is authoritative for HTTP method, path and input_source. For a GET
 query contract use api.get(path).query(input); for a body contract use its declared
 method and .send(input). Never infer a POST from the presence of a request DTO.
 Reuse the declared prerequisite APIs and do not invent test-only endpoints.
-The test runner resets the database and restores all designed fixture baseline rows
-before every test, matching project initialization. The baseline is not an empty
-database when baseline_fixture_sets contains rows; an empty list means no baseline data.
-Read the requirement description, every scenario step, and baseline_fixture_sets when arranging data.
-Prepare additional test-specific data through public API requests
+The test runner resets the database without application fixtures. Arrange test-owned data using
+backend/API operations or test inputs. Treat requirement data examples as acceptance constraints
 or test inputs, not application fixture declarations or /__arc/seed. Never import
 the Express app or backend modules directly in an integration test. Assert status, body, cookies,
 and observable persistence via API requests where the requirement calls for them.
@@ -611,8 +608,7 @@ class RequirementTestGenerationPass:
         required_layers = _plan_test_layers(resolved_targets, design_ir)
         if requirement_id in requirement_ir.get("folder_nodes", []):
             related_screens = [
-                screen for screen in frontend_ir.get("ui" if frontend_ir.get("ir_kind") == "frontend_design" else
-                                                      "components" if "root_component_id" in frontend_ir else "screens", [])
+                screen for screen in frontend_ir.get("ui", [])
                 if isinstance(screen, dict)
                 and requirement_id in screen.get("requirement_ids", [])
             ]
@@ -992,9 +988,6 @@ def _build_context_pack(
         "source_files": source_files,
         "layers": model_layers,
         "api_contracts": api_contracts,
-        "baseline_fixture_sets": _relevant_baseline_fixtures(
-            output_root, database_schema, requirement_id, requirement,
-        ),
     }
     if "E2E" in required_layers and prerequisite_flows:
         model_context["prerequisite_flows"] = prerequisite_flows
@@ -1007,41 +1000,6 @@ def _build_context_pack(
         "allowed_imports": allowed_imports,
     }
     return model_context, validation_context
-
-
-def _relevant_baseline_fixtures(
-    output_root: Path,
-    database_schema: dict[str, Any],
-    requirement_id: str,
-    requirement: dict[str, Any],
-) -> list[dict[str, Any]]:
-    path = output_root / ".arc/design/database/fixture_ir.json"
-    if not path.is_file():
-        return []
-    fixture_ir = json.loads(path.read_text(encoding="utf-8"))
-    relevant_requirements = {requirement_id}
-    relevant_requirements.update(str(value) for value in requirement.get("dependencies", []))
-    relevant_requirements.update(
-        str(child.get("id", ""))
-        for child in requirement.get("children", [])
-        if isinstance(child, dict)
-    )
-    linked_entities = {
-        str(entity.get("key", ""))
-        for entity in schema_for_requirement(database_schema, requirement_id).get("entities", [])
-        if isinstance(entity, dict)
-    }
-    return [
-        copy.deepcopy(fixture_set)
-        for fixture_set in fixture_ir.get("fixture_sets", [])
-        if isinstance(fixture_set, dict) and (
-            str(fixture_set.get("requirement_id", "")) in relevant_requirements
-            or any(
-                isinstance(row, dict) and str(row.get("entity_key", "")) in linked_entities
-                for row in fixture_set.get("rows", [])
-            )
-        )
-    ]
 
 
 def _database_source_cards(
@@ -1175,7 +1133,7 @@ def _build_model_layers(
                 if (row.get("kind") == "FUNC" and row.get("module_id") in pure_function_ids
                     if layer == "UNIT" else row.get("kind") == "API"
                     if layer == "INTEGRATION" else row.get("kind") in
-                    {"COMPONENT", "PAGE", "LAYOUT", "STORE", "API_CLIENT", "API", "UI", "UI_EVENT", "UI_FUNC"})
+                    {"API_CLIENT", "API", "UI", "UI_EVENT", "UI_FUNC"})
             ],
         }
     return layers, source_files
@@ -1188,7 +1146,7 @@ def _target_relevant_to_layers(
     allowed = {
         "UNIT": {"FUNC", "DB"},
         "INTEGRATION": {"API", "FUNC", "DB"},
-        "E2E": {"PAGE", "COMPONENT", "LAYOUT", "STORE", "API", "API_CLIENT", "UI", "UI_EVENT", "UI_FUNC"},
+        "E2E": {"API", "API_CLIENT", "UI", "UI_EVENT", "UI_FUNC"},
     }
     return any(kind in allowed[layer] for layer in required_layers)
 
@@ -1232,22 +1190,7 @@ def _project_one_hop_dependencies(
         if str(value)
     }
     if "E2E" in required_layers:
-        api_ids = {
-            str(row.get("api_id", ""))
-            for table in ("journeys", "api_usages")
-            for row in frontend_subgraph.get(table, [])
-            if isinstance(row, dict) and str(row.get("api_id", ""))
-        }
-        api_ids.update(
-            str(value)
-            for row in frontend_subgraph.get("screens", [])
-            if isinstance(row, dict)
-            for value in row.get("required_api_ids", [])
-            if str(value)
-        )
-        dependency_ids.update(api_ids)
-        dependency_ids.update(row["target"] for row in frontend_subgraph.get("effects", [])
-                              if row.get("kind") == "REQUEST" and row.get("target"))
+        api_ids: set[str] = set()
         api_ids.update(call["target_id"] for row in frontend_subgraph.get("functions", [])
                        for call in row.get("calls", []) if call.get("kind") == "API")
         dependency_ids.update(api_ids)
@@ -1271,131 +1214,13 @@ def _project_frontend_subgraph(
     owned_targets: list[dict[str, Any]],
     required_layers: list[str],
 ) -> dict[str, Any]:
-    if "root_component_id" in frontend_ir:
-        from .frontend_context import frontend_subgraph
-        return frontend_subgraph(frontend_ir, requirement_id,
-                                 {str(row.get("module_id", "")) for row in owned_targets})
-    if frontend_ir.get("ir_kind") == "frontend_design":
-        from .frontend_context import frontend_subgraph
-        return frontend_subgraph(frontend_ir, requirement_id,
-                                 {str(row.get("module_id", "")) for row in owned_targets})
-    owned_ids = {
-        str(row.get("source_ir_id", row.get("module_id", "")))
-        for row in owned_targets
-    }
-    screens = [
-        {**_project_frontend_row(row, "screen"), "entry_candidate": True}
-        for row in frontend_ir.get("screens", [])
-        if isinstance(row, dict)
-        and (
-            str(row.get("id", "")) in owned_ids
-            or requirement_id in {str(value) for value in row.get("requirement_ids", [])}
-        )
-    ]
-    primary_screen_ids = {str(row.get("id", "")) for row in screens}
-    route_index = {
-        str(row.get("route", "")): row
-        for row in frontend_ir.get("screens", [])
-        if isinstance(row, dict) and str(row.get("route", ""))
-    }
-    navigation_routes = {
-        str(target.get("target_route", ""))
-        for screen in screens
-        for target in screen.get("navigation_targets", [])
-        if isinstance(target, dict) and str(target.get("target_route", ""))
-    }
-    screen_ids = {str(row.get("id", "")) for row in screens}
-    for route in sorted(navigation_routes):
-        destination = route_index.get(route)
-        destination_id = str((destination or {}).get("id", ""))
-        if destination is not None and destination_id not in screen_ids:
-            screens.append(_project_frontend_row(destination, "screen"))
-            screen_ids.add(destination_id)
-
-    journeys = [
-        _project_frontend_row(row, "journey")
-        for row in frontend_ir.get("journeys", [])
-        if isinstance(row, dict)
-        and (
-            str(row.get("requirement_id", "")) == requirement_id
-            or str(row.get("source_screen_id", "")) in primary_screen_ids
-        )
-    ]
-    api_ids = {
-        str(row.get("api_id", ""))
-        for row in journeys
-        if str(row.get("api_id", ""))
-    }
-    api_ids.update(
-        str(value)
-        for row in screens
-        for value in row.get("required_api_ids", [])
-        if str(value)
-    )
-    api_usages = [
-        _project_frontend_row(row, "api_usage")
-        for row in frontend_ir.get("api_usages", [])
-        if isinstance(row, dict)
-        and str(row.get("screen_id", row.get("consumer_id", ""))) in screen_ids
-    ]
-    shared_state_policies = [
-        _project_frontend_row(row, "state")
-        for row in frontend_ir.get("shared_state_policies", [])
-        if isinstance(row, dict)
-        and (
-            str(row.get("id", "")) in owned_ids
-            or requirement_id in {str(value) for value in row.get("requirement_ids", [])}
-            or str(row.get("requirement_id", "")) == requirement_id
-        )
-    ]
-    screen_components = [
-        _project_frontend_row(row, "component")
-        for row in frontend_ir.get("screen_components", [])
-        if isinstance(row, dict) and str(row.get("screen_id", "")) in screen_ids
-    ]
-    if "E2E" not in required_layers:
-        return {"screens": [], "screen_components": [], "journeys": [], "api_usages": [], "shared_state_policies": []}
-    return {
-        "screens": screens,
-        "screen_components": screen_components,
-        "journeys": journeys,
-        "api_usages": api_usages,
-        "shared_state_policies": shared_state_policies,
-    }
+    from .frontend_context import frontend_subgraph
+    return frontend_subgraph(frontend_ir, requirement_id,
+                             {str(row.get("module_id", "")) for row in owned_targets})
 
 
-def _e2e_entry_routes(
-    requirement_id: str,
-    frontend_subgraph: dict[str, list[dict[str, Any]]],
-) -> list[str]:
-    if "root_component_id" in frontend_subgraph or frontend_subgraph.get("ir_kind") == "frontend_design":
-        return list(frontend_subgraph.get("entry_routes", []))
-    screens = {
-        str(row.get("id", "")): row
-        for row in frontend_subgraph.get("screens", [])
-        if isinstance(row, dict) and row.get("id")
-    }
-    journey_routes = {
-        str(screens.get(str(row.get("source_screen_id", "")), {}).get("route", ""))
-        for row in frontend_subgraph.get("journeys", [])
-        if isinstance(row, dict) and str(row.get("requirement_id", "")) == requirement_id
-    }
-    return sorted({route for route in journey_routes if route} | {
-        str(row.get("route", ""))
-        for row in screens.values()
-        if row.get("entry_candidate") and row.get("route")
-    })
-
-
-def _project_frontend_row(row: dict[str, Any], kind: str) -> dict[str, Any]:
-    fields = {
-        "screen": ("id", "route", "title", "description", "requirement_ids", "required_api_ids", "navigation_targets", "visual_reference_ids"),
-        "component": ("id", "screen_id", "purpose", "requirement_ids", "required_api_ids", "observable_states", "visual_reference_ids"),
-        "journey": ("id", "requirement_id", "source_screen_id", "target_screen_id", "steps", "api_id"),
-        "api_usage": ("screen_id", "consumer_id", "api_id", "purpose", "trigger"),
-        "state": ("id", "name", "requirement_ids", "persistence", "storage_key", "state", "actions"),
-    }[kind]
-    return {key: copy.deepcopy(row.get(key)) for key in fields if key in row}
+def _e2e_entry_routes(requirement_id: str, frontend_subgraph: dict[str, Any]) -> list[str]:
+    return list(frontend_subgraph.get("entry_routes", []))
 
 
 def _referenced_type_ids(targets: list[dict[str, Any]]) -> set[str]:
@@ -1447,7 +1272,7 @@ def _plan_test_layers(
         if isinstance(row, dict)
     ]
     layers: set[str] = set()
-    if any(row.get("kind") in {"PAGE", "COMPONENT", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"} for row in owned):
+    if any(row.get("kind") in {"UI", "UI_EVENT", "UI_FUNC"} for row in owned):
         layers.add("E2E")
     if any(row.get("kind") == "API" for row in owned):
         layers.add("INTEGRATION")
@@ -1674,7 +1499,7 @@ def _validate_test_code(
             )
         allowed_routes = {
             str(row.get("route", "")).strip()
-            for row in context_pack.get("relevant_frontend_subgraph", {}).get("screens", [])
+            for row in context_pack.get("relevant_frontend_subgraph", {}).get("ui", [])
             if isinstance(row, dict) and str(row.get("route", "")).strip()
         }
         allowed_routes.update(context_pack.get("e2e_entry_routes", []))

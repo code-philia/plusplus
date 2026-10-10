@@ -215,8 +215,7 @@ class ImplementationAgent:
         module_files = {row["file"] for row in candidates if row.get("file")}
         entrypoints = {
             "API": "backend/src/app.ts",
-            "PAGE": "frontend/src/app/router.tsx",
-            "LAYOUT": "frontend/src/app/router.tsx",
+            "UI": "frontend/src/App.tsx",
         }
         for row in owned:
             entrypoint = entrypoints.get(str(row.get("kind", "")))
@@ -348,7 +347,7 @@ class FrontendImplementationAgent(ImplementationAgent):
             max_context_characters=max_context_characters, trace=trace,
             model_log=model_log,
         )
-        self._allowed_kinds = {"COMPONENT", "PAGE", "LAYOUT", "STORE", "API_CLIENT", "UI", "UI_EVENT", "UI_FUNC"}
+        self._allowed_kinds = {"API_CLIENT", "UI", "UI_EVENT", "UI_FUNC"}
         self._agent = BaseStructuredAgent(
             model,
             schema_name="arc_frontend_implementation_patch",

@@ -283,7 +283,7 @@ def test_workspace_spec(
                 f'export async function resetE2EState(page: Page): Promise<void> {{\n'
                 f'  const baseUrl = process.env.ARC_TEST_BASE_URL ?? "http://127.0.0.1:{port}";\n'
                 '  const response = await fetch(`${baseUrl}/__arc/reset`, { method: "POST" });\n'
-                '  if (!response.ok) throw new Error(`PRECONDITION: database reset/fixture restore failed: ${response.status} ${await response.text()}`);\n'
+                '  if (!response.ok) throw new Error(`PRECONDITION: database reset failed: ${response.status} ${await response.text()}`);\n'
                 '  await page.context().clearCookies();\n'
                 '  await page.goto(`${baseUrl}/__arc/health`);\n'
                 '  await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });\n'

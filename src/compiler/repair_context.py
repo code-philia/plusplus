@@ -72,7 +72,7 @@ class RepairContextBuilder:
             # Aggregate requirements can own no functions themselves.
             selected.extend(resolved["dependency_targets"])
         selected.extend(direct_dependencies(
-            [row for row in selected if row.get("kind") in {"API", "FUNC", "API_CLIENT", "STORE"}], bindings))
+            [row for row in selected if row.get("kind") in {"API", "FUNC", "API_CLIENT", "UI_FUNC", "UI_EVENT"}], bindings))
         type_ids = {ref["type_id"] for row in selected
                     for ref in [row.get("input_type"), row.get("output_type"), row.get("props_type"),
                                 *row.get("store_types", [])]
@@ -91,7 +91,7 @@ class RepairContextBuilder:
         sources = {path: self.read(path) for path in sorted(paths - tests.keys())}
         repairable = {row["file"] for row in bindings if row.get("file", "").startswith(
             ("backend/src/", "frontend/src/")) and row.get("kind") in
-            {"DB", "FUNC", "API", "API_CLIENT", "STORE", "COMPONENT", "PAGE", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"}}
+            {"DB", "FUNC", "API", "API_CLIENT", "UI", "UI_EVENT", "UI_FUNC"}}
         requirement, _ = implementation_requirement(requirement, self.root, frontend=True)
         return {
             "requirement_id": requirement_id, "requirement": requirement,

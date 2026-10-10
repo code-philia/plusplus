@@ -19,10 +19,10 @@ from openai import OpenAI
 from core.logging import SynchronousLog
 from arcbench_agent_runtime.jsonio import write_json_atomic
 
-from .frontend_ir import (
+from .visual_contracts import (
     VISUAL_ANALYSIS_SCHEMA,
-    FrontendDesignErrorCode,
-    FrontendDesignIssue,
+    VisualReferenceErrorCode,
+    VisualReferenceIssue,
 )
 from .trace_payload import format_payload_trace
 from .model_client import (
@@ -290,13 +290,13 @@ class ResolvedVisualReference:
 @dataclass(slots=True)
 class VisualReferenceResolutionResult:
     references: list[ResolvedVisualReference] = field(default_factory=list)
-    errors: list[FrontendDesignIssue] = field(default_factory=list)
+    errors: list[VisualReferenceIssue] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class VisualReferenceAnalysisResult:
     references: list[dict[str, Any]] = field(default_factory=list)
-    errors: list[FrontendDesignIssue] = field(default_factory=list)
+    errors: list[VisualReferenceIssue] = field(default_factory=list)
 
 
 class VisualReferenceResolver:
@@ -319,14 +319,14 @@ class VisualReferenceResolver:
             return VisualReferenceResolutionResult(
                 errors=[
                     self._issue(
-                        FrontendDesignErrorCode.IR_INVALID,
+                        VisualReferenceErrorCode.IR_INVALID,
                         "Requirement IR has no node registry.",
                         "<requirement-ir>",
                     )
                 ]
             )
 
-        errors: list[FrontendDesignIssue] = []
+        errors: list[VisualReferenceIssue] = []
         by_digest: dict[str, ResolvedVisualReference] = {}
         digest_by_id: dict[str, str] = {}
         for requirement_id in sorted(nodes):
@@ -337,7 +337,7 @@ class VisualReferenceResolver:
             if not isinstance(raw_references, list):
                 errors.append(
                     self._issue(
-                        FrontendDesignErrorCode.IR_INVALID,
+                        VisualReferenceErrorCode.IR_INVALID,
                         "visual_references must be a list.",
                         requirement_id,
                     )
@@ -359,7 +359,7 @@ class VisualReferenceResolver:
                     if colliding_digest is not None and colliding_digest != resolved.sha256:
                         errors.append(
                             self._issue(
-                                FrontendDesignErrorCode.SYMBOL_DUPLICATE,
+                                VisualReferenceErrorCode.SYMBOL_DUPLICATE,
                                 f"Visual reference id collision: {resolved.id}.",
                                 requirement_id,
                                 reference=raw_reference,
@@ -386,11 +386,11 @@ class VisualReferenceResolver:
         requirement_root: Path,
         requirement_id: str,
         raw_reference: str,
-    ) -> tuple[ResolvedVisualReference | None, FrontendDesignIssue | None]:
+    ) -> tuple[ResolvedVisualReference | None, VisualReferenceIssue | None]:
         normalized = _normalize_markdown_destination(raw_reference)
         if not normalized or URI_SCHEME_PATTERN.match(normalized):
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_PATH_INVALID,
+                VisualReferenceErrorCode.VISUAL_PATH_INVALID,
                 f"Visual reference must be a local relative path: {raw_reference!r}.",
                 requirement_id,
                 reference=raw_reference,
@@ -399,7 +399,7 @@ class VisualReferenceResolver:
         relative = Path(normalized.replace("/", os.sep))
         if relative.is_absolute():
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_PATH_INVALID,
+                VisualReferenceErrorCode.VISUAL_PATH_INVALID,
                 f"Visual reference must not be absolute: {raw_reference!r}.",
                 requirement_id,
                 reference=raw_reference,
@@ -408,14 +408,14 @@ class VisualReferenceResolver:
         candidate = (requirement_root / relative).resolve()
         if candidate != requirement_root and requirement_root not in candidate.parents:
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_PATH_ESCAPE,
+                VisualReferenceErrorCode.VISUAL_PATH_ESCAPE,
                 f"Visual reference escapes the requirement directory: {raw_reference!r}.",
                 requirement_id,
                 reference=raw_reference,
             )
         if not candidate.is_file():
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_NOT_FOUND,
+                VisualReferenceErrorCode.VISUAL_NOT_FOUND,
                 f"Visual reference does not exist: {raw_reference!r}.",
                 requirement_id,
                 reference=raw_reference,
@@ -425,21 +425,21 @@ class VisualReferenceResolver:
             byte_size = candidate.stat().st_size
         except OSError as exc:
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_READ_FAILED,
+                VisualReferenceErrorCode.VISUAL_READ_FAILED,
                 f"Cannot inspect visual reference {raw_reference!r}: {exc}",
                 requirement_id,
                 reference=raw_reference,
             )
         if byte_size <= 0:
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_READ_FAILED,
+                VisualReferenceErrorCode.VISUAL_READ_FAILED,
                 f"Visual reference is empty: {raw_reference!r}.",
                 requirement_id,
                 reference=raw_reference,
             )
         if byte_size > self.max_bytes:
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_TOO_LARGE,
+                VisualReferenceErrorCode.VISUAL_TOO_LARGE,
                 f"Visual reference is {byte_size} bytes; maximum is {self.max_bytes}: {raw_reference!r}.",
                 requirement_id,
                 reference=raw_reference,
@@ -451,7 +451,7 @@ class VisualReferenceResolver:
             content = candidate.read_bytes()
         except OSError as exc:
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_READ_FAILED,
+                VisualReferenceErrorCode.VISUAL_READ_FAILED,
                 f"Cannot read visual reference {raw_reference!r}: {exc}",
                 requirement_id,
                 reference=raw_reference,
@@ -459,7 +459,7 @@ class VisualReferenceResolver:
         media_type = _detect_media_type(content)
         if media_type not in SUPPORTED_MEDIA_TYPES:
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_MEDIA_UNSUPPORTED,
+                VisualReferenceErrorCode.VISUAL_MEDIA_UNSUPPORTED,
                 f"Visual reference is not a supported PNG, JPEG, GIF, or WebP image: {raw_reference!r}.",
                 requirement_id,
                 reference=raw_reference,
@@ -480,12 +480,12 @@ class VisualReferenceResolver:
 
     @staticmethod
     def _issue(
-        code: FrontendDesignErrorCode,
+        code: VisualReferenceErrorCode,
         message: str,
         blame_symbol: str,
         **context: Any,
-    ) -> FrontendDesignIssue:
-        return FrontendDesignIssue(
+    ) -> VisualReferenceIssue:
+        return VisualReferenceIssue(
             code=code,
             message=message,
             phase="VISUAL_REFERENCE_RESOLUTION",
@@ -543,7 +543,7 @@ class VisualReferenceAnalyzer:
         references: Sequence[ResolvedVisualReference],
     ) -> VisualReferenceAnalysisResult:
         records: list[dict[str, Any]] = []
-        errors: list[FrontendDesignIssue] = []
+        errors: list[VisualReferenceIssue] = []
         for reference in sorted(references, key=lambda item: item.id):
             analysis, issue = self._analyze_one(reference)
             if issue is not None:
@@ -606,10 +606,10 @@ class VisualReferenceAnalyzer:
     def _analyze_one(
         self,
         reference: ResolvedVisualReference,
-    ) -> tuple[dict[str, Any] | None, FrontendDesignIssue | None]:
+    ) -> tuple[dict[str, Any] | None, VisualReferenceIssue | None]:
         if self._model is None:
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_MODEL_UNAVAILABLE,
+                VisualReferenceErrorCode.VISUAL_MODEL_UNAVAILABLE,
                 reference,
                 self._configuration_error or "Visual model is not configured.",
             )
@@ -621,14 +621,14 @@ class VisualReferenceAnalyzer:
             content = reference.absolute_path.read_bytes()
         except OSError as exc:
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_READ_FAILED,
+                VisualReferenceErrorCode.VISUAL_READ_FAILED,
                 reference,
                 f"Cannot read resolved visual reference: {exc}",
             )
         actual_digest = hashlib.sha256(content).hexdigest()
         if actual_digest != reference.sha256:
             return None, self._issue(
-                FrontendDesignErrorCode.VISUAL_READ_FAILED,
+                VisualReferenceErrorCode.VISUAL_READ_FAILED,
                 reference,
                 "Visual reference changed after resolution; resolve it again before analysis.",
                 expected_sha256=reference.sha256,
@@ -687,7 +687,7 @@ class VisualReferenceAnalyzer:
                 )
             except VisualModelConfigurationError as exc:
                 return None, self._issue(
-                    FrontendDesignErrorCode.VISUAL_MODEL_UNAVAILABLE,
+                    VisualReferenceErrorCode.VISUAL_MODEL_UNAVAILABLE,
                     reference,
                     str(exc),
                 )
@@ -729,9 +729,9 @@ class VisualReferenceAnalyzer:
             )
 
         code = (
-            FrontendDesignErrorCode.VISUAL_ANALYSIS_INVALID
+            VisualReferenceErrorCode.VISUAL_ANALYSIS_INVALID
             if last_error.startswith("Invalid visual analysis")
-            else FrontendDesignErrorCode.VISUAL_ANALYSIS_FAILED
+            else VisualReferenceErrorCode.VISUAL_ANALYSIS_FAILED
         )
         return None, self._issue(code, reference, last_error)
 
@@ -754,12 +754,12 @@ class VisualReferenceAnalyzer:
 
     @staticmethod
     def _issue(
-        code: FrontendDesignErrorCode,
+        code: VisualReferenceErrorCode,
         reference: ResolvedVisualReference,
         message: str,
         **context: Any,
-    ) -> FrontendDesignIssue:
-        return FrontendDesignIssue(
+    ) -> VisualReferenceIssue:
+        return VisualReferenceIssue(
             code=code,
             message=message,
             phase="VISUAL_REFERENCE_ANALYSIS",

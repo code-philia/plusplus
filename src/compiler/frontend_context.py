@@ -1,4 +1,4 @@
-"""Read-only context selection for consumers of the seven-entity frontend IR."""
+"""Read-only context selection for the canonical frontend IR."""
 from __future__ import annotations
 
 import copy
@@ -52,29 +52,6 @@ def implementation_requirement(
     return project(requirement), sorted(set(missing))
 
 
-def component_requirement_owners(ir: dict[str, Any]) -> dict[str, set[str]]:
-    """Resolve explicit entity ownership without spreading across composition edges."""
-    tables = ("components", "ui", "data", "properties", "events", "handlers", "effects")
-    rows = {row["id"]: row for table in tables for row in ir.get(table, [])}
-    owners = {row["id"]: set() for row in ir.get("components", [])}
-    for row in rows.values():
-        current = row
-        visited: set[str] = set()
-        while current["id"] not in owners and current["id"] not in visited:
-            visited.add(current["id"])
-            parent = current.get("component_id") or current.get("owner_id")
-            if parent not in rows:
-                break
-            current = rows[parent]
-        if current["id"] in owners:
-            owners[current["id"]].update(row.get("requirement_ids", []))
-        # An explicitly associated component use also associates its target,
-        # but does not propagate the containing component's other owners.
-        if row.get("kind") == "COMPONENT" and row.get("component_ref") in owners:
-            owners[row["component_ref"]].update(row.get("requirement_ids", []))
-    return owners
-
-
 def frontend_subgraph(ir: dict[str, Any], requirement_id: str, target_ids: set[str]) -> dict[str, Any]:
     if ir.get("ir_kind") == "frontend_design":
         from .frontend_design.context import value_references, required_types
@@ -114,33 +91,7 @@ def frontend_subgraph(ir: dict[str, Any], requirement_id: str, target_ids: set[s
                       entry_routes=sorted({row["route"] for row in result["ui"] if "route" in row}))
         result["types"] = required_types(result, ir["types"])
         return result
-    tables = ("components", "ui", "properties", "events", "handlers", "effects")
-    ownership = component_requirement_owners(ir)
-    selected = (set(target_ids) & ownership.keys()) or {
-        cid for cid, requirements in ownership.items() if requirement_id in requirements
-    }
-    selected |= {
-        row["component_ref"] for row in ir.get("ui", [])
-        if row.get("kind") == "COMPONENT" and row.get("component_id") in selected
-    }
-    # One composition hop supplies child contracts without pulling ancestors
-    # and their unrelated sibling pages into the context.
-    result = {
-        table: [
-            copy.deepcopy(row)
-            for row in ir.get(table, [])
-            if row.get("component_id", row["id"]) in selected
-        ]
-        for table in tables
-    }
-    owners = {row["id"] for rows in result.values() for row in rows}
-    result["data"] = [
-        copy.deepcopy(row) for row in ir.get("data", [])
-        if row.get("owner_id") in owners
-    ]
-    result["root_component_id"] = ir.get("root_component_id")
-    result["entry_routes"] = ["/"] if result["components"] else []
-    return result
+    raise ValueError("Expected the current frontend_design IR")
 
 
 def visual_context(project_root: Path, requirement_id: str) -> list[dict[str, Any]]:
@@ -180,8 +131,6 @@ def visual_context(project_root: Path, requirement_id: str) -> list[dict[str, An
     linked_paths: set[str] = set()
     frontend: dict[str, Any] = {}
     frontend_path = root / "frontend_ir.json"
-    if not frontend_path.is_file():
-        frontend_path = root / "frontend.json"
     if frontend_path.is_file():
         try:
             loaded = json.loads(frontend_path.read_text(encoding="utf-8"))
@@ -256,7 +205,7 @@ def visual_context(project_root: Path, requirement_id: str) -> list[dict[str, An
             str(value) for value in record.get("requirement_ids", [])
         }
         linked = record_id in linked_ids or source_path in linked_paths
-        # Some runs persist requirement links only in frontend.json.
+        # The canonical Frontend IR also records requirement/reference links.
         if frontend and not (owns_requirement or linked):
             for row in frontend.get("visual_references", []) if isinstance(frontend, dict) else []:
                 if not isinstance(row, dict):

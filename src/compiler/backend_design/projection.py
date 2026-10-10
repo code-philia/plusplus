@@ -1,4 +1,4 @@
-"""Deterministic compatibility view for existing lowering/frontend consumers.
+"""Deterministic planning view for lowering and implementation consumers.
 
 The backend blueprint remains authoritative; this view is never model generated.
 """
@@ -10,7 +10,7 @@ from typing import Any
 
 def project_lowering_design(ir: dict[str, Any]) -> dict[str, Any]:
     if ir.get('ir_kind') != 'backend_design':
-        return ir
+        raise ValueError('Expected the current canonical Backend IR')
     definitions = {row['id']: row for row in ir['types']}
     modules = {row['id']: row for row in ir['modules']}
 
@@ -53,7 +53,7 @@ def project_lowering_design(ir: dict[str, Any]) -> dict[str, Any]:
     projected = []
     for key, module in modules.items():
         # Retain full collaboration/criteria/context for implementation prompts,
-        # including consumers that only pass the old prose spec downstream.
+        # including consumers that read the serialized module spec downstream.
         blueprint = json.dumps({'context': module['context'], 'calls': module['calls'],
                                 'data_access': module['data_access'], 'acceptance_criteria': module['acceptance_criteria']},
                                ensure_ascii=False, separators=(',', ':'))

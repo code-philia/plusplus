@@ -57,7 +57,7 @@ class NodeTDDOrchestrator:
     """Implement and verify a node, allowing diagnosed test corrections."""
 
     _BACKEND_KINDS = {"DB", "FUNC", "API"}
-    _FRONTEND_KINDS = {"API_CLIENT", "STORE", "COMPONENT", "PAGE", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"}
+    _FRONTEND_KINDS = {"API_CLIENT", "UI", "UI_EVENT", "UI_FUNC"}
 
     def __init__(
         self,
@@ -327,11 +327,11 @@ class NodeTDDOrchestrator:
                 result.failed_requirements.append(requirement_id)
                 return self._fail(result, self._raw_output(run))
             while not run.ok:
-                if "PRECONDITION: database reset/fixture restore failed:" in self._raw_output(run):
+                if "PRECONDITION: database reset failed:" in self._raw_output(run):
                     result.failed_requirements.append(requirement_id)
                     result.status = "PRECONDITION_BLOCKED"
                     result.errors.append(
-                        f"PRECONDITION_BLOCKED: {requirement_id} {layer}: fixture setup failed; "
+                        f"PRECONDITION_BLOCKED: {requirement_id} {layer}: database reset failed; "
                         "business repair is stopped.\n" + self._raw_output(run))
                     return result
                 budget_key = (requirement_id, layer)
@@ -547,8 +547,8 @@ class NodeTDDOrchestrator:
     def _owned_targets(self, requirement_id: str) -> list[dict[str, Any]]:
         resolved = CodeTargetResolver(self.code_binding_registry).resolve_requirement_targets(requirement_id)
         priority = {
-            "DB": 0, "FUNC": 1, "API": 2, "API_CLIENT": 3, "STORE": 4,
-            "COMPONENT": 5, "PAGE": 6, "LAYOUT": 7, "UI_FUNC": 4, "UI_EVENT": 5, "UI": 6,
+            "DB": 0, "FUNC": 1, "API": 2, "API_CLIENT": 3,
+            "UI_FUNC": 4, "UI_EVENT": 5, "UI": 6,
         }
         return sorted(
             resolved["owned_targets"],
