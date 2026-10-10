@@ -355,7 +355,7 @@ class NodeTDDOrchestrator:
                         str(row["file"]) for row in self._owned_targets(requirement_id)
                         if row.get("file") and row.get("kind") in self._BACKEND_KINDS | self._FRONTEND_KINDS
                     }
-                    direct_context = self.repair_context.direct_repair(context, owned_files)
+                    direct_context = self.repair_context.direct_repair(context, owned_files | set(context.get("direct_editable_files", [])))
                     if direct_context is not None:
                         changed, error = self._apply_edit(
                             requirement_id, self._requirement(requirement_id), self.repair_agent, result,
@@ -378,7 +378,7 @@ class NodeTDDOrchestrator:
                             f"DIRECT_REPAIR_DEFERRED requirement={requirement_id} layer={layer} reason={error}"
                         )
                         context["history"] = copy.deepcopy(history)
-                analysis = self.analysis_agent.analyze(context)
+                analysis = self.analysis_agent.analyze(context, load_files=self.repair_context.expand_analysis)
                 history.append({"event": "analysis", "layer": layer, "iteration": used + 1,
                                 "decision": copy.deepcopy(analysis.output), "errors": list(analysis.errors)})
                 if not analysis.ok or analysis.output is None:

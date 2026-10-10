@@ -15,7 +15,10 @@ ANALYSIS_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["verdict", "reason", "suspected_files"],
     "properties": {
-        "verdict": {"type": "string", "enum": ["IMPLEMENTATION", "TEST", "MIXED", "PRECONDITION", "DESIGN", "UNKNOWN"]},
+        "request_files": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+            "required": ["file", "reason"], "properties": {
+                "file": {"type": "string"}, "reason": {"type": "string", "minLength": 1}}}},
+        "verdict": {"type": "string", "enum": ["IMPLEMENTATION", "TEST", "MIXED", "PRECONDITION", "DESIGN", "UNKNOWN", "NEEDS_CONTEXT"]},
         "reason": {"type": "string"},
         "suspected_files": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
@@ -30,6 +33,14 @@ Use requirement, test_files, test_result, source_files and the chronological his
 There is no editable scope at this stage. Requirements determine expected behavior;
 source signatures and routes determine public contracts, not expected test results.
 Trace the failure across frontend, API, business logic and persistence as needed.
+Shared type definitions, React ancestor components, API clients, server/app wiring and runtime
+helpers are legitimate repair targets when evidence shows they block the requirement.
+Use source_targets for positional parameters, typed context and component ownership.
+file_catalog lists discoverable files, including unloaded files. If evidence needs another file,
+return verdict NEEDS_CONTEXT, suspected_files:[], and request_files:[{file,reason}].
+The compiler loads them and asks again. Request before quoting or diagnosing an unloaded file.
+Final diagnoses omit request_files (or use []) and quote only loaded current source.
+Preserve all unrelated requirements sharing the selected component or module.
 Compare prior analyses, applied/rejected patches and subsequent results: do not repeat
 a disproven diagnosis or treat a rejected patch as installed code.
 Return a verdict, reason and suspected_files identifying the minimal files that
@@ -99,18 +110,45 @@ class TestFailureAnalysisAgent:
             agent_name="TestFailureAnalysisAgent",
         )
 
-    def analyze(self, context: dict[str, Any]) -> AgentInvocationResult:
-        return self._agent.invoke(context, validate=lambda output: self._validate(output, context))
+    def analyze(self, context: dict[str, Any], *, load_files=None) -> AgentInvocationResult:
+        attempts = 0
+        for expansion in range(5):
+            result = self._agent.invoke(context, validate=lambda output: self._validate(output, context))
+            attempts += result.attempts
+            if not result.ok or result.output is None or result.output["verdict"] != "NEEDS_CONTEXT":
+                result.attempts = attempts
+                return result
+            if load_files is None:
+                return AgentInvocationResult(None, attempts, ["Analysis cannot load additional files in this invocation"])
+            if expansion == 4:
+                return AgentInvocationResult(None, attempts, ["Analysis context request limit exceeded (4 expansions)"])
+            try:
+                load_files(context, result.output["request_files"])
+            except (ValueError, OSError, KeyError) as exc:
+                return AgentInvocationResult(None, attempts, [str(exc)])
+        return AgentInvocationResult(None, attempts, ["Analysis context request limit exceeded (4 expansions)"])
 
     @staticmethod
     def _validate(output: dict[str, Any], context: dict[str, Any]) -> list[str]:
-        if not isinstance(output, dict) or set(output) != {"verdict", "reason", "suspected_files"}:
+        if not isinstance(output, dict) or not {"verdict", "reason", "suspected_files"} <= set(output) or set(output) - {"verdict", "reason", "suspected_files", "request_files"}:
             return ["Return verdict, reason and suspected_files."]
         verdict = output["verdict"]
         if not isinstance(verdict, str) or verdict not in ANALYSIS_SCHEMA["properties"]["verdict"]["enum"]:
             return ["Unknown analysis verdict."]
         if not isinstance(output["reason"], str) or not output["reason"].strip():
             return ["Give a reason supported by the supplied evidence."]
+        if verdict == "NEEDS_CONTEXT":
+            requests = output.get("request_files", [])
+            catalog = {row["file"] for row in context["file_catalog"]}
+            loaded = context["source_files"].keys() | context["test_files"].keys()
+            if output["suspected_files"] != [] or not isinstance(requests, list) or not requests or any(not isinstance(row, dict)
+                or set(row) != {"file", "reason"} or not isinstance(row["file"], str)
+                or row["file"] not in catalog or row["file"] in loaded
+                or not isinstance(row["reason"], str) or not row["reason"].strip() for row in requests):
+                return ["Request unloaded catalog files with reasons and an empty suspected_files list"]
+            return []
+        if output.get("request_files"):
+            return ["Use NEEDS_CONTEXT for file requests; diagnose after reading the files"]
         defects = output["suspected_files"]
         if not isinstance(defects, list):
             return ["suspected_files must be an array."]

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import posixpath
-import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -34,8 +32,30 @@ IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+IMPLEMENTATION_SCOPE_SCHEMA = {
+    **IMPLEMENTATION_OUTPUT_SCHEMA,
+    "properties": {
+        "edits": {**IMPLEMENTATION_OUTPUT_SCHEMA["properties"]["edits"], "minItems": 0},
+        "request_files": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["file", "reason"],
+            "properties": {"file": {"type": "string"}, "reason": {"type": "string", "minLength": 1}}}},
+    },
+}
+
+
 IMPLEMENTATION_INSTRUCTIONS = """Implement the supplied requirement in the editable source files.
 Dependencies are read-only unless explicitly included in editable_files for this task.
+File ownership and per-call write permission are different: shared types, callees, ancestor
+components and integration files may be editable when needed to implement this requirement.
+Use source_targets for actual positional parameters, return types, context types and component props.
+Editable integration files may be changed to mount middleware or compose components;
+preserve the declared API paths/methods and existing public behavior.
+Preserve behavior of preserve_requirements in every shared file. Complete only the current
+requirement and the supporting composition/call chain it needs, not every co-located feature.
+If a required file is absent, return edits:[] and request_files:[{file,reason}] using file_catalog.
+The compiler loads requested files, rebuilds editable_files and asks again. This is not an edit.
+A file listed in the catalog is editable only after it appears in editable_files for this call.
+Do not combine requests and edits. Finish with nonempty edits and omit request_files (or use []).
 Preserve dependency public contracts and behavior used by other requirements.
 The requirement is the source of behavior. Read the complete related source files for
 existing signatures, imports, exports, types and dependencies.
@@ -49,8 +69,9 @@ related_files are read-only context.
 The supplied router and related source files define the HTTP method, path and input source: use query for query inputs
 and body for body inputs in both handlers and test requests. Do not infer the method
 from a function name or change generated routes to accommodate an incorrect test.
-When a page and its owned components are both editable, implement their composition
-and behavior together in this invocation. Read-only screens remain in related_files.
+When a page, its ancestors and its owned components are editable, implement the required
+composition and behavior together. Wire the current screen into the shell and entrypoint
+using the declared page routes; preserve other screens and shared behavior.
 """
 
 FRONTEND_IMPLEMENTATION_INSTRUCTIONS = IMPLEMENTATION_INSTRUCTIONS + """
@@ -74,17 +95,16 @@ is not a finished design. Before returning edits, check that all visible UI has 
 styling and that every non-utility class you use has an existing CSS definition.
 Passing behavioral tests alone does not establish visual completion.
 
-Implement every supplied editable frontend screen and component, including their layout,
-navigation, accessible controls, empty/loading/error states, and shared visual language.
-Do not leave any 'Implementation pending' skeletons, even if E2E tests do not visit them.
-Replace the compiler's default slate shell and remove data-arc-page,
-data-arc-component, data-arc-layout, and data-arc-obligation skeleton markers.
-Implement layout and behavior from the requirement, its visual_references analyses,
-and the supplied source files. Preserve typed props, component exports and existing
-shared components. Complete return bodies, event wiring, handlers and effects;
-replace TODO and Not implemented placeholders. Add local state, refs or derived
-values when required. Compose existing child components instead of duplicating
-their markup. Use existing navigation contracts rather than inventing routes.
+Implement the current requirement's semantic UI region, nested handlers, positional frontend
+functions and typed API clients. Multiple UI IDs can map to ONE component export and file;
+do not create a component for each leaf node. Use component_id and the supplied frontend_subgraph.
+Preserve unrelated controls and events sharing that component. Empty render bodies return null;
+handler/function/API bodies throw NotImplementedError. Replace only the required placeholders.
+Implement layout, navigation, accessible controls and applicable loading/error states.
+Props and state/context interfaces are contracts, not a running state-management system.
+Add local state, event payload extraction, effects and API transport where the requirement needs them.
+Wire existing child components and ancestors without duplicating their markup. The generated
+route plan defines navigation targets; do not invent routes or expect a generated UI runtime.
 Only the keys of editable_files define the writable scope.
 """
 
@@ -132,7 +152,7 @@ class ImplementationAgent:
             model,
             schema_name="arc_implementation_patch",
             instructions=IMPLEMENTATION_INSTRUCTIONS,
-            output_schema=IMPLEMENTATION_OUTPUT_SCHEMA,
+            output_schema=IMPLEMENTATION_SCOPE_SCHEMA,
             retries=retries,
             trace=trace,
             model_log=model_log,
@@ -147,45 +167,71 @@ class ImplementationAgent:
         accept_patch: Callable[[ProposedPatch], list[str]] | None = None,
     ) -> ImplementationResult:
         requirement_id = str(request.requirement_id).strip()
-        try:
-            context, hashes = self._context(request)
-        except (KeyError, ValueError, OSError, UnicodeError) as exc:
-            return ImplementationResult(requirement_id, "CONTEXT_REJECTED", errors=[str(exc)])
-        proposed_patch: ProposedPatch | None = None
+        requested_files: set[str] = set()
+        attempts = 0
+        for expansion in range(5):
+            try:
+                context, hashes = self._context(request, requested_files=requested_files)
+            except (KeyError, ValueError, OSError, UnicodeError) as exc:
+                return ImplementationResult(requirement_id, "CONTEXT_REJECTED", attempts=attempts, errors=[str(exc)])
+            proposed_patch: ProposedPatch | None = None
+            file_requests: list[dict[str, str]] = []
 
-        def validate_attempt(output: dict[str, Any]) -> list[str]:
-            nonlocal proposed_patch
-            errors = self._validate(output, hashes)
-            if errors:
-                return errors
-            patch = ProposedPatch(requirement_id=requirement_id, edits=tuple(
-                ProposedEdit(
-                    file=row["file"], expected_sha256=hashes[row["file"]],
-                    search=row["search"], replacement=row["replacement"],
-                ) for row in output["edits"]
-            ))
-            if accept_patch is not None:
-                errors = accept_patch(patch)
+            def validate_attempt(output: dict[str, Any]) -> list[str]:
+                nonlocal proposed_patch, file_requests
+                if not isinstance(output, dict):
+                    return ["Return a JSON object with edits or file requests"]
+                requests = output.get("request_files", [])
+                if not isinstance(requests, list):
+                    return ["request_files must be an array."]
+                if requests:
+                    catalog = {row["file"] for row in context["file_catalog"]}
+                    if output.get("edits") or set(output) != {"edits", "request_files"}:
+                        return ["Return edits:[] with file requests; do not combine requests and edits."]
+                    if any(not isinstance(row, dict) or set(row) != {"file", "reason"}
+                           or not isinstance(row["file"], str) or row["file"] not in catalog
+                           or not isinstance(row["reason"], str) or not row["reason"].strip() for row in requests):
+                        return ["Request only application files in file_catalog and explain why each is needed."]
+                    loaded = context["editable_files"].keys() | context["related_files"].keys()
+                    if any(row["file"] in loaded for row in requests):
+                        return ["Requested files are already loaded; return implementation edits."]
+                    if expansion == 4:
+                        return ["File context request limit exceeded (4 expansions); use loaded files."]
+                    file_requests = requests
+                    return []
+                if set(output) - {"edits", "request_files"}:
+                    return ["Return only edits or file requests."]
+                errors = self._validate({"edits": output.get("edits")}, hashes)
                 if errors:
                     return errors
-            proposed_patch = patch
-            return []
+                patch = ProposedPatch(requirement_id=requirement_id, edits=tuple(
+                    ProposedEdit(file=row["file"], expected_sha256=hashes[row["file"]],
+                                 search=row["search"], replacement=row["replacement"])
+                    for row in output["edits"]))
+                if accept_patch is not None:
+                    errors = accept_patch(patch)
+                    if errors:
+                        return errors
+                proposed_patch = patch
+                return []
 
-        invocation = self._agent.invoke(context, validate=validate_attempt)
-        if not invocation.ok or invocation.output is None:
-            return ImplementationResult(
-                requirement_id, "MODEL_REJECTED",
-                attempts=invocation.attempts, errors=invocation.errors,
-            )
-        return ImplementationResult(
-            requirement_id, "PATCH_PROPOSED",
-            patch=proposed_patch,
-            attempts=invocation.attempts,
-        )
+            invocation = self._agent.invoke(context, validate=validate_attempt)
+            attempts += invocation.attempts
+            if not invocation.ok or invocation.output is None:
+                return ImplementationResult(requirement_id, "MODEL_REJECTED", attempts=attempts, errors=invocation.errors)
+            if file_requests:
+                requested_files.update(row["file"] for row in file_requests)
+                if self._trace:
+                    self._trace(f"FILE_SCOPE_EXPANDED requirement={requirement_id} requests={file_requests!r}")
+                continue
+            return ImplementationResult(requirement_id, "PATCH_PROPOSED", patch=proposed_patch, attempts=attempts)
+        return ImplementationResult(requirement_id, "CONTEXT_REJECTED", attempts=attempts,
+                                    errors=["File context request limit exceeded (4 expansions)."])
 
-    def _context(self, request: ImplementationRequest) -> tuple[dict[str, Any], dict[str, str]]:
+    def _context(self, request: ImplementationRequest, *, requested_files: set[str] | None = None) -> tuple[dict[str, Any], dict[str, str]]:
         from compiler.code_binding import CodeTargetResolver
-        from compiler.implementation.file_context import requirement_dependencies, file_selection_log
+        from compiler.implementation.file_context import file_selection_log
+        from compiler.implementation.file_scope import RequirementFileScope
 
         resolved = CodeTargetResolver(request.code_binding_registry).resolve_requirement_targets(
             request.requirement_id
@@ -200,60 +246,12 @@ class ImplementationAgent:
             raise ValueError("Requested target is not writable by this requirement and agent.")
         if not owned:
             raise ValueError("No writable source files for this requirement.")
-        editable_paths = {row["file"] for row in owned}
-        candidates = [*resolved["owned_targets"], *resolved["dependency_targets"]]
-        dependencies = requirement_dependencies(owned, candidates, request.requirement_id, request.frontend_ir)
-        type_ids = {reference["type_id"] for row in [*owned, *dependencies]
-                    for reference in [row.get("input_type"), row.get("output_type"), row.get("props_type"),
-                                      *row.get("store_types", [])]
-                    if isinstance(reference, dict) and reference.get("type_id")}
-        dependencies.extend(row for row in resolved["type_targets"] if row["type_id"] in type_ids)
-        paths = sorted(editable_paths | {
-            str(row.get("file", "")) for row in dependencies if row.get("file")
-        })
-        related = set(paths)
-        module_files = {row["file"] for row in candidates if row.get("file")}
-        entrypoints = {
-            "API": "backend/src/app.ts",
-            "UI": "frontend/src/App.tsx",
-        }
-        for row in owned:
-            entrypoint = entrypoints.get(str(row.get("kind", "")))
-            if entrypoint and (self.output_root / entrypoint).is_file():
-                related.add(entrypoint)
-        for relative in sorted(editable_paths):
-            source = self._read_file(relative)
-            for specifier in re.findall(r'(?:from\s+|import\s+)["\']([^"\']+)["\']', source):
-                if specifier == "@arc/shared":
-                    candidate = "shared/src/index.ts"
-                elif specifier.startswith("."):
-                    candidate = posixpath.normpath(posixpath.join(posixpath.dirname(relative), specifier))
-                    if candidate.endswith(".js"):
-                        candidate = candidate[:-3] + ".ts"
-                    if not (self.output_root / candidate).is_file() and candidate.endswith(".ts"):
-                        candidate = candidate[:-3] + ".tsx"
-                    if not PurePosixPath(candidate).suffix:
-                        candidate = next(
-                            (path for path in (candidate + ".ts", candidate + ".tsx", candidate + "/index.ts", candidate + "/index.tsx")
-                             if (self.output_root / path).is_file()),
-                            candidate,
-                        )
-                else:
-                    continue
-                if candidate.startswith(("backend/src/", "frontend/src/", "shared/src/")) and (self.output_root / candidate).is_file():
-                    if candidate in module_files and candidate not in related:
-                        continue  # Imports must not bypass requirement-scoped module selection.
-                    related.add(candidate)
-        for workspace in ("backend", "frontend"):
-            if any(relative.startswith(workspace + "/") for relative in editable_paths):
-                related.add(workspace + "/package.json")
-        if any(relative.startswith("frontend/") for relative in editable_paths):
-            # Component files do not import the app's base stylesheet directly.
-            # Supply it explicitly so models can distinguish existing CSS classes
-            # from names that would otherwise render without styling.
-            for relative in ("frontend/src/index.css", "frontend/src/main.tsx", "frontend/vite.config.ts"):
-                if (self.output_root / relative).is_file():
-                    related.add(relative)
+        mode = "frontend" if self._allowed_kinds and "UI" in self._allowed_kinds else "backend"
+        file_scope = RequirementFileScope(self.output_root, request.code_binding_registry, request.frontend_ir)
+        scope = file_scope.select(request.requirement_id, mode=mode,
+                                  target_ids={row["module_id"] for row in owned}, extra_files=requested_files, test_files=request.test_files)
+        editable_paths = set(scope["editable"])
+        related = set(scope["files"])
         paths = sorted(related)
         editable_files: dict[str, str] = {}
         related_files: dict[str, str] = {}
@@ -271,7 +269,7 @@ class ImplementationAgent:
         if self._trace:
             self._trace(file_selection_log(request.requirement_id, "implementation", editable_files, "current_targets"))
             self._trace(file_selection_log(request.requirement_id, "implementation", related_files,
-                                           "direct_dependencies_types_imports_support_and_failure_evidence"))
+                                           "call_closure_types_composition_imports_support_and_failure_evidence"))
         from compiler.implementation.frontend_context import implementation_requirement
         requirement, missing_visuals = implementation_requirement(
             request.requirement, self.output_root, frontend=request.frontend_ir is not None)
@@ -280,11 +278,16 @@ class ImplementationAgent:
         context = {
             "requirement_id": request.requirement_id,
             "iteration": request.iteration,
-            "implementation_mode": "frontend" if request.frontend_ir is not None else "backend",
+            "implementation_mode": mode,
             "requirement": requirement,
             "editable_files": editable_files,
             "related_files": related_files,
+            "source_targets": scope["targets"],
+            "file_catalog": scope["file_catalog"],
+            "file_scope": scope["reasons"],
+            "preserve_requirements": scope["preserve_requirements"],
         }
+        context.update(scope["design_context"])
         if request.implementation_feedback:
             context["implementation_feedback"] = request.implementation_feedback
         context_chars = len(str(context))
@@ -352,7 +355,7 @@ class FrontendImplementationAgent(ImplementationAgent):
             model,
             schema_name="arc_frontend_implementation_patch",
             instructions=FRONTEND_IMPLEMENTATION_INSTRUCTIONS,
-            output_schema=IMPLEMENTATION_OUTPUT_SCHEMA,
+            output_schema=IMPLEMENTATION_SCOPE_SCHEMA,
             retries=retries,
             trace=trace,
             model_log=model_log,

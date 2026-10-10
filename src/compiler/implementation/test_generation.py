@@ -872,7 +872,7 @@ def _build_context_pack(
     ]
     known_types = {row["type_id"] for row in relevant_types}
     for target in associated_targets:
-        for key in ("input_type", "output_type", "props_type"):
+        for key in ("input_type", "output_type", "props_type", "context_type"):
             reference = target.get(key)
             if isinstance(reference, dict) and reference.get("file") and reference.get("type_id") not in known_types:
                 relevant_types.append(copy.deepcopy(reference))
@@ -963,8 +963,18 @@ def _build_context_pack(
         path = output_root / relative
         if relative and relative not in source_files and path.is_file():
             source_files[relative] = path.read_text(encoding="utf-8")
+    from compiler.implementation.file_scope import RequirementFileScope
+    from compiler.code_binding import CODE_BINDING_READY
+    source_registry = {"status": CODE_BINDING_READY,
+                       "code_bindings": binding_rows or [*resolved_targets.get("owned_targets", []), *resolved_targets.get("dependency_targets", [])],
+                       "requirement_targets": [{"requirement_id": requirement_id,
+                           "writable": [row["module_id"] for row in resolved_targets.get("owned_targets", [])],
+                           "read_only": [row["module_id"] for row in resolved_targets.get("dependency_targets", [])]}]}
+    scope_builder = RequirementFileScope(output_root, source_registry, frontend_ir)
+    scope = scope_builder.select(requirement_id, mode="repair")
+    for relative in scope["files"]:
+        source_files.setdefault(relative, scope_builder.read(relative))
     if "E2E" in required_layers:
-        _include_frontend_component_imports(output_root, source_files)
         helper = "tests/support/prerequisites.ts"
         if (output_root / helper).is_file():
             source_files[helper] = (output_root / helper).read_text(encoding="utf-8")
@@ -1038,23 +1048,6 @@ def _passed_e2e_flows(
     return dict(list(flows.items())[-5:])
 
 
-def _include_frontend_component_imports(output_root: Path, sources: dict[str, str]) -> None:
-    """Expose one import hop of UI, event, function and runtime/type contracts."""
-    for relative, source in list(sources.items()):
-        if not relative.startswith("frontend/src/"):
-            continue
-        for specifier in re.findall(r'''\bfrom\s+["'](\.[^"']+)["']''', source):
-            stem = posixpath.normpath(posixpath.join(posixpath.dirname(relative), specifier))
-            if not stem.startswith("frontend/src/"):
-                continue
-            stem = re.sub(r"\.(?:js|ts|tsx)$", "", stem)
-            for candidate in (stem + ".tsx", stem + ".ts"):
-                path = (output_root / candidate).resolve()
-                if output_root in path.parents and path.is_file():
-                    sources.setdefault(candidate, path.read_text(encoding="utf-8"))
-                    break
-
-
 def _requirement_source_targets(
     requirement_id: str, requirement: dict[str, Any],
     design_ir: dict[str, Any], bindings: list[dict[str, Any]],
@@ -1067,7 +1060,7 @@ def _requirement_source_targets(
     )
     module_ids = {
         row["id"] for row in design_ir.get("modules", [])
-        if row.get("owner_requirement") in requirement_ids
+        if requirement_ids.intersection(row.get("requirement_ids", []))
     }
     selected = {
         row["module_id"]: _project_test_target(row)
@@ -1152,6 +1145,8 @@ def _project_test_target(row: dict[str, Any]) -> dict[str, Any]:
             "calling_convention",
             "output_type",
             "props_type",
+            "context_type",
+            "component_id",
             "route",
             "callees",
             "store_types",
@@ -1213,7 +1208,7 @@ def _e2e_entry_routes(requirement_id: str, frontend_subgraph: dict[str, Any]) ->
 def _referenced_type_ids(targets: list[dict[str, Any]]) -> set[str]:
     result: set[str] = set()
     for target in targets:
-        for key in ("input_type", "output_type", "props_type"):
+        for key in ("input_type", "output_type", "props_type", "context_type"):
             reference = target.get(key)
             if isinstance(reference, dict) and str(reference.get("type_id", "")):
                 result.add(str(reference["type_id"]))
@@ -1652,6 +1647,8 @@ def _layer_source_cards(
                 "calling_convention",
                 "output_type",
                 "props_type",
+                "context_type",
+                "component_id",
                 "route",
                 "callees",
             )

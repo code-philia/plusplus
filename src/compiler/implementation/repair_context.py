@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import copy
-import posixpath
 import re
 from pathlib import Path
 from typing import Any
 
 from compiler.code_binding import CodeTargetResolver
-from compiler.implementation.file_context import direct_dependencies, requirement_dependencies
+from compiler.implementation.file_scope import RequirementFileScope, import_paths
 from compiler.implementation.frontend_context import implementation_requirement
 
 
@@ -17,6 +16,7 @@ class RepairContextBuilder:
         self.root = root.resolve()
         self.registry = registry
         self.frontend_ir = frontend_ir
+        self.scope = RequirementFileScope(self.root, registry, frontend_ir)
 
     def read(self, relative: str) -> str:
         path = (self.root / relative).resolve()
@@ -26,21 +26,7 @@ class RepairContextBuilder:
             return handle.read()
 
     def imports(self, relative: str, source: str) -> set[str]:
-        paths = set()
-        for specifier in re.findall(r'''(?:from\s+|import\s+)["']([^"']+)["']''', source):
-            if specifier == "@arc/shared":
-                paths.add("shared/src/index.ts")
-                continue
-            if not specifier.startswith("."):
-                continue
-            stem = posixpath.normpath(posixpath.join(posixpath.dirname(relative), specifier))
-            stem = stem[:-3] if stem.endswith(".js") else stem
-            for candidate in (stem, stem + ".ts", stem + ".tsx", stem + "/index.ts", stem + "/index.tsx"):
-                path = (self.root / candidate).resolve()
-                if self.root in path.parents and path.is_file():
-                    paths.add(candidate)
-                    break
-        return paths
+        return import_paths(self.root, relative, source)
 
     def analysis(self, requirement_id: str, requirement: dict[str, Any], *,
                  layer: str, iteration: int, test_result: dict[str, Any],
@@ -66,41 +52,50 @@ class RepairContextBuilder:
             or ((row.get("route") or {}).get("path") not in {None, "", "/"}
                 and row["route"]["path"] in evidence)
         ))
-        selected = [*seeds, *requirement_dependencies(
-            seeds, bindings, requirement_id, self.frontend_ir)]
-        if not seeds:
-            # Aggregate requirements can own no functions themselves.
-            selected.extend(resolved["dependency_targets"])
-        selected.extend(direct_dependencies(
-            [row for row in selected if row.get("kind") in {"API", "FUNC", "API_CLIENT", "UI_FUNC", "UI_EVENT"}], bindings))
-        type_ids = {ref["type_id"] for row in selected
-                    for ref in [row.get("input_type"), row.get("output_type"), row.get("props_type"),
-                                *row.get("store_types", [])]
-                    if isinstance(ref, dict) and ref.get("type_id")}
-        selected.extend(row for row in self.registry.get("type_bindings", []) if row["type_id"] in type_ids)
-        paths = {row["file"] for row in selected if row.get("file")} | imported
-        module_paths = {row["file"] for row in bindings if row.get("file")}
-        for path in list(paths):
-            # Supply imported helpers/types, without expanding shared App into
-            # every unrelated component. Explicit evidence can select those.
-            paths.update(self.imports(path, self.read(path)) - module_paths)
-        for path in ("backend/src/generated/router.ts", "backend/src/app.ts",
-                     "shared/src/index.ts", "frontend/src/index.css"):
-            if (self.root / path).is_file():
-                paths.add(path)
-        sources = {path: self.read(path) for path in sorted(paths - tests.keys())}
-        repairable = {row["file"] for row in bindings if row.get("file", "").startswith(
-            ("backend/src/", "frontend/src/")) and row.get("kind") in
-            {"DB", "FUNC", "API", "API_CLIENT", "UI", "UI_EVENT", "UI_FUNC"}}
+        evidence_paths = {row["file"] for row in seeds} | imported | changed
+        catalog = {row["file"]: row for row in self.scope.catalog("repair")}
+        evidence_paths &= catalog.keys()
+        evidence_paths.update(path for path in catalog if path in evidence or path.partition("/")[2] in evidence)
+        scope = self.scope.select(requirement_id, mode="repair", extra_files=evidence_paths,
+                                  test_files=tuple(test_result["selected_files"]))
+        sources = {path: self.read(path) for path in scope["files"] if path not in tests}
+        file_catalog = [{**row, "repairable": row["editable"], "loaded": row["file"] in sources}
+                        for row in scope["file_catalog"]]
+        file_catalog.extend({"file": path, "repairable": True, "loaded": True} for path in tests)
         requirement, _ = implementation_requirement(requirement, self.root, frontend=True)
         return {
             "requirement_id": requirement_id, "requirement": requirement,
             "test_layer": layer, "iteration": iteration,
             "test_files": tests, "test_result": test_result, "source_files": sources,
-            "file_catalog": [{"file": path, "repairable": path in repairable or path in tests}
-                             for path in sorted(sources.keys() | tests.keys())],
+            "file_catalog": file_catalog,
+            "direct_editable_files": scope["editable"],
+            "source_targets": scope["targets"], "file_scope": scope["reasons"],
+            "preserve_requirements": scope["preserve_requirements"],
             "history": copy.deepcopy(history),
+            **scope["design_context"],
         }
+
+    def expand_analysis(self, context: dict[str, Any], requests: list[dict[str, str]]) -> dict[str, Any]:
+        known = {row["file"] for row in self.scope.catalog("repair")}
+        requested = {row["file"] for row in requests}
+        if requested - known:
+            raise ValueError("Analysis requested files outside the application catalog")
+        scope = self.scope.select(context["requirement_id"], mode="repair",
+                                  extra_files=(set(context["source_files"]) | requested) & known,
+                                  test_files=tuple(context["test_files"]))
+        expanded = copy.deepcopy(context)
+        expanded["source_files"] = {path: self.read(path) for path in scope["files"] if path not in context["test_files"]}
+        expanded["file_catalog"] = [{**row, "repairable": row["editable"],
+            "loaded": row["file"] in expanded["source_files"]} for row in scope["file_catalog"]]
+        expanded["file_catalog"].extend({"file": path, "repairable": True, "loaded": True} for path in context["test_files"])
+        expanded.update(source_targets=scope["targets"], file_scope=scope["reasons"],
+                        preserve_requirements=scope["preserve_requirements"],
+                        direct_editable_files=scope["editable"])
+        expanded.update(scope["design_context"])
+        # The caller uses this same context when constructing the diagnosed patch.
+        context.clear()
+        context.update(expanded)
+        return context
 
     @staticmethod
     def direct_repair(context: dict[str, Any], owned_files: set[str]) -> dict[str, Any] | None:
@@ -127,6 +122,9 @@ class RepairContextBuilder:
                history: list[dict[str, Any]]) -> dict[str, Any]:
         suspects = {row["file"] for row in decision["suspected_files"]}
         sources = {**context["source_files"], **context["test_files"]}
+        allowed = {row["file"] for row in context["file_catalog"] if row["repairable"]}
+        if suspects - sources.keys() or suspects - allowed:
+            raise ValueError("Repair may edit only loaded, diagnosed repairable files")
         return {
             key: value for key, value in context.items()
             if key not in {"source_files", "file_catalog", "history", "test_files"}

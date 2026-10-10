@@ -88,7 +88,6 @@ class CodeBindingLowerer:
                 )
                 continue
             kind = str(module.get("kind", "")).upper()
-            owner = str(module.get("owner_requirement", "")).strip()
             input_type = _type_reference(lowered.get("input_contract_id"), type_by_id)
             output_type = _type_reference(lowered.get("output_contract_id"), type_by_id)
             context_type = _type_reference(lowered.get("context_contract_id"), type_by_id)
@@ -96,7 +95,7 @@ class CodeBindingLowerer:
             route = copy.deepcopy(backend_routes.get(module_id)) if kind == "API" else None
             binding = {
                 "module_id": module_id,
-                "owner_requirements": _strings(module.get("requirement_ids")) or ([owner] if owner else []),
+                "owner_requirements": _strings(module.get("requirement_ids")),
                 "kind": kind,
                 "file": str(lowered.get("path", "")),
                 "symbol": symbol,
@@ -260,6 +259,7 @@ def _referenced_type_ids(targets: list[dict[str, Any]]) -> list[str]:
             target.get("input_type"),
             target.get("output_type"),
             target.get("props_type"),
+            target.get("context_type"),
             *target.get("store_types", []),
         ]
         for reference in references:
@@ -331,31 +331,11 @@ def _requirement_targets(
         for value in requirement_ir.get("node_order", [])
         if str(value).strip()
     ]
-    nodes = requirement_ir.get("nodes", {})
-    nodes = nodes if isinstance(nodes, dict) else {}
     by_id = {str(row["module_id"]): row for row in bindings}
     graph: dict[str, set[str]] = {
         module_id: {value for value in _strings(row.get("callees")) if value in by_id}
         for module_id, row in by_id.items()
     }
-    api_client_by_api = {
-        str(row.get("source_ir_id")): str(row["module_id"])
-        for row in bindings
-        if row.get("kind") == "API_CLIENT"
-    }
-    consumer_api_ids: dict[str, set[str]] = {}
-    for dependency in frontend_ir.get("api_dependencies", []):
-        if not isinstance(dependency, dict):
-            continue
-        consumer = str(dependency.get("consumer_id", ""))
-        api_id = str(dependency.get("api_id", ""))
-        if consumer and api_id:
-            consumer_api_ids.setdefault(consumer, set()).update(
-                value for value in (api_id, api_client_by_api.get(api_id)) if value
-            )
-    for consumer, api_ids in consumer_api_ids.items():
-        graph.setdefault(consumer, set()).update(value for value in api_ids if value in by_id)
-
     semantic_owners_by_requirement = {
         requirement_id: {
             str(row["module_id"])
@@ -364,48 +344,32 @@ def _requirement_targets(
         }
         for requirement_id in requirement_ids
     }
-    write_owner_by_module = _module_write_owners(
-        requirement_ids=requirement_ids,
-        nodes=nodes,
-        bindings=bindings,
-        dependency_graph=dependency_graph,
-    )
-    owned_by_requirement = {
-        requirement_id: {
-            module_id
-            for module_id, owner_id in write_owner_by_module.items()
-            if owner_id == requirement_id
-        }
-        for requirement_id in requirement_ids
-    }
-    for binding in bindings:
-        if binding.get("kind") not in {"UI", "UI_EVENT", "UI_FUNC"}:
-            continue
-        module_id = str(binding.get("module_id", ""))
-        atomic_owners = {
-            owner for owner in _strings(binding.get("owner_requirements"))
-            if isinstance(nodes.get(owner), dict)
-            and str(nodes[owner].get("type", "")).upper() == "ATOMIC"
-        }
-        if atomic_owners:
-            if binding.get("kind") in {"UI", "UI_EVENT", "UI_FUNC"}:
-                for owner in _strings(binding.get("owner_requirements")):
-                    if owner in owned_by_requirement:
-                        owned_by_requirement[owner].add(module_id)
-            else:
-                for requirement_id in requirement_ids:
-                    owned_by_requirement[requirement_id].discard(module_id)
-                for owner in atomic_owners:
-                    owned_by_requirement[owner].add(module_id)
-        else:
-            # Shared frontend records are intentionally editable from
-            # every requirement that semantically references the component or
-            # one of its UI/behavior descendants.  Backend modules retain the
-            # single-writer policy below; this branch only expands the
-            # frontend composition scope.
-            for owner in _strings(binding.get("owner_requirements")):
-                if owner in owned_by_requirement:
-                    owned_by_requirement[owner].add(module_id)
+    # Semantic module membership is a starting point, not a single-writer
+    # restriction on requirements that refine a shared public module.
+    owned_by_requirement = {rid: set(ids) for rid, ids in semantic_owners_by_requirement.items()}
+    structural_by_requirement = {rid: set() for rid in requirement_ids}
+    if frontend_ir.get("ir_kind") == "frontend_design":
+        ui = {row["id"]: row for row in frontend_ir["ui"]}
+        parents = {child: row["id"] for row in ui.values() for child in row["children"]}
+        from compiler.ir.frontend import frontend_events
+        events = {row["id"]: row for row in frontend_events(frontend_ir)}
+        for rid in requirement_ids:
+            link = frontend_ir.get("requirement_links", {}).get(rid, {})
+            used = set(link.get("uses", [])) | set(link.get("implements", []))
+            used &= by_id.keys()
+            used = {key for key in used if by_id[key]["kind"] in {"UI", "UI_EVENT", "UI_FUNC", "API_CLIENT"}}
+            controls = {key for key in owned_by_requirement[rid] | used if key in ui}
+            controls.update(events[key]["ui_id"] for key in owned_by_requirement[rid] | used if key in events)
+            structural = set(used)
+            for key in controls:
+                seen = set()
+                while key in parents and key not in seen:
+                    seen.add(key)
+                    key = parents[key]
+                    if key in by_id:
+                        structural.add(key)
+            structural_by_requirement[rid] = structural - owned_by_requirement[rid]
+            owned_by_requirement[rid].update(structural)
     requirement_dependencies = dependency_graph.get("requirement_dependencies", {})
     atomic_dependencies = dependency_graph.get("atomic_dependencies", {})
 
@@ -433,9 +397,8 @@ def _requirement_targets(
     rows: list[dict[str, Any]] = []
     for requirement_id in requirement_ids:
         owned = owned_by_requirement.get(requirement_id, set())
-        # A module may be semantically relevant to several requirements, but
-        # only its selected write owner may edit it. Other semantic owners see
-        # the same module as a read-only dependency.
+        # Preserve prerequisite modules as context; invocation-level file scopes
+        # decide whether implementation or diagnosed repair needs their files.
         reachable: set[str] = set(
             semantic_owners_by_requirement.get(requirement_id, set()) - owned
         )
@@ -456,89 +419,11 @@ def _requirement_targets(
             {
                 "requirement_id": requirement_id,
                 "writable": sorted(owned),
+                "structural_writable": sorted(structural_by_requirement[requirement_id]),
                 "read_only": sorted(reachable),
             }
         )
     return rows
-
-
-def _module_write_owners(
-    *,
-    requirement_ids: list[str],
-    nodes: dict[str, Any],
-    bindings: list[dict[str, Any]],
-    dependency_graph: dict[str, Any],
-) -> dict[str, str]:
-    """Choose one deterministic writer for every semantically shared module."""
-
-    order_index = {
-        requirement_id: index for index, requirement_id in enumerate(requirement_ids)
-    }
-    atomic_order = [
-        str(requirement_id)
-        for wave in dependency_graph.get("atomic_implementation_waves", [])
-        if isinstance(wave, list)
-        for requirement_id in wave
-        if str(requirement_id)
-    ]
-    atomic_rank = {
-        requirement_id: index for index, requirement_id in enumerate(atomic_order)
-    }
-
-    def depth(requirement_id: str) -> int:
-        result = 0
-        current = requirement_id
-        visited: set[str] = set()
-        while current and current not in visited:
-            visited.add(current)
-            node = nodes.get(current, {})
-            if not isinstance(node, dict):
-                break
-            parent = str(node.get("parent_id", "")).strip()
-            if not parent:
-                break
-            result += 1
-            current = parent
-        return result
-
-    result: dict[str, str] = {}
-    valid_requirements = set(requirement_ids)
-    for binding in bindings:
-        module_id = str(binding.get("module_id", "")).strip()
-        owners = sorted(
-            {
-                value
-                for value in _strings(binding.get("owner_requirements"))
-                if value in valid_requirements
-            }
-        )
-        if not module_id or not owners:
-            continue
-        atomic_owners = [
-            value
-            for value in owners
-            if isinstance(nodes.get(value), dict)
-            and str(nodes[value].get("type", "")).upper() == "ATOMIC"
-        ]
-        if atomic_owners:
-            result[module_id] = min(
-                atomic_owners,
-                key=lambda value: (
-                    atomic_rank.get(value, len(atomic_rank) + order_index.get(value, 0)),
-                    order_index.get(value, len(order_index)),
-                    value,
-                ),
-            )
-            continue
-        result[module_id] = min(
-            owners,
-            key=lambda value: (
-                -depth(value),
-                order_index.get(value, len(order_index)),
-                value,
-            ),
-        )
-    return result
 
 
 def _validate_requirement_permissions(
@@ -546,7 +431,7 @@ def _validate_requirement_permissions(
     binding_by_id: dict[str, dict[str, Any]],
     errors: list[str],
 ) -> None:
-    """Allow shared frontend surfaces, but keep backend modules single-writer."""
+    """Check semantic and explicitly derived composition starting permissions."""
 
     writable_owners: dict[str, list[str]] = {}
     permissions_by_requirement: dict[str, tuple[set[str], set[str]]] = {}
@@ -587,12 +472,14 @@ def _validate_requirement_permissions(
                     "ARC4306 CODE_BINDING_OWNERSHIP_INVALID: "
                     f"{module_id} has no writable requirement."
                 )
-        elif semantic_owners and len(owners) != 1:
+        elif semantic_owners and not owners:
             errors.append(
                 "ARC4306 CODE_BINDING_OWNERSHIP_INVALID: "
-                f"{module_id} must have exactly one writable requirement; found {owners}."
+                f"{module_id} has no writable requirement."
             )
-        invalid_owners = sorted(set(owners) - semantic_owners)
+        structural_owners = {str(row["requirement_id"]) for row in requirement_targets
+                             if module_id in row.get("structural_writable", [])}
+        invalid_owners = sorted(set(owners) - semantic_owners - structural_owners)
         if invalid_owners:
             errors.append(
                 "ARC4306 CODE_BINDING_OWNERSHIP_INVALID: "
