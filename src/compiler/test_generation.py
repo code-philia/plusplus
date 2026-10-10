@@ -611,7 +611,8 @@ class RequirementTestGenerationPass:
         required_layers = _plan_test_layers(resolved_targets, design_ir)
         if requirement_id in requirement_ir.get("folder_nodes", []):
             related_screens = [
-                screen for screen in frontend_ir.get("components" if "root_component_id" in frontend_ir else "screens", [])
+                screen for screen in frontend_ir.get("ui" if frontend_ir.get("ir_kind") == "frontend_design" else
+                                                      "components" if "root_component_id" in frontend_ir else "screens", [])
                 if isinstance(screen, dict)
                 and requirement_id in screen.get("requirement_ids", [])
             ]
@@ -1095,13 +1096,13 @@ def _passed_e2e_flows(
 
 
 def _include_frontend_component_imports(output_root: Path, sources: dict[str, str]) -> None:
-    """Expose one import hop so a composition root does not hide prerequisite UI."""
+    """Expose one import hop of UI, event, function and runtime/type contracts."""
     for relative, source in list(sources.items()):
-        if not relative.startswith("frontend/src/components/"):
+        if not relative.startswith("frontend/src/"):
             continue
         for specifier in re.findall(r'''\bfrom\s+["'](\.[^"']+)["']''', source):
             stem = posixpath.normpath(posixpath.join(posixpath.dirname(relative), specifier))
-            if not stem.startswith("frontend/src/components/"):
+            if not stem.startswith("frontend/src/"):
                 continue
             stem = re.sub(r"\.(?:js|ts|tsx)$", "", stem)
             for candidate in (stem + ".tsx", stem + ".ts"):
@@ -1174,7 +1175,7 @@ def _build_model_layers(
                 if (row.get("kind") == "FUNC" and row.get("module_id") in pure_function_ids
                     if layer == "UNIT" else row.get("kind") == "API"
                     if layer == "INTEGRATION" else row.get("kind") in
-                    {"COMPONENT", "PAGE", "LAYOUT", "STORE", "API_CLIENT", "API"})
+                    {"COMPONENT", "PAGE", "LAYOUT", "STORE", "API_CLIENT", "API", "UI", "UI_EVENT", "UI_FUNC"})
             ],
         }
     return layers, source_files
@@ -1187,7 +1188,7 @@ def _target_relevant_to_layers(
     allowed = {
         "UNIT": {"FUNC", "DB"},
         "INTEGRATION": {"API", "FUNC", "DB"},
-        "E2E": {"PAGE", "COMPONENT", "LAYOUT", "STORE", "API", "API_CLIENT"},
+        "E2E": {"PAGE", "COMPONENT", "LAYOUT", "STORE", "API", "API_CLIENT", "UI", "UI_EVENT", "UI_FUNC"},
     }
     return any(kind in allowed[layer] for layer in required_layers)
 
@@ -1247,6 +1248,9 @@ def _project_one_hop_dependencies(
         dependency_ids.update(api_ids)
         dependency_ids.update(row["target"] for row in frontend_subgraph.get("effects", [])
                               if row.get("kind") == "REQUEST" and row.get("target"))
+        api_ids.update(call["target_id"] for row in frontend_subgraph.get("functions", [])
+                       for call in row.get("calls", []) if call.get("kind") == "API")
+        dependency_ids.update(api_ids)
         dependency_ids.update(f"API_CLIENT::{api_id}" for api_id in api_ids)
 
     return sorted(
@@ -1268,6 +1272,10 @@ def _project_frontend_subgraph(
     required_layers: list[str],
 ) -> dict[str, Any]:
     if "root_component_id" in frontend_ir:
+        from .frontend_context import frontend_subgraph
+        return frontend_subgraph(frontend_ir, requirement_id,
+                                 {str(row.get("module_id", "")) for row in owned_targets})
+    if frontend_ir.get("ir_kind") == "frontend_design":
         from .frontend_context import frontend_subgraph
         return frontend_subgraph(frontend_ir, requirement_id,
                                  {str(row.get("module_id", "")) for row in owned_targets})
@@ -1360,7 +1368,7 @@ def _e2e_entry_routes(
     requirement_id: str,
     frontend_subgraph: dict[str, list[dict[str, Any]]],
 ) -> list[str]:
-    if "root_component_id" in frontend_subgraph:
+    if "root_component_id" in frontend_subgraph or frontend_subgraph.get("ir_kind") == "frontend_design":
         return list(frontend_subgraph.get("entry_routes", []))
     screens = {
         str(row.get("id", "")): row
@@ -1439,7 +1447,7 @@ def _plan_test_layers(
         if isinstance(row, dict)
     ]
     layers: set[str] = set()
-    if any(row.get("kind") in {"PAGE", "COMPONENT", "LAYOUT"} for row in owned):
+    if any(row.get("kind") in {"PAGE", "COMPONENT", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"} for row in owned):
         layers.add("E2E")
     if any(row.get("kind") == "API" for row in owned):
         layers.add("INTEGRATION")

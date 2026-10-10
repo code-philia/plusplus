@@ -23,7 +23,7 @@ from .design_stage import DesignPass, design_traceability
 from .backend_design.projection import project_lowering_design
 from .file_planning import GlobalFilePlanner
 from .frontend_generation import FrontendIRGenerationPass, frontend_ir_traceability
-from .frontend_react_lowering import FrontendReactLowerer
+from .frontend_lowering import FrontendReactLowerer
 from .git_history import GitStageError, ProjectGitHistory
 from .preprocessing_stage import RequirementPreprocessor, PreprocessingResult
 from .model_client import Model, ModelConfigurationError, StructuredModel
@@ -848,7 +848,8 @@ class Compiler:
                 has_screen = any(
                     isinstance(screen, dict)
                     and requirement_id in screen.get("requirement_ids", [])
-                    for screen in frontend_ir.get("components" if "root_component_id" in frontend_ir else "screens", [])
+                    for screen in frontend_ir.get("ui" if frontend_ir.get("ir_kind") == "frontend_design" else
+                                                  "components" if "root_component_id" in frontend_ir else "screens", [])
                 )
                 if not targets["owned_targets"] and not has_screen:
                     states[requirement_id] = "AGGREGATE_NO_UI"

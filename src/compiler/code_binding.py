@@ -150,6 +150,38 @@ class CodeBindingLowerer:
         if "root_component_id" in frontend_ir:
             ui_tables = {}
         frontend_items: dict[str, dict[str, Any]] = {}
+        if frontend_ir.get("ir_kind") == "frontend_design":
+            ui_tables = {}
+            locations = {row["entity_id"]: row for row in (frontend_lowering_report or {}).get("bindings", [])}
+            for table, kind in (("ui", "UI"), ("events", "UI_EVENT"), ("functions", "UI_FUNC")):
+                for item in frontend_ir.get(table, []):
+                    identity = item["id"]
+                    frontend_items[identity] = item
+                    location = locations.get(identity)
+                    if location is None:
+                        errors.append(f"ARC4302 CODE_BINDING_COVERAGE_INVALID: no lowered source for {identity}.")
+                        continue
+                    bindings.append({"module_id": identity, "owner_requirements": _strings(item.get("requirement_ids")),
+                        "kind": kind, "file": location["file"], "symbol": location["symbol"],
+                        "input_type": copy.deepcopy(location.get("input_type")),
+                        "output_type": copy.deepcopy(location.get("output_type")), "props_type": None,
+                        "route": {"path": item["route"]} if "route" in item else None,
+                        "callees": _strings(location.get("callees"))})
+                    type_bindings.extend(_frontend_declared_types([
+                        location[key] for key in ("input_type", "output_type") if isinstance(location.get(key), dict)]))
+            for location in locations.values():
+                if location.get("kind") != "API_CLIENT":
+                    continue
+                identity = location["entity_id"]
+                api_id = identity.removeprefix("API_CLIENT::")
+                bindings.append({"module_id": identity, "source_ir_id": api_id,
+                    "owner_requirements": _strings(location.get("requirement_ids")), "kind": "API_CLIENT",
+                    "file": location["file"], "symbol": location["symbol"],
+                    "input_type": copy.deepcopy(location.get("input_type")),
+                    "output_type": copy.deepcopy(location.get("output_type")), "props_type": None,
+                    "route": _compact_backend_route(backend_routes.get(api_id)), "callees": [api_id]})
+                type_bindings.extend(_frontend_declared_types([
+                    location[key] for key in ("input_type", "output_type") if isinstance(location.get(key), dict)]))
         if "root_component_id" in frontend_ir:
             locations = {row["entity_id"]: row for row in (frontend_lowering_report or {}).get("bindings", [])}
             from .frontend_context import component_requirement_owners
@@ -564,7 +596,7 @@ def _requirement_targets(
         for requirement_id in requirement_ids
     }
     for binding in bindings:
-        if binding.get("kind") not in {"PAGE", "COMPONENT", "STORE", "LAYOUT"}:
+        if binding.get("kind") not in {"PAGE", "COMPONENT", "STORE", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"}:
             continue
         module_id = str(binding.get("module_id", ""))
         atomic_owners = {
@@ -573,7 +605,7 @@ def _requirement_targets(
             and str(nodes[owner].get("type", "")).upper() == "ATOMIC"
         }
         if atomic_owners:
-            if binding.get("kind") in {"PAGE", "COMPONENT", "STORE", "LAYOUT"}:
+            if binding.get("kind") in {"PAGE", "COMPONENT", "STORE", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"}:
                 for owner in _strings(binding.get("owner_requirements")):
                     if owner in owned_by_requirement:
                         owned_by_requirement[owner].add(module_id)
@@ -766,7 +798,7 @@ def _validate_requirement_permissions(
             if value in known_requirements
         }
         owners = sorted(set(writable_owners.get(module_id, [])))
-        if binding.get("kind") in {"PAGE", "COMPONENT", "STORE", "LAYOUT"}:
+        if binding.get("kind") in {"PAGE", "COMPONENT", "STORE", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"}:
             if semantic_owners and not owners:
                 errors.append(
                     "ARC4306 CODE_BINDING_OWNERSHIP_INVALID: "

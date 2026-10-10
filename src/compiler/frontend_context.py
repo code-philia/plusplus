@@ -76,6 +76,44 @@ def component_requirement_owners(ir: dict[str, Any]) -> dict[str, set[str]]:
 
 
 def frontend_subgraph(ir: dict[str, Any], requirement_id: str, target_ids: set[str]) -> dict[str, Any]:
+    if ir.get("ir_kind") == "frontend_design":
+        from .frontend_design.context import value_references, required_types
+        tables = ("ui", "data", "events", "functions")
+        rows = {row["id"]: row for table in tables for row in ir.get(table, [])}
+        ui = {row["id"]: row for row in ir["ui"]}
+        parents = {child: row["id"] for row in ui.values() for child in row["children"]}
+        selected = (target_ids & rows.keys()) | {key for key, row in rows.items()
+                                                if requirement_id in row.get("requirement_ids", [])}
+        for key in list(selected):
+            selected.update(ui.get(key, {}).get("children", []))
+            seen = set()
+            while key in parents and key not in seen:
+                seen.add(key)
+                key = parents[key]
+                selected.add(key)
+        selected.update(row["id"] for row in ir["data"] if row["scope_ui_id"] in selected)
+        pending = list(selected)
+        visited = set()
+        while pending:
+            key = pending.pop()
+            if key in visited or key not in rows:
+                continue
+            visited.add(key)
+            row = rows[key]
+            refs = value_references(row, "data") | value_references(row, "item")
+            refs.update(row.get("reads", []))
+            refs.update(row.get("writes", []))
+            refs.update(call["target_id"] for call in [*row.get("calls", []), *row.get("handlers", [])]
+                        if call["kind"] == "FUNC")
+            refs.update(event["id"] for event in ir["events"] if event["ui_id"] == key)
+            new = refs - selected
+            selected.update(new)
+            pending.extend(new)
+        result = {table: [copy.deepcopy(row) for row in ir[table] if row["id"] in selected] for table in tables}
+        result.update(ir_kind="frontend_design", root_ui_id=ir["root_ui_id"], backend_ref=ir["backend_ref"],
+                      entry_routes=sorted({row["route"] for row in result["ui"] if "route" in row}))
+        result["types"] = required_types(result, ir["types"])
+        return result
     tables = ("components", "ui", "properties", "events", "handlers", "effects")
     ownership = component_requirement_owners(ir)
     selected = (set(target_ids) & ownership.keys()) or {
@@ -141,7 +179,9 @@ def visual_context(project_root: Path, requirement_id: str) -> list[dict[str, An
     linked_ids: set[str] = set()
     linked_paths: set[str] = set()
     frontend: dict[str, Any] = {}
-    frontend_path = root / "frontend.json"
+    frontend_path = root / "frontend_ir.json"
+    if not frontend_path.is_file():
+        frontend_path = root / "frontend.json"
     if frontend_path.is_file():
         try:
             loaded = json.loads(frontend_path.read_text(encoding="utf-8"))

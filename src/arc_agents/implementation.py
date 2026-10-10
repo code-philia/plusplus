@@ -348,7 +348,7 @@ class FrontendImplementationAgent(ImplementationAgent):
             max_context_characters=max_context_characters, trace=trace,
             model_log=model_log,
         )
-        self._allowed_kinds = {"COMPONENT", "PAGE", "LAYOUT", "STORE", "API_CLIENT"}
+        self._allowed_kinds = {"COMPONENT", "PAGE", "LAYOUT", "STORE", "API_CLIENT", "UI", "UI_EVENT", "UI_FUNC"}
         self._agent = BaseStructuredAgent(
             model,
             schema_name="arc_frontend_implementation_patch",

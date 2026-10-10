@@ -3,7 +3,7 @@
 Flat UI records form a tree through ordered children IDs. Components, framework
 lifecycle hooks, DOM elements, HTTP endpoints and source files belong to lowering.
 These TypedDicts describe JSON contracts, not runtime validation.
-See frontend.md for reference and execution semantics.
+See compiler/frontend_lowering/README.md for React lowering semantics.
 """
 
 from __future__ import annotations

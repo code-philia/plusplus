@@ -91,7 +91,7 @@ class RepairContextBuilder:
         sources = {path: self.read(path) for path in sorted(paths - tests.keys())}
         repairable = {row["file"] for row in bindings if row.get("file", "").startswith(
             ("backend/src/", "frontend/src/")) and row.get("kind") in
-            {"DB", "FUNC", "API", "API_CLIENT", "STORE", "COMPONENT", "PAGE", "LAYOUT"}}
+            {"DB", "FUNC", "API", "API_CLIENT", "STORE", "COMPONENT", "PAGE", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"}}
         requirement, _ = implementation_requirement(requirement, self.root, frontend=True)
         return {
             "requirement_id": requirement_id, "requirement": requirement,

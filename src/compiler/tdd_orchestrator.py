@@ -57,7 +57,7 @@ class NodeTDDOrchestrator:
     """Implement and verify a node, allowing diagnosed test corrections."""
 
     _BACKEND_KINDS = {"DB", "FUNC", "API"}
-    _FRONTEND_KINDS = {"API_CLIENT", "STORE", "COMPONENT", "PAGE", "LAYOUT"}
+    _FRONTEND_KINDS = {"API_CLIENT", "STORE", "COMPONENT", "PAGE", "LAYOUT", "UI", "UI_EVENT", "UI_FUNC"}
 
     def __init__(
         self,
@@ -548,7 +548,7 @@ class NodeTDDOrchestrator:
         resolved = CodeTargetResolver(self.code_binding_registry).resolve_requirement_targets(requirement_id)
         priority = {
             "DB": 0, "FUNC": 1, "API": 2, "API_CLIENT": 3, "STORE": 4,
-            "COMPONENT": 5, "PAGE": 6, "LAYOUT": 7,
+            "COMPONENT": 5, "PAGE": 6, "LAYOUT": 7, "UI_FUNC": 4, "UI_EVENT": 5, "UI": 6,
         }
         return sorted(
             resolved["owned_targets"],
