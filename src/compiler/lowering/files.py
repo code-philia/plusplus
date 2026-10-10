@@ -22,7 +22,6 @@ SYSTEM_FILES = (
     ("backend/src/db/initialize.ts", "DATABASE_INITIALIZATION", "SKELETON_COMPILER"),
     ("backend/src/db/init.ts", "DATABASE_INIT_ENTRY", "SKELETON_COMPILER"),
     ("backend/src/db/client.ts", "DATABASE_CLIENT", "SKELETON_COMPILER"),
-    ("backend/src/db/domain-rules.ts", "DATABASE_DOMAIN_RULES", "SKELETON_COMPILER"),
     ("backend/src/generated/router.ts", "ROUTER", "SKELETON_COMPILER"),
     ("backend/src/generated/module-registry.ts", "MODULE_REGISTRY", "SKELETON_COMPILER"),
     ("backend/src/generated/dependency-registry.ts", "DEPENDENCY_REGISTRY", "SKELETON_COMPILER"),

@@ -409,7 +409,6 @@ def _render_glue(
         _import("dirname", "node:path"),
         _import("resolve", "node:path"),
         _import("fileURLToPath", "node:url"),
-        _import("schema", "./schema.js", style="namespace", source="backend/src/db/schema.ts"),
     ]
     imports[database_path] = database_imports
     exports[database_path] = ["database", "sqliteDatabase", "createDatabaseClient", "bindDatabaseClient"]

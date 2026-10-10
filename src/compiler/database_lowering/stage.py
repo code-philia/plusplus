@@ -10,10 +10,6 @@ from typing import Any
 from utils.jsonio import write_json_atomic
 
 from compiler.runtime.artifacts import CompilerArtifactStore
-from ..database_design import validate_schema_ir
-from ..lowering.files import GlobalFilePlanner
-from ..lowering.types import TypeLowerer
-from ..lowering.symbols import GlobalSymbolPlanner
 from .strategy import get_strategy
 
 
@@ -31,7 +27,7 @@ class DatabaseLoweringResult:
 
 
 class DatabaseLowerer:
-    """Compile database-neutral tables; use registries solely for backend bindings."""
+    """Generate connection helpers and table initialization only."""
 
     def lower(self, schema: dict[str, Any], project_manifest: dict[str, Any], output_root: Path, *, dialect: str = "sqlite") -> DatabaseLoweringResult:
         result = DatabaseLoweringResult()
@@ -40,44 +36,16 @@ class DatabaseLowerer:
                 raise ValueError('Project initialization must complete before database lowering')
             if schema.get('ir_kind') != 'database_schema':
                 raise ValueError('Expected database-neutral Schema IR; dialect-specific schemas are unsupported')
-            if schema.get('status') != 'RESOLVED':
-                raise ValueError('Database lowering requires a RESOLVED Schema IR')
-            validation_errors = validate_schema_ir(schema)
-            if validation_errors:
-                result.errors.extend(validation_errors)
-                return result
             strategy = get_strategy(dialect)
             if strategy.dialect == 'sqlite' and project_manifest.get('profile') != 'web-react18-tailwind4-express-drizzle-sqlite':
                 raise ValueError('SQLite lowering requires the initialized SQLite/Drizzle project profile')
-            # Binding names/paths use the same frozen allocation policy as later
-            # backend planning. SQL does not depend on the compatibility views.
-            projected = {'entities': [
-                {'key': table['name'], 'fields': [
-                    {'name': column['name'], 'type': column['type'], 'nullable': column['nullable']}
-                    for column in table['columns']
-                ]}
-                for table in schema['tables']
-            ]}
-            design = {'requirements': [], 'modules': []}
-            symbols = GlobalSymbolPlanner().plan(design, projected, project_manifest)
-            if not symbols.ok:
-                result.errors.extend(symbols.errors)
-                return result
-            files = GlobalFilePlanner(output_root).plan(design, symbols.registry, project_manifest)
-            if not files.ok:
-                result.errors.extend(files.errors)
-                return result
-            types = TypeLowerer().lower(symbols.registry, files.registry)
-            if not types.ok:
-                result.errors.extend(types.errors)
-                return result
-            lowered = strategy.lower(schema, symbols.registry, files.registry)
-            sources = {**types.sources, **lowered.sources}
+            lowered = strategy.lower(schema, {}, {})
+            sources = lowered.sources
             result.warnings.extend(lowered.warnings)
             result.sources = sources
             result.manifest = {
-                'schema_version': 5, 'status': 'DATABASE_SCHEMA_LOWERED',
-                'dialect': strategy.dialect, 'orm': 'drizzle',
+                'schema_version': 6, 'status': 'DATABASE_SCHEMA_LOWERED',
+                'dialect': strategy.dialect,
                 'schema_sha256': hashlib.sha256(json.dumps(schema, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
                 'tables': lowered.tables,
                 'initialization': {'mode': 'create_if_not_exists', 'statements': lowered.statements,

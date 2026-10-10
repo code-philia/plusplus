@@ -13,12 +13,13 @@ from utils.jsonio import write_json_atomic
 from compiler.runtime.artifacts import CompilerArtifactStore
 from .projection import project_lowering_design
 from ..backend_design.validation import validate_backend_ir
-from ..database_design import validate_schema_ir
 from ..lowering.files import GlobalFilePlanner
 from .skeletons import ModuleSkeletonLowerer
 from ..lowering.types import TypeLowerer
 from ..lowering.symbols import GlobalSymbolPlanner
 from .glue import BackendGlueLowerer
+from .database_bindings import render_bindings
+from ..database_lowering.sqlite import storage_type
 
 PROFILE = 'web-react18-tailwind4-express-drizzle-sqlite'
 
@@ -54,16 +55,10 @@ class BackendLowerer:
                 raise ValueError('Backend lowering requires the initialized Express/Drizzle/SQLite project profile')
             if blueprint.get('ir_kind') != 'backend_design':
                 raise ValueError('Expected the current canonical Backend IR')
-            if database_manifest.get('dialect') != 'sqlite' or database_manifest.get('orm') != 'drizzle':
-                raise ValueError('Backend profile requires SQLite/Drizzle database bindings')
-            problems = validate_schema_ir(schema)
-            if schema.get('status') != 'RESOLVED' or problems:
-                raise ValueError('Invalid or unresolved Schema IR: ' + '; '.join(problems))
-            if blueprint.get('schema_hash') != content_hash(schema):
-                raise ValueError('Backend blueprint schema_hash differs from schema.json; regenerate design')
-            database_hash = hashlib.sha256(json.dumps(schema, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-            if database_manifest.get('status') != 'DATABASE_SCHEMA_LOWERED' or database_manifest.get('schema_sha256') != database_hash:
-                raise ValueError('Database lowering must finish for the same schema before backend lowering')
+            if database_manifest.get('dialect') != 'sqlite':
+                raise ValueError('Backend profile requires SQLite database initialization')
+            if database_manifest.get('status') != 'DATABASE_SCHEMA_LOWERED':
+                raise ValueError('Database lowering must finish before backend lowering')
             scenarios = {key for row in blueprint['requirements'] for criterion in row['acceptance_criteria'] for key in criterion['scenario_ids']}
             problems = validate_backend_ir(blueprint, schema, scenarios)
             if problems:
@@ -89,8 +84,11 @@ class BackendLowerer:
             if len(paths) != len({path.casefold() for path in paths}):
                 raise ValueError('File plan contains paths that collide on case-insensitive filesystems')
             types = checked(TypeLowerer().lower(symbols.registry, files.registry))
-            manifests = {'type': types.manifest, 'database': database_manifest}
-            sources = dict(types.sources)
+            bindings_sources, tables = render_bindings(schema, symbols.registry, files.registry,
+                                                       storage_type=storage_type)
+            backend_database_manifest = {**database_manifest, 'orm': 'drizzle', 'tables': tables}
+            manifests = {'type': types.manifest, 'database': backend_database_manifest}
+            sources = {**types.sources, **bindings_sources}
             for kind in ('DB', 'FUNC', 'API'):
                 lowered = checked(ModuleSkeletonLowerer().lower(kind, design, symbols.registry, files.registry))
                 manifests[kind] = lowered.manifest
@@ -108,7 +106,7 @@ class BackendLowerer:
             absent = planned - set(sources) - database_files
             if absent:
                 raise ValueError(f'Planned files with no producer: {sorted(absent)}')
-            bindings = {row['table']: row['table_symbol'] for row in database_manifest.get('tables', [])}
+            bindings = {row['table']: row['table_symbol'] for row in tables}
             for symbol in symbols.registry['symbols']:
                 if symbol['kind'] == 'ENTITY_TABLE' and bindings.get(symbol['entity']) != symbol['symbol']:
                     raise ValueError(f'Database table binding differs from existing lowering: {symbol["entity"]}')
@@ -119,7 +117,7 @@ class BackendLowerer:
             result.route_registry = glue.route_registry
             result.import_plan = glue.import_plan
             result.tables = {'symbols': symbols.registry, 'files': files.registry, 'types': types.manifest,
-                             'database': database_manifest, 'modules_db': manifests['DB'],
+                             'database': backend_database_manifest, 'modules_db': manifests['DB'],
                              'modules_func': manifests['FUNC'], 'modules_api': manifests['API'],
                              'routes': glue.route_registry, 'imports': glue.import_plan, 'manifest': result.manifest}
             result.warnings = ['Business bodies, request decoding, and identity/context middleware require implementation.']

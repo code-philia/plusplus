@@ -28,22 +28,6 @@ def literal(value: Any) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def predicate(raw: dict[str, Any]) -> str:
-    column = identifier(raw['column'])
-    op, value = raw['operator'], raw['value']
-    if op in {'length_gte', 'length_lte'}:
-        if type(value) is not int or value < 0:
-            raise ValueError('Length predicates require a nonnegative integer')
-        return f'length({column}) {">=" if op == "length_gte" else "<="} {literal(value)}'
-    if op in {'gte', 'lte'}:
-        if type(value) not in {int, float}:
-            raise ValueError('Numeric predicates require a number')
-        return f'{column} {">=" if op == "gte" else "<="} {literal(value)}'
-    if op == 'in' and isinstance(value, list) and value:
-        return f'{column} IN ({", ".join(literal(item) for item in value)})'
-    raise ValueError(f'Unsupported CHECK predicate: {op!r}')
-
-
 def constraint_sql(constraint: dict[str, Any]) -> str:
     columns = ', '.join(identifier(value) for value in constraint['columns'])
     prefix = f'CONSTRAINT {identifier(constraint["name"])} '
@@ -54,8 +38,6 @@ def constraint_sql(constraint: dict[str, Any]) -> str:
         if constraint.get('comparison') == 'case_insensitive':
             columns = ', '.join(identifier(value) + ' COLLATE NOCASE' for value in constraint['columns'])
         return prefix + f'UNIQUE ({columns})'
-    if kind == 'CHECK':
-        return prefix + f'CHECK ({predicate(constraint["predicate"])})'
     if kind == 'FOREIGN_KEY':
         if constraint['on_delete'] != 'RESTRICT' or constraint['on_update'] != 'RESTRICT':
             raise ValueError('Unsupported foreign key action')

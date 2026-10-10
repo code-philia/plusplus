@@ -86,7 +86,7 @@ class TypeLowerer:
             for path, rows in sorted(contract_files.items()):
                 sources[path] = _render_contract_file([{**row, "source_path": path} for row in rows], errors)
                 definitions.extend(_definition_rows(rows, path, "DATA_CONTRACT"))
-            # Database lowering owns table bindings and inferred record types.
+            # Backend lowering owns ORM bindings and inferred record types.
             for path, rows in sorted(entity_files.items()):
                 definitions.extend(_definition_rows(rows, path, "ENTITY_TYPE"))
 

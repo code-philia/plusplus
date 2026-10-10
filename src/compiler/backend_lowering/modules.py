@@ -52,7 +52,7 @@ def render_blueprint_module(kind: str, module: dict[str, Any], symbol: dict[str,
     blueprint = module['backend_module']
     lines += ['', '/**', f' * @arc-owner {symbol["owner_requirement"]}', f' * @arc-kind {kind}']
     if kind in {'DB', 'FUNC'}:
-        lines.append(' * Atomic writes use schemaTransaction with a synchronous callback; domain triggers and transaction-boundary relationship checks are compiler-owned.')
+        lines.append(' * Atomic writes use schemaTransaction with a synchronous callback; business validation belongs to repository and service implementations.')
     for line in blueprint['spec'].splitlines():
         lines.append(' * ' + line.replace('*/', '* /'))
     for criterion in blueprint['acceptance_criteria']:
