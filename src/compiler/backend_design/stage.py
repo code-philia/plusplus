@@ -1,6 +1,8 @@
 """Postorder leaf design and single-pass parent integration using existing APIs."""
 from __future__ import annotations
 
+from ..ir import table_constraints
+
 import copy
 import hashlib
 import json
@@ -76,26 +78,24 @@ def project_design_context(schema: dict[str, Any], requirement_id: str, dependen
     links = schema.get('traceability', {}).get('requirements', {})
     keys = set()
     for rid in wanted:
-        keys.update(links.get(rid, {}).get('entities', []))
+        keys.update(links.get(rid, {}).get('tables', []))
     selected = {row['name'] for row in schema.get('tables', [])
                 if set(row.get('requirement_ids', [])) & wanted or row['name'] in keys}
     for row in schema.get('tables', []):
-        for constraint in row.get('constraints', []):
+        for constraint in table_constraints(row):
             target = constraint.get('referenced_table')
             if row['name'] in selected and target:
                 keys.add(target)
             if target in selected:
                 keys.add(row['name'])
     selected |= keys
-    return {'tables': [copy.deepcopy(row) for row in schema.get('tables', []) if row['name'] in selected],
-            'runtime_rules': [copy.deepcopy(row) for row in schema.get('runtime_rules', [])
-                              if not row.get('requirement_ids') or set(row['requirement_ids']) & wanted]}
+    return {'tables': [copy.deepcopy(row) for row in schema.get('tables', []) if row['name'] in selected]}
 
 
 def _related_data(schema: dict[str, Any], rid: str) -> dict[str, list[str]]:
     links = schema.get('traceability', {}).get('requirements', {}).get(rid, {})
-    result: dict[str, set[str]] = {name: set() for name in links.get('entities', [])}
-    for reference in links.get('fields', []):
+    result: dict[str, set[str]] = {name: set() for name in links.get('tables', [])}
+    for reference in links.get('columns', []):
         table, _, column = reference.partition('.')
         if column:
             result.setdefault(table, set()).add(column)

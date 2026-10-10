@@ -325,7 +325,7 @@ class Compiler:
                     "DATABASE_SCHEMA design issues recorded; continuing with the committed/partial schema.",
                     "warning",
                 )
-            artifacts["database_schema"] = artifact_store.write_database_schema(database.schema)
+            artifacts["database_schema"] = artifact_store.write_database_schema(database.schema, er_model=database.er_model)
             artifacts["database_er_model"] = str(artifact_store.database_root / "er_model.json")
             artifacts["database_schema_ir"] = artifacts["database_schema"]
             self._runtime.traceability.merge_database_schema_links(links)

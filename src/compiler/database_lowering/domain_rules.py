@@ -12,9 +12,6 @@ def render_domain_rules(schema: dict[str, Any]) -> tuple[dict[str, str], list[st
     definitions: dict[str, Any] = {}
     triggers: list[str] = []
     bindings: list[dict[str, str]] = []
-    for rule in schema.get("runtime_rules", []):
-        if rule.get("responsibility") != "backend" or rule["kind"] != "minimum_participation":
-            raise ValueError(f'Unsupported Schema IR rule: {rule["scope"]}: {rule["kind"]}')
     for table in sorted(schema["tables"], key=lambda row: row["name"]):
         for column in sorted(table["columns"], key=lambda row: row["name"]):
             kind = column["type"]
@@ -38,7 +35,6 @@ def render_domain_rules(schema: dict[str, Any]) -> tuple[dict[str, str], list[st
     return {"backend/src/db/domain-rules.ts": source}, triggers, {
         "write_rules": bindings, "functions": ["arc_domain_valid"],
         "registration": "Every compiler-owned SQLite connection",
-        "backend_rules": schema.get("runtime_rules", []),
         "formats": {"uuid": "canonical 8-4-4-4-12 hexadecimal form", "date": "valid UTC YYYY-MM-DD",
                     "date-time": "valid ISO timestamp with explicit UTC/offset and at most millisecond precision"},
     }

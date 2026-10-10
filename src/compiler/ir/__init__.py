@@ -8,7 +8,7 @@ from .integration import PendingCapability
 from .database import (
     ERAttribute, EREntity, ERModelIR, ERRelationship,
     SchemaColumn, SchemaConstraint, SchemaDefault, SchemaIR, SchemaTable,
-    SchemaDataType, RuntimeRule, MinimumParticipation,
+    SchemaDataType, SchemaColumnConstraint, table_constraints,
 )
 from .backend import (
     BackendIR, BackendModule, APIModule, FunctionModule,
@@ -23,7 +23,7 @@ from .frontend import (
 __all__ = [
     "PendingCapability",
     "ERAttribute", "EREntity", "ERModelIR", "ERRelationship", "SchemaDataType",
-    "RuntimeRule", "MinimumParticipation", "SchemaColumn", "SchemaConstraint", "SchemaDefault",
+    "SchemaColumnConstraint", "table_constraints", "SchemaColumn", "SchemaConstraint", "SchemaDefault",
     "SchemaIR", "SchemaTable",
     "BackendIR", "BackendModule", "APIModule",
     "FunctionModule", "DatabaseModule", "ModuleBase", "BackendField",

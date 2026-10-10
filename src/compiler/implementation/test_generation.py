@@ -1013,8 +1013,8 @@ def _database_source_cards(
         for row in resolved_targets.get("type_targets", []) if isinstance(row, dict)
     }
     cards: list[dict[str, Any]] = []
-    for entity in schema_slice.get("entities", []):
-        table = str(entity.get("key", entity.get("name", "")))
+    for entity in schema_slice.get("tables", []):
+        table = str(entity["name"])
         relative = paths.get(f"ENTITY.{table}", "backend/src/db/schema.ts")
         path = output_root / relative
         if path.is_file():

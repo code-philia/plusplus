@@ -1,4 +1,6 @@
-"""Logical ER and database-neutral relational schema contracts; neither contains SQL text."""
+"""Separate ER models and relational table definitions; neither contains SQL text."""
+
+from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
@@ -65,6 +67,19 @@ class SchemaColumn(TypedDict):
     description: str
     origin: str
     requirement_ids: list[str]
+    constraints: list[SchemaColumnConstraint]
+
+
+class SchemaColumnConstraint(TypedDict):
+    name: str
+    kind: Literal["PRIMARY_KEY", "UNIQUE", "FOREIGN_KEY", "CHECK"]
+    requirement_ids: list[str]
+    comparison: NotRequired[Literal["exact", "case_insensitive"]]
+    referenced_table: NotRequired[str]
+    referenced_columns: NotRequired[list[str]]
+    on_delete: NotRequired[Literal["RESTRICT"]]
+    on_update: NotRequired[Literal["RESTRICT"]]
+    predicate: NotRequired[dict[str, Any]]
 
 
 class SchemaConstraint(TypedDict):
@@ -90,33 +105,17 @@ class SchemaTable(TypedDict):
     requirement_ids: list[str]
 
 
-class MinimumParticipation(TypedDict):
-    owner_table: str
-    owner_columns: list[str]
-    related_table: str
-    related_columns: list[str]
-    minimum: Literal[1]
-
-
-class RuntimeRule(TypedDict):
-    """Backend transaction obligation; lowering must not guess a database constraint."""
-    responsibility: Literal["backend"]
-    scope: str
-    kind: Literal["minimum_participation"]
-    value: MinimumParticipation
-    reason: str
-    requirement_ids: list[str]
-
-
 class SchemaIR(TypedDict):
     ir_kind: Literal["database_schema"]
     status: Literal["RESOLVED", "PROPOSED"]
     tables: list[SchemaTable]
-    runtime_rules: list[RuntimeRule]
     traceability: dict[str, Any]
-    # Derived compatibility view for existing requirement/backend consumers.
-    # These fields are not a second schema authority.
-    entities: list[EREntity]
-    relationships: list[dict[str, Any]]
-    constraints: list[dict[str, Any]]
-    er_model: ERModelIR
+
+
+def table_constraints(table: SchemaTable) -> list[SchemaConstraint]:
+    """Expand column-local constraints for consumers requiring column lists."""
+    return [
+        *table["constraints"],
+        *({**constraint, "columns": [column["name"]]}
+          for column in table["columns"] for constraint in column["constraints"]),
+    ]

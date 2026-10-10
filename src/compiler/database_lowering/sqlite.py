@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+from ..ir import table_constraints
+
 from typing import Any
 
 from .runtime import render_runtime_sources
@@ -55,7 +57,7 @@ def render_statements(schema: dict[str, Any]) -> list[str]:
             for expression in storage_checks(column):
                 definition += f' CHECK ({qname} IS NULL OR ({expression}))'
             definitions.append(definition)
-        definitions.extend(constraint_sql(item) for item in sorted(table['constraints'], key=lambda item: item['name']))
+        definitions.extend(constraint_sql(item) for item in sorted(table_constraints(table), key=lambda item: item['name']))
         statements.append(f'CREATE TABLE {identifier(table["name"])} (\n  ' + ',\n  '.join(definitions) + '\n);')
     return statements
 
@@ -75,7 +77,7 @@ class SQLiteLoweringStrategy:
         for table in schema['tables']:
             for column in table['columns']:
                 if column['type'] == 'integer':
-                    values = [item['predicate']['value'] for item in table['constraints']
+                    values = [item['predicate']['value'] for item in table_constraints(table)
                               if item['kind'] == 'CHECK' and item['predicate']['column'] == column['name']
                               and item['predicate']['operator'] in {'gte', 'lte'}]
                     if column['default'] is not None:

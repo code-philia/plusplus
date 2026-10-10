@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from utils.logging import SynchronousLog
 
-from ..ir import SchemaIR
+from ..ir import ERModelIR, SchemaIR
 from model.contracts import StructuredModel
 from model.client import describe_model_error
 from utils.trace import format_payload_trace
@@ -38,6 +38,7 @@ from .validation import (
 class DatabasePassResult:
     schema: SchemaIR
     node_states: dict[str, str]
+    er_model: ERModelIR
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -151,9 +152,8 @@ class DatabaseSchemaPass:
         if errors:
             schema["status"] = "PROPOSED"
             er_model["status"] = "PROPOSED"
-        schema["er_model"] = er_model
         states.update({node_id: "SCHEMA_ANALYZED" if not errors else "FAILED" for node_id in requirements})
-        return DatabasePassResult(schema, states, errors, state.warnings)
+        return DatabasePassResult(schema, states, er_model, errors, state.warnings)
 
     def _context_for(
         self,

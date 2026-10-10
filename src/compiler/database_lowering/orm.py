@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+from ..ir import table_constraints
+
 from typing import Any, Callable
 
 from .sql import constraint_sql
@@ -50,7 +52,7 @@ def render_bindings(
                 builder = f'integer({qname}, {{ mode: "boolean" }})'
             else:
                 builder = f'{ {"TEXT": "text", "INTEGER": "integer", "REAL": "real"}[kind]}({qname})'
-            allowed = [item['predicate']['value'] for item in table['constraints']
+            allowed = [item['predicate']['value'] for item in table_constraints(table)
                        if item['kind'] == 'CHECK' and item['predicate']['column'] == column['name']
                        and item['predicate']['operator'] == 'in']
             if allowed:
@@ -66,7 +68,7 @@ def render_bindings(
             lines.append(f'  {qname}: {builder},')
         lines += ['}, (table) => [']
         lowered_checks = []
-        for constraint in table['constraints']:
+        for constraint in table_constraints(table):
             columns = ', '.join(f'table[{json.dumps(value)}]' for value in constraint['columns'])
             cname = json.dumps(constraint['name'])
             kind = constraint['kind']

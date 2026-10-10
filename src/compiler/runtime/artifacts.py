@@ -37,11 +37,11 @@ class CompilerArtifactStore:
         write_json_atomic(paths["dependency_graph"], dependency_graph)
         return {name: str(path) for name, path in paths.items()}
 
-    def write_database_schema(self, schema: dict[str, Any]) -> str:
+    def write_database_schema(self, schema: dict[str, Any], *, er_model: dict[str, Any] | None = None) -> str:
         path = self.database_root / "schema.json"
         write_json_atomic(path, schema)
-        if isinstance(schema.get("er_model"), dict):
-            write_json_atomic(self.database_root / "er_model.json", schema["er_model"])
+        if er_model is not None:
+            write_json_atomic(self.database_root / "er_model.json", er_model)
         return str(path)
 
 

@@ -11,18 +11,10 @@ def schema_for_requirement(schema: dict[str, Any], requirement_id: str) -> dict[
 
     traceability = schema.get("traceability", {}).get("requirements", {})
     links = traceability.get(requirement_id, {}) if isinstance(traceability, dict) else {}
-    entity_keys = set(links.get("entities", []))
-    relationship_ids = set(links.get("relationships", []))
-    constraint_ids = set(links.get("constraints", []))
-    return {
-        "entities": [copy.deepcopy(item) for item in schema.get("entities", []) if item.get("key") in entity_keys],
-        "relationships": [
-            copy.deepcopy(item) for item in schema.get("relationships", []) if item.get("id") in relationship_ids
-        ],
-        "constraints": [
-            copy.deepcopy(item) for item in schema.get("constraints", []) if item.get("id") in constraint_ids
-        ],
-    }
+    table_names = set(links.get("tables", []))
+    return {"tables": [copy.deepcopy(table) for table in schema.get("tables", [])
+                       if table["name"] in table_names
+                       or requirement_id in table.get("requirement_ids", [])]}
 
 
 def database_traceability(schema: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
@@ -36,9 +28,9 @@ def database_traceability(schema: dict[str, Any]) -> dict[str, dict[str, list[st
         if not isinstance(links, dict):
             continue
         entity_fields: dict[str, set[str]] = {
-            str(entity): set() for entity in links.get("entities", [])
+            str(entity): set() for entity in links.get("tables", [])
         }
-        for reference in links.get("fields", []):
+        for reference in links.get("columns", []):
             entity, separator, field_name = str(reference).partition(".")
             if separator and entity and field_name:
                 entity_fields.setdefault(entity, set()).add(field_name)

@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..ir import ERModelIR, SchemaIR
+from ..ir import ERModelIR, SchemaIR, table_constraints
 from .state import DatabaseSchemaState
 from .validation import logical_literal_valid, validate_database_schema
 
@@ -67,7 +67,6 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
     errors: list[str] = []
     warnings: list[str] = []
     tables: list[dict[str, Any]] = []
-    runtime_rules: list[dict[str, Any]] = []
     fields = {
         f"{entity['key']}.{column['name']}": column
         for entity in relational["entities"] for column in entity["fields"]
@@ -111,7 +110,7 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
                 },
                 "generation": "application_uuid" if column["primary_key"] and resolved_type == "uuid" else "none",
                 "description": column["description"], "origin": column["origin"],
-                "requirement_ids": list(column["requirement_ids"]),
+                "requirement_ids": list(column["requirement_ids"]), "constraints": [],
             })
             for kind, value in sorted(props.items()):
                 if value is None or kind in {"default", "unique", "comparison"}:
@@ -149,38 +148,38 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
                 unique_constraints[constraint["name"]] = constraint
             else:
                 previous["requirement_ids"] = sorted(set(previous["requirement_ids"]) | set(constraint["requirement_ids"]))
+        column_index = {column["name"]: column for column in columns}
+        composite_constraints = []
+        for constraint in sorted(unique_constraints.values(), key=lambda item: item["name"]):
+            if len(constraint["columns"]) == 1:
+                local = copy.deepcopy(constraint)
+                owner = local.pop("columns")[0]
+                if owner not in column_index:
+                    errors.append(f"SCHEMA_IR_CONSTRAINT_COLUMN_INVALID: {constraint['name']}")
+                    continue
+                column_index[owner]["constraints"].append(local)
+            else:
+                composite_constraints.append(constraint)
         tables.append({
             "name": table_name, "description": entity["description"],
-            "columns": columns, "constraints": sorted(unique_constraints.values(), key=lambda item: item["name"]),
+            "columns": columns, "constraints": composite_constraints,
             "requirement_ids": list(entity["requirement_ids"]),
         })
 
-    mapped_relationships = {row["key"]: row for row in relational["relationships"]}
-    for relationship in er_model["relationships"]:
-        mapping = mapped_relationships[relationship["key"]]
-        for side in ("parent", "child"):
-            if relationship[f"{side}_min"] != 1 or (side == "child" and relationship["type"] != "MANY_TO_MANY"):
-                continue  # Required child -> parent is already NOT NULL plus FOREIGN KEY.
-            owner = relationship[side]
-            if relationship["type"] == "MANY_TO_MANY":
-                related_table = mapping["association_entity"]
-                related_column = mapping["association_fields"][0 if side == "parent" else 1]
-            else:
-                related_table, related_column = mapping["fk_entity"], mapping["fk_field"]
-            runtime_rules.append({
-                "scope": relationship["key"], "kind": "minimum_participation", "responsibility": "backend",
-                "value": {"owner_table": owner, "owner_columns": ["id"],
-                          "related_table": related_table, "related_columns": [related_column], "minimum": 1},
-                "reason": "Backend must preserve membership for affected owners at successful transaction completion; "
-                          "SQLite foreign keys cannot require a referencing row. Creation and final-member deletion "
-                          "must be handled atomically. This is not an automatic database-global check.",
-                "requirement_ids": list(relationship["requirement_ids"]),
-            })
-
+    traceability = {"requirements": {}}
+    for rid in relational["traceability"]["requirements"]:
+        owned_tables = [table for table in tables if rid in table["requirement_ids"]]
+        traceability["requirements"][rid] = {
+            "tables": sorted(table["name"] for table in owned_tables),
+            "columns": sorted(f"{table['name']}.{column['name']}" for table in tables
+                              for column in table["columns"] if rid in column["requirement_ids"]),
+            "constraints": sorted(constraint["name"] for table in tables
+                                  for constraint in table_constraints(table)
+                                  if rid in constraint["requirement_ids"]),
+        }
     schema: SchemaIR = {
-        **copy.deepcopy(relational),
-        "ir_kind": "database_schema",
-        "tables": tables, "runtime_rules": runtime_rules, "er_model": copy.deepcopy(er_model),
+        "ir_kind": "database_schema", "status": relational["status"],
+        "tables": tables, "traceability": traceability,
     }
     errors.extend(validate_schema_ir(schema))
     if errors:
@@ -213,8 +212,7 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
         return ["SCHEMA_IR_KIND_INVALID: expected database-neutral Schema IR"]
     if "target" in schema or "policies" in schema:
         errors.append("SCHEMA_IR_DIALECT_SPECIFIC: target/storage policies do not belong in Schema IR")
-    unknown = set(schema) - {"ir_kind", "status", "tables", "runtime_rules", "traceability",
-                             "entities", "relationships", "constraints", "er_model"}
+    unknown = set(schema) - {"ir_kind", "status", "tables", "traceability"}
     if unknown:
         errors.append("SCHEMA_IR_UNKNOWN_SEMANTICS: " + ", ".join(sorted(unknown)))
     tables = {table["name"]: table for table in schema["tables"]}
@@ -232,12 +230,18 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
         columns = {column["name"]: column for column in table["columns"]}
         if not columns or len(columns) != len(table["columns"]):
             errors.append(f"SCHEMA_IR_COLUMNS_INVALID: {table['name']}")
-        if sum(item["kind"] == "PRIMARY_KEY" for item in table["constraints"]) != 1:
+        for constraint in table["constraints"]:
+            if len(constraint["columns"]) < 2:
+                errors.append(f"SCHEMA_IR_TABLE_CONSTRAINT_REQUIRES_MULTIPLE_COLUMNS: {constraint['name']}")
+        if sum(item["kind"] == "PRIMARY_KEY" for item in table_constraints(table)) != 1:
             errors.append(f"SCHEMA_IR_PRIMARY_KEY_INVALID: {table['name']}")
         for column in columns.values():
             _identifier(column["name"], errors)
+            for constraint in column["constraints"]:
+                if "columns" in constraint:
+                    errors.append(f"SCHEMA_IR_COLUMN_CONSTRAINT_REDUNDANT_COLUMNS: {constraint['name']}")
             unknown = set(column) - {"name", "type", "nullable", "default", "generation", "description",
-                                     "origin", "requirement_ids"}
+                                     "origin", "requirement_ids", "constraints"}
             if unknown:
                 errors.append(f"SCHEMA_IR_UNKNOWN_COLUMN_SEMANTICS: {table['name']}.{column['name']}: {sorted(unknown)}")
             if "properties" in column:
@@ -259,7 +263,7 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
                 if default["kind"] != kind or not valid or not logical_literal_valid(column["type"], value):
                     errors.append(f"SCHEMA_IR_DEFAULT_INVALID: {table['name']}.{column['name']}")
         names: set[str] = set()
-        for constraint in table["constraints"]:
+        for constraint in table_constraints(table):
             _identifier(constraint["name"], errors)
             if constraint["name"] in names:
                 errors.append(f"SCHEMA_IR_CONSTRAINT_DUPLICATE: {constraint['name']}")
@@ -306,7 +310,7 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
                 if any(ref not in target_columns or columns[source]["type"] != target_columns[ref]["type"]
                        for source, ref in zip(refs, target_refs)):
                     errors.append(f"SCHEMA_IR_FOREIGN_KEY_TYPE: {constraint['name']}")
-                if not any(item["kind"] in {"PRIMARY_KEY", "UNIQUE"} and item["columns"] == target_refs for item in target["constraints"]):
+                if not any(item["kind"] in {"PRIMARY_KEY", "UNIQUE"} and item["columns"] == target_refs for item in table_constraints(target)):
                     errors.append(f"SCHEMA_IR_FOREIGN_KEY_TARGET_NOT_UNIQUE: {constraint['name']}")
                 if constraint["on_delete"] != "RESTRICT" or constraint["on_update"] != "RESTRICT":
                     errors.append(f"SCHEMA_IR_FOREIGN_KEY_ACTION_INVALID: {constraint['name']}")
@@ -318,20 +322,18 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
                 kind != "UNIQUE" or len(refs) != 1 or columns[refs[0]]["type"] != "string"
             ):
                 errors.append(f"SCHEMA_IR_COMPARISON_TYPE_INVALID: {constraint['name']}")
-    for rule in schema.get("runtime_rules", []):
-        if rule.get("responsibility") != "backend" or rule.get("kind") != "minimum_participation":
-            errors.append(f"SCHEMA_IR_RUNTIME_RULE_UNSUPPORTED: {rule.get('scope')}")
-            continue
-        value = rule.get("value", {})
-        owner = tables.get(value.get("owner_table"))
-        related = tables.get(value.get("related_table"))
-        owner_columns, related_columns = value.get("owner_columns", []), value.get("related_columns", [])
-        if (not owner or not related or value.get("minimum") != 1 or not owner_columns
-                or len(owner_columns) != len(related_columns)):
-            errors.append(f"SCHEMA_IR_RUNTIME_RULE_MAPPING_INVALID: {rule.get('scope')}")
-            continue
-        if not any(item["kind"] == "FOREIGN_KEY" and item["columns"] == related_columns
-                   and item["referenced_table"] == owner["name"] and item["referenced_columns"] == owner_columns
-                   for item in related["constraints"]):
-            errors.append(f"SCHEMA_IR_RUNTIME_RULE_REFERENCE_INVALID: {rule.get('scope')}")
+    traceability = schema.get("traceability", {}).get("requirements")
+    if not isinstance(traceability, dict):
+        errors.append("SCHEMA_IR_TRACEABILITY_INVALID: requirements must be an object")
+    else:
+        column_refs = {f"{table['name']}.{column['name']}" for table in tables.values()
+                       for column in table["columns"]}
+        constraint_names = {constraint["name"] for table in tables.values()
+                            for constraint in table_constraints(table)}
+        for rid, links in traceability.items():
+            if (set(links) - {"tables", "columns", "constraints"}
+                    or set(links.get("tables", [])) - tables.keys()
+                    or set(links.get("columns", [])) - column_refs
+                    or set(links.get("constraints", [])) - constraint_names):
+                errors.append(f"SCHEMA_IR_TRACEABILITY_INVALID: {rid}")
     return errors

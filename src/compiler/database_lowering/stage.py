@@ -1,7 +1,6 @@
 """Static database lowering after project initialization, without fixtures or execution."""
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -85,7 +84,6 @@ class DatabaseLowerer:
                                    'entrypoint': 'backend/src/db/init.ts', 'executed': False},
                 'ddl': {'sqlite': 'backend/sql/schema.sqlite.sql'},
                 'policies': lowered.policies,
-                'runtime_rules': copy.deepcopy(schema.get('runtime_rules', [])),
                 'generated_files': sorted(path for path in sources if path.startswith('backend/src/')),
                 'source_files': sorted(sources),
             }
