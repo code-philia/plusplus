@@ -62,6 +62,13 @@ def frontend_ir_traceability(ir: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 if table == "functions":
                     link.setdefault("api_ids", []).extend(call["target_id"] for call in row.get("calls", [])
                                                            if call.get("kind") == "API")
+    for rid, association in ir.get("requirement_links", {}).items():
+        link = links.setdefault(rid, {"ui_scope": "NO_UI"})
+        link["implements"] = list(association.get("implements", []))
+        link["uses"] = list(association.get("uses", []))
+        ui_ids = {row['id'] for row in ir.get('ui', [])}
+        if link['ui_scope'] == 'NO_UI' and ui_ids & set(link['uses']):
+            link['ui_scope'] = 'UI_AFFECTING'
     for row in links.values():
         for key, value in row.items():
             if isinstance(value, list):
@@ -70,64 +77,67 @@ def frontend_ir_traceability(ir: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
-                  related_ids: set[str], *, include_related: bool = False) -> dict[str, Any]:
+                  related_ids: set[str]) -> dict[str, Any]:
     rows = {row["id"]: row for table in TABLES for row in ir[table]}
     ui = {row["id"]: row for row in ir["ui"]}
     parents = {child: row["id"] for row in ui.values() for child in row.get("children", [])}
-    owners = related_ids | {rid} if include_related else {rid}
-    owned = {key for key, row in rows.items() if owners & set(row.get("requirement_ids", []))}
-    related = [row for row in ui.values() if related_ids & set(row.get("requirement_ids", []))]
-    candidates = ranked(related, requirement, 8)
-    candidates += ranked(list(ui.values()), requirement, 12)
-    shared_functions = ranked(ir["functions"], requirement, 8)
-    shared_data = ranked(ir["data"], requirement, 8)
-    selected = owned | {ir["root_ui_id"]}
+    # Direct ownership is never inherited through a requirement or UI ancestor.
+    owned = {key for key, row in rows.items() if rid in row.get("requirement_ids", [])}
+    used = set(ir.get("requirement_links", {}).get(rid, {}).get("uses", []))
+    related = [row for row in ui.values() if related_ids & set(row.get("requirement_ids", []))
+               and row["id"] != ir["root_ui_id"]]
+    candidates = ranked(related, requirement, 4)
+    candidates += ranked([row for row in ui.values() if row["id"] != ir["root_ui_id"]], requirement, 8)
+    shared_functions = ranked(ir["functions"], requirement, 4)
+    shared_data = ranked(ir["data"], requirement, 4)
+    selected = owned | (used & rows.keys())
     selected.update(row["id"] for row in [*candidates, *shared_functions, *shared_data])
-    # Fetch candidate subtrees to make reuse a real option, with a bounded expansion.
-    pending = [row["id"] for row in candidates]
+    # Candidate screen/group records expose children IDs, never all sibling features.
+    # Expand a small non-screen region only; owned controls are already complete.
+    pending = [row["id"] for row in candidates if row.get("kind") not in {"screen", "group"}]
     expanded: set[str] = set()
-    while pending and len(expanded) < 48:
+    while pending and len(expanded) < 24:
         key = pending.pop(0)
         if key in expanded or key not in ui:
             continue
         expanded.add(key)
         selected.add(key)
-        pending.extend(ui[key].get("children", []))
-    # Ancestors are editable full records: attaching/moving UI needs both parents.
-    for key in list(selected):
-        seen = set()
-        while key in parents and key not in seen:
-            seen.add(key)
-            key = parents[key]
-            selected.add(key)
-    # Full immediate children preserve sibling identities during parent replacement.
-    for key in list(selected):
-        selected.update(ui.get(key, {}).get("children", []))
-    for event in ir["events"]:
-        if event.get("ui_id") in selected:
-            selected.add(event["id"])
-    # Include function/data dependencies; no recursive expansion of shared UI containers.
-    pending = list(selected)
-    visited = set()
+        pending.extend(child for child in ui[key].get("children", [])
+                       if ui.get(child, {}).get("kind") != "screen")
+    # Events follow the selected semantic controls, not attachment ancestors.
+    selected.update(event["id"] for event in ir["events"] if event.get("ui_id") in selected)
+    pending, visited = list(selected), set()
     while pending:
         key = pending.pop()
         if key in visited or key not in rows:
             continue
         visited.add(key)
         row = rows[key]
-        references = value_references(row, "data")
+        references = value_references(row, "data") | value_references(row, "item")
         references.update(row.get("reads", []))
         references.update(row.get("writes", []))
         references.update(call["target_id"] for call in [*row.get("calls", []), *row.get("handlers", [])]
                           if call.get("kind") == "FUNC")
-        fresh = references - selected
+        fresh = (references & rows.keys()) - selected
         selected.update(fresh)
         pending.extend(fresh)
+    # Keep attachment ancestors separate. Their ordered child IDs are sufficient
+    # to preserve unrelated siblings during full-record parent updates.
+    structural = {ir["root_ui_id"]}
+    for key in list(selected):
+        seen = set()
+        while key in parents and key not in seen:
+            seen.add(key)
+            key = parents[key]
+            if key not in selected:
+                structural.add(key)
     records = {table: [copy.deepcopy(row) for row in ir[table] if row["id"] in selected]
                for table in TABLES if table != "types"}
     # Compact catalogs expose the rest of the system without sending every full subtree.
     return {
         "root_ui_id": ir["root_ui_id"], "existing": records,
+        "structural_ui": [copy.deepcopy(row) for row in ir["ui"] if row["id"] in structural - selected],
+        "requirement_links": copy.deepcopy(ir.get("requirement_links", {}).get(rid, {"implements": [], "uses": []})),
         "ui_catalog": [{"id": row["id"], "kind": row["kind"],
                         "spec": row.get("spec", "")[:180], "parent_id": parents.get(row["id"]),
                         "requirement_ids": row.get("requirement_ids", [])}

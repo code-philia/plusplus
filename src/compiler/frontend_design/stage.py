@@ -1,4 +1,4 @@
-"""Postorder leaf passes and one frontend integration pass per non-leaf node."""
+"""Leaf frontend passes with explicit direct ownership and reuse associations."""
 from __future__ import annotations
 
 import base64
@@ -46,8 +46,8 @@ class FrontendIRGenerationPass:
                 visual_analyses: list[dict[str, Any]] | None = None) -> FrontendIRGenerationResult:
         backend_design_ir = backend_design_ir.get("backend_blueprint", backend_design_ir)
         self.nodes = requirement_ir.get("nodes", {})
-        order = postorder(requirement_ir)
         self.children = children_by_id(requirement_ir)
+        order = [rid for rid in postorder(requirement_ir) if not self.children[rid]]
         self.dependencies = dependency_graph.get("requirement_dependencies", {})
         self.batches, self.failures, self.warnings = [], [], []
         self.apis = [copy.deepcopy(row) for row in backend_design_ir.get("modules", []) if row.get("kind") == "API"]
@@ -66,9 +66,10 @@ class FrontendIRGenerationPass:
                                  "analysis": row.get("analysis", analyses.get(key, {}).get("analysis", {}))})
         self.ir = {"ir_kind": "frontend_design", "backend_ref": "../backend/backend_ir.json",
                    "types": [], "root_ui_id": "ui.app", "ui": [{
-                       "id": "ui.app", "kind": "group", "spec": "Application UI composition root.",
+                       "id": "ui.app", "name": "application_shell", "kind": "group", "spec": "Application UI composition root.",
                        "requirement_ids": [], "children": [], "bindings": {},
-                   }], "data": [], "events": [], "functions": [], "pending_capabilities": []}
+                   }], "data": [], "events": [], "functions": [], "pending_capabilities": [],
+                   "requirement_links": {}}
         gaps: dict[str, Any] = {}
         for requirement in backend_design_ir.get("requirements", []):
             for source in requirement.get("pending_capabilities", []):
@@ -81,10 +82,9 @@ class FrontendIRGenerationPass:
         self.ir["pending_capabilities"] = list(gaps.values())
         if self.visuals:
             self.ir["visual_references"] = [{"id": row["id"], "path": row["path"]} for row in self.visuals]
-        # Finish each subtree before visiting its parent. Non-leaves receive one
-        # full frontend delta, rather than one call in every system-wide pass.
+        # Ancestors provide scope context only; schedule each leaf once.
         for rid in order:
-            phases = ("composition",) if self.children[rid] else ("topology", "ui", "data", "interaction")
+            phases = ("topology", "ui", "data", "interaction")
             for phase in phases:
                 self._call(phase, [rid], self._payload(rid, phase))
         self.warnings.extend(f"{gap['id']}: pending integration: {gap['capability']} ({gap['reason']})"
@@ -99,7 +99,8 @@ class FrontendIRGenerationPass:
         traceability = {rid: links.get(rid, {"ui_scope": "NO_UI"}) for rid in order}
         report = {"status": status, "warnings": self.warnings, "failed_tasks": self.failures,
                   "pending_capabilities": copy.deepcopy(self.ir["pending_capabilities"]),
-                  "traversal": "depth_first_postorder", "node_order": order,
+                  "requirement_links": copy.deepcopy(self.ir["requirement_links"]),
+                  "traversal": "depth_first_postorder_leaves", "node_order": order,
                   "task_counts": {phase: sum(row["phase"] == phase for row in self.batches) for phase in PHASE_TABLES},
                   "requirement_entities": {rid: [key for name, values in traceability[rid].items()
                                                 if name.endswith("_ids") and name != "api_ids" for key in values]
@@ -121,7 +122,7 @@ class FrontendIRGenerationPass:
             descendants.add(key)
             pending.extend(self.children[key])
         related = list(dict.fromkeys([*related, *sorted(descendants)]))
-        context = local_context(self.ir, rid, requirement, set(related), include_related=phase == "composition")
+        context = local_context(self.ir, rid, requirement, set(related))
         owners = set(related) | {rid}
         attached = {key for owner in owners for key in self.api_owners.get(owner, [])}
         primary = [row for row in self.apis if row["id"] in attached
@@ -147,7 +148,7 @@ class FrontendIRGenerationPass:
 
     @staticmethod
     def _visual_context(row: dict[str, Any], phase: str) -> dict[str, Any]:
-        if phase in {"ui", "composition"}:
+        if phase == "ui":
             return copy.deepcopy(row)
         keys = ("regions", "layout_cues") if phase == "topology" else ("visible_controls",)
         analysis = row.get("analysis", {})
@@ -190,6 +191,7 @@ class FrontendIRGenerationPass:
     def _merge(self, phase: str, output: dict[str, Any], requirements: list[str]) -> None:
         """Mechanical atomic merge only: no shape/type/reference/coverage inspection."""
         trial = copy.deepcopy(self.ir)
+        direct_updates = set(output.get('implements_ids', []))
         for table in PHASE_TABLES[phase]:
             registry = {row["id"]: row for row in trial[table]}
             for key in output.get("deletes", {}).get(table, []):
@@ -197,22 +199,36 @@ class FrontendIRGenerationPass:
             for source in output.get("upserts", {}).get(table, []):
                 row = copy.deepcopy(source)
                 if table != "types":
-                    row["requirement_ids"] = list(dict.fromkeys([
-                        *registry.get(row["id"], {}).get("requirement_ids", []),
-                        *row.get("requirement_ids", []),
-                        *requirements,
-                    ]))
+                    previous = registry.get(row["id"])
+                    supplied = row.get("requirement_ids", [])
+                    if previous is None:
+                        owners = requirements if supplied else []
+                    else:
+                        owners = previous.get("requirement_ids", [])
+                        # Structural maintenance never establishes direct ownership.
+                        semantic_keys = set(row) - {"name", "requirement_ids", "children", "presentation", "visual_reference_ids"}
+                        semantic_change = any(row.get(key) != previous.get(key) for key in semantic_keys)
+                        if semantic_change and row['id'] in direct_updates:
+                            owners = [*owners, *requirements]
+                    row["requirement_ids"] = list(dict.fromkeys(owners))
                 if table == "pending_capabilities":
                     row["function_ids"] = list(dict.fromkeys([
                         *registry.get(row["id"], {}).get("function_ids", []), *row["function_ids"]]))
                 registry[row["id"]] = row
             trial[table] = list(registry.values())
-        reused = set(output.get("reuse_ids", []))
-        for table in TABLES:
-            if table != "types":
-                for row in trial[table]:
-                    if row["id"] in reused:
-                        row["requirement_ids"] = list(dict.fromkeys([*row.get("requirement_ids", []), *requirements]))
+        records = {row["id"]: row for table in TABLES if table != "types" for row in trial[table]}
+        touched = set(output.get("reuse_ids", [])) | {
+            row["id"] for table in PHASE_TABLES[phase] if table not in {"types", "pending_capabilities"}
+            for row in output.get("upserts", {}).get(table, [])}
+        links = trial.setdefault("requirement_links", {})
+        for rid in requirements:
+            direct = {key for key, row in records.items() if rid in row.get("requirement_ids", [])}
+            prior = set(links.get(rid, {}).get("uses", []))
+            links[rid] = {"implements": sorted(direct),
+                          "uses": sorted(((prior | touched) & records.keys()) - direct)}
+        for rid, link in links.items():
+            link["implements"] = sorted(key for key, row in records.items() if rid in row.get("requirement_ids", []))
+            link["uses"] = sorted((set(link["uses"]) & records.keys()) - set(link["implements"]))
         write_json_atomic(self.root / "frontend_ir.json", trial)
         self.ir = trial
 

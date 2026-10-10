@@ -348,7 +348,7 @@ class Compiler:
             backend_design = BackendDesignPass(model, artifact_store.root)
             await self._log(
                 "Compiler",
-                "Designing in depth-first postorder: leaf analysis/architecture/refinement, then one parent integration using existing APIs only.",
+                "Designing in depth-first postorder: leaf analysis/architecture, then one parent integration using existing APIs only.",
             )
             design = backend_design.compile(
                 preprocessing.requirement_ir,
@@ -445,7 +445,7 @@ class Compiler:
                 artifacts["frontend_visual_references"] = str(visual_path)
             await self._log(
                 "Compiler",
-                "Generating frontend IR in depth-first postorder: four local passes per leaf, one UI/API integration pass per non-leaf; no review or validation.",
+                "Generating frontend IR in depth-first postorder: four local passes per leaf; ancestors provide context only; no review or validation.",
             )
             frontend = FrontendIRGenerationPass(model, artifact_store.root).compile(
                 preprocessing.requirement_ir,

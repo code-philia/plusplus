@@ -110,6 +110,7 @@ class CodeBindingLowerer:
         frontend_items: dict[str, dict[str, Any]] = {}
         if frontend_ir.get("ir_kind") == "frontend_design":
             locations = {row["entity_id"]: row for row in (frontend_lowering_report or {}).get("bindings", [])}
+            ui_units = (frontend_lowering_report or {}).get('ui_plan', {}).get('ui_units', {})
             for table, kind in (("ui", "UI"), ("events", "UI_EVENT"), ("functions", "UI_FUNC")):
                 for item in frontend_ir.get(table, []):
                     identity = item["id"]
@@ -120,6 +121,8 @@ class CodeBindingLowerer:
                         continue
                     bindings.append({"module_id": identity, "owner_requirements": _strings(item.get("requirement_ids")),
                         "kind": kind, "file": location["file"], "symbol": location["symbol"],
+                        "visibility": location.get('visibility', 'local' if kind == 'UI'
+                                                   and identity in ui_units and ui_units[identity] != identity else 'export'),
                         "input_type": copy.deepcopy(location.get("input_type")),
                         "output_type": copy.deepcopy(location.get("output_type")), "props_type": None,
                         "route": {"path": item["route"]} if "route" in item else None,
@@ -634,9 +637,12 @@ def _validate_sources(
         if content is None:
             continue
         symbol = str(binding.get("symbol", ""))
-        if not _has_named_export(content, symbol):
+        local_ui = binding.get('kind') in {'UI', 'UI_EVENT', 'UI_FUNC'} and binding.get('visibility') == 'local'
+        present = _has_local_function(content, symbol) if local_ui else _has_named_export(content, symbol)
+        if not present:
+            surface = 'local function' if local_ui else 'export'
             errors.append(
-                f"ARC4305 CODE_BINDING_SYMBOL_INVALID: {module_id} export {symbol!r} is missing."
+                f"ARC4305 CODE_BINDING_SYMBOL_INVALID: {module_id} {surface} {symbol!r} is missing."
             )
     for binding in type_bindings:
         type_id = str(binding.get("type_id", ""))
@@ -648,6 +654,15 @@ def _validate_sources(
             errors.append(
                 f"ARC4307 TYPE_BINDING_SYMBOL_INVALID: {type_id} export {symbol!r} is missing."
             )
+
+
+def _has_local_function(content: str, symbol: str) -> bool:
+    if not symbol:
+        return False
+    # Generated internal UI renderers are top-level declarations, not imports
+    # or occurrences in blueprint comments. Exported boundaries remain checked separately.
+    return re.search(rf'^\s*(?:async\s+)?function\s+{re.escape(symbol)}\s*\(',
+                     content, re.MULTILINE) is not None
 
 
 def _has_named_export(content: str, symbol: str) -> bool:

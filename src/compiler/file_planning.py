@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -345,11 +346,10 @@ class GlobalFilePlanner:
                 "module",
             )
             directory = roots[module_kind]
-            directory += "/" + _kebab_case(owner)
             path = self._allocate_path(
                 directory,
-                _kebab_case(local_name),
-                qualifier=owner,
+                _kebab_case(str(symbols[module_id]['symbol'])),
+                qualifier=hashlib.sha256(module_id.encode()).hexdigest()[:6],
             )
             symbol = symbols[module_id]
             self._place_symbol(

@@ -13,7 +13,6 @@ TABLE_TYPES = {"ui": UINode, "data": UIData, "events": UIEvent,
                "pending_capabilities": PendingCapability}
 PHASE_TABLES = {
     "topology": ("ui",),
-    "composition": ("ui", "data", "types", "events", "functions", "pending_capabilities"),
     "ui": ("ui",),
     "data": ("ui", "data", "types", "pending_capabilities"),
     "interaction": ("ui", "data", "types", "events", "functions", "pending_capabilities"),
@@ -65,6 +64,7 @@ def patch_schema(phase: str) -> dict[str, Any]:
         "upserts": obj({table: {"type": "array", "items": convert(TABLE_TYPES[table])} for table in tables}),
         "deletes": obj({table: strings for table in tables}),
         "reuse_ids": strings,
+        "implements_ids": strings,
     })
     return {**schema, "$defs": defs, "x-arc-output-mode": "json_object"}
 
@@ -73,16 +73,35 @@ COMMON = """Design a technology-neutral frontend blueprint from requirements and
 Return only the requested JSON delta. No components, React, JSX, DOM elements, CSS, HTTP routes,
 files, stores, handlers/effects tables, version, audit, scores or validation results.
 The UI tree is a semantic composition tree, not a framework component tree.
+Give every new UI a concise English snake_case name describing its semantic responsibility,
+e.g. registration, app_header, registration_form, email_field, submit_action.
+Names must not include requirement IDs, generated hashes or framework terminology. Preserve names
+of existing objects unless their responsibility changes. IDs remain stable when names change.
 Use supplied exact IDs for existing objects; use the supplied new_id_prefix plus meaningful suffixes
 for new objects (e.g. <prefix>ui.query, <prefix>fn.search, <prefix>data.query).
 For every changed/new object return its COMPLETE final record in upserts, not a field patch.
 For unchanged reused objects return their IDs in reuse_ids, not duplicate records.
 deletes contains only IDs intentionally superseded by your design changes. Otherwise use empty lists.
-Keep all existing requirement_ids when changing shared objects. Add current requirement attribution.
+requirement_ids means DIRECT implementation, not use, tree containment or scheduling history.
+New objects directly implement the current requirement by default. Preserve existing direct owners
+when updating objects. Add an owner only for a new semantic responsibility explicitly implementing
+that requirement. Editing children to attach UI, moving nodes or changing shared layout does not
+make the parent/container implement the attached requirement. reuse_ids records use only.
+implements_ids lists changed existing objects whose NEW semantic responsibility directly implements
+the current requirement. Use [] for structural maintenance and pure reuse. To create only shared
+shell structure, set requirement_ids=[]; it is used by the current task, not directly owned by it.
+Never copy ancestor requirement IDs onto all descendants, or current IDs onto every reused object.
 Existing shared responsibilities must survive changes. Read supplied related requirement scenarios.
 Do not invent product behaviors. Parent requirements describe shared composition; do not duplicate
 child-specific UI and behavior. Backend-only requirements may return an entirely empty delta.
 The compiler maintains root_ui_id; preserve that root. children are ordered IDs, not embedded nodes.
+UI containment follows application layout and navigation, not the requirement tree. Reuse existing
+application shell, screens and regions; one screen may implement several requirements and one
+requirement may affect several screens. Ancestors supply context, not additional feature tasks.
+Do not create login/search/booking surfaces just because an ancestor mentions them during a leaf task.
+When building shared shell structure, add only the regions needed to host the current leaf surface.
+structural_ui contains ancestor attachment records: preserve their sibling IDs without loading or
+redesigning siblings. ui_catalog is discovery only; absent subtrees are not implicitly editable.
 Every non-root UI has ONE parent. Reusing the same surface means referencing/updating its existing
 node at its existing position, never attaching it to a second parent. Similar controls at different
 locations are distinct UI instances; reuse their data/functions where appropriate. Repeated items
@@ -102,32 +121,18 @@ bindings keys are semantic attributes such as label,value,options,visible,enable
 presentation is optional natural-language layout/visual intent. Reference images are optional;
 use only supplied visual_reference_ids and preserve their relevant layout and visual cues.
 The backend API catalog is the capability boundary. For every required server behavior with no
-compatible API, emit pending_capabilities in data/interaction/composition instead of hiding the gap
+compatible API, emit pending_capabilities in data/interaction instead of hiding the gap
 only in function spec. Fields: stable id (<prefix>capability.<operation>), requirement_ids, capability,
 reason, function_ids (empty until known). Reuse supplied pending IDs for the same missing capability;
 include affected frontend function IDs once designed. Preserve unrelated gaps.
 Delete a gap only if a supplied existing API fully supports it and the affected interaction is wired;
 local simulation, disabled UI or a local logout that leaves the server session valid is not resolution.
 Do not invent API IDs or claim unsupported server effects. Local-only behavior needs no gap.
-Pictures supply visual evidence, not additional functional scope. Only UI/composition receives full
+Pictures supply visual evidence, not additional functional scope. Only UI receives full
 visual analysis; behavior passes receive visible controls and should rely on the committed UI tree.
 """
 
 PROMPTS = {
-    "composition": COMMON + """
-Integrate this non-leaf requirement exactly once after all descendant UI/data/interaction passes.
-Use committed descendant UI, events, data and functions. Supplement shared navigation, layout, parent screens,
-missing parent-level UI, state and interaction wiring in this ONE delta; do not repeat child design.
-You may upsert all frontend tables together, including typed data, event handlers and frontend functions.
-Preserve existing child surfaces, their local state scopes and behavior. Prefer reuse of descendant objects.
-Complete frontend/backend integration with supplied existing API IDs and exact input/output contracts only.
-No new backend interface, backend module or API definition; never alter backend contracts or call backend FUNC/DB.
-If an API capability is unavailable, emit its pending_capabilities record and describe the local behavior in function spec.
-Mount handlers on existing/added UI; frontend functions can sequence existing APIs and local computations.
-Specify payload/arguments, state/result mapping, navigation and error behavior as in the interaction pass.
-Every added UI must be attached through complete parent children records; preserve all existing siblings.
-Ancestors remain unprocessed context. Do not generate their supplements early or attribute them as processed.
-""",
     "topology": COMMON + """
 Pass 1: plan the current leaf requirement topology, using ancestor requirements as unprocessed context. Create only screens and shared
 structural groups. Give screens logical routes when required. Compose them under the existing root.

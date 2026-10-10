@@ -77,6 +77,9 @@ class CompilerArtifactStore:
         canonical_path = self.frontend_design_root / "frontend_ir.json"
         write_json_atomic(canonical_path, frontend_ir)
         paths["frontend_ir"] = str(canonical_path)
+        associations_path = self.frontend_design_root / 'requirement_links.json'
+        write_json_atomic(associations_path, {'requirement_links': frontend_ir.get('requirement_links', {})})
+        paths['frontend_requirement_links'] = str(associations_path)
         tables = ("ui", "data", "events", "functions", "types", "pending_capabilities")
         for table in tables:
             path = self.frontend_design_root / f"{table}.json"
@@ -115,6 +118,7 @@ class CompilerArtifactStore:
         report_path = root / "lowering.json"
         write_json_atomic(report_path, report)
         write_json_atomic(root / "bindings.json", {"bindings": report.get("bindings", [])})
+        write_json_atomic(root / "ui_plan.json", report.get("ui_plan", {}))
         write_json_atomic(root / "implementation_tasks.json", {
             "implementation_tasks": report.get("implementation_tasks", [])
         })

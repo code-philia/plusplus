@@ -41,6 +41,8 @@ class UIRepeat(TypedDict):
 
 class UINode(TypedDict):
     id: str
+    # Semantic responsibility, independent of requirement IDs and framework names.
+    name: NotRequired[str]
     kind: Literal[
         "screen", "group", "text", "input", "choice", "action", "image",
         "list", "feedback",
@@ -109,6 +111,11 @@ class UIVisualReference(TypedDict):
     description: NotRequired[str]
 
 
+class RequirementUIAssociation(TypedDict):
+    implements: list[str]
+    uses: list[str]
+
+
 class FrontendIR(TypedDict):
     ir_kind: Literal["frontend_design"]
     # Resolves API module IDs and named types; not a transport contract.
@@ -121,9 +128,11 @@ class FrontendIR(TypedDict):
     functions: list[UIFunction]
     visual_references: NotRequired[list[UIVisualReference]]
     pending_capabilities: NotRequired[list[PendingCapability]]
+    requirement_links: NotRequired[dict[str, RequirementUIAssociation]]
 
 
 __all__ = [
     "FrontendIR", "UINode", "UIData", "UIEvent", "UIFunction", "UICall",
     "UIValue", "LiteralValue", "ReferenceValue", "UIRepeat", "UIVisualReference",
+    "RequirementUIAssociation",
 ]

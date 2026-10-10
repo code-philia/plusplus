@@ -61,13 +61,15 @@ def frontend_subgraph(ir: dict[str, Any], requirement_id: str, target_ids: set[s
         parents = {child: row["id"] for row in ui.values() for child in row["children"]}
         selected = (target_ids & rows.keys()) | {key for key, row in rows.items()
                                                 if requirement_id in row.get("requirement_ids", [])}
+        selected.update(set(ir.get('requirement_links', {}).get(requirement_id, {}).get('uses', [])) & rows.keys())
+        structural = set()
         for key in list(selected):
-            selected.update(ui.get(key, {}).get("children", []))
             seen = set()
             while key in parents and key not in seen:
                 seen.add(key)
                 key = parents[key]
-                selected.add(key)
+                if key not in selected:
+                    structural.add(key)
         selected.update(row["id"] for row in ir["data"] if row["scope_ui_id"] in selected)
         pending = list(selected)
         visited = set()
@@ -87,6 +89,8 @@ def frontend_subgraph(ir: dict[str, Any], requirement_id: str, target_ids: set[s
             selected.update(new)
             pending.extend(new)
         result = {table: [copy.deepcopy(row) for row in ir[table] if row["id"] in selected] for table in tables}
+        result['structural_ui'] = [copy.deepcopy(row) for row in ir['ui'] if row['id'] in structural - selected]
+        result['requirement_links'] = copy.deepcopy(ir.get('requirement_links', {}).get(requirement_id, {}))
         result.update(ir_kind="frontend_design", root_ui_id=ir["root_ui_id"], backend_ref=ir["backend_ref"],
                       entry_routes=sorted({row["route"] for row in result["ui"] if "route" in row}))
         result["types"] = required_types(result, ir["types"])

@@ -315,8 +315,8 @@ class GlobalSymbolPlanner:
                     "module_kind": module_kind,
                     "owner_requirement": owner_requirement,
                 },
-                self._module_symbol_base(module, module_kind, local_name) + _pascal_case(owner_requirement),
-                qualifier=_pascal_case(owner_requirement),
+                self._module_symbol_base(module, module_kind, local_name),
+                qualifier=hashlib.sha256(module_id.encode()).hexdigest()[:6],
             )
             input_contract = self._plan_contract(module, module_kind, local_name, "INPUT")
             output_contract = self._plan_contract(module, module_kind, local_name, "OUTPUT")
@@ -639,7 +639,7 @@ class GlobalSymbolPlanner:
 
     @staticmethod
     def _module_symbol_base(module: dict[str, Any], module_kind: str, local_name: str) -> str:
-        local = _camel_case(local_name)
+        local = _camel_case(str(module.get('name') or local_name))
         if module_kind == "API":
             return f"{local}Handler"
         if module_kind == "DB":

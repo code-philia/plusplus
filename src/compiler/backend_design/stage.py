@@ -16,12 +16,12 @@ from core.logging import SynchronousLog
 from ..model_client import StructuredModel, describe_model_error
 from ..requirement_traversal import children_by_id, postorder
 from .contracts import (
-    ANALYSIS_SCHEMA, ARCHITECTURE_SCHEMA, MODULE_SCHEMA,
-    ANALYSIS_PROMPT, ARCHITECTURE_PROMPT, REFINEMENT_PROMPT,
+    ANALYSIS_SCHEMA, ARCHITECTURE_SCHEMA,
+    ANALYSIS_PROMPT, ARCHITECTURE_PROMPT,
     PARENT_DESIGN_SCHEMA, PARENT_DESIGN_PROMPT,
 )
 from .validation import shape_errors, validate_data_access, validate_backend_ir, access_set, reachable
-from .context import module_contract, refinement_context, required_types
+from .context import module_contract, required_types
 
 
 @dataclass
@@ -251,7 +251,6 @@ class BackendDesignPass:
                         trial = self._architecture(ir, rid, analysis, context, database_schema, dependencies, scenarios, feedback)
                         self.log.info(f'ARCHITECTURE_COMPLETED new_modules={len(trial["modules"]) - len(ir["modules"])} '
                                       f'total_modules={len(trial["modules"])}', node_id=rid)
-                        self._refine(trial, ir, rid, analysis, context, database_schema, scenarios)
                         problems = validate_backend_ir(trial, database_schema, scenarios)
                         if problems:
                             raise ValueError('; '.join(problems))
@@ -359,7 +358,6 @@ class BackendDesignPass:
                 module = copy.deepcopy(draft)
                 module['id'] = mapping[module['id']]
                 module['requirement_ids'] = [rid]
-                module['acceptance_criteria'] = copy.deepcopy(analysis['acceptance_criteria'])
                 if module['kind'] == 'API':
                     for direction in ('inputs', 'context', 'outputs'):
                         catalog = {row['semantic_id']: row for row in analysis[direction]}
@@ -408,47 +406,11 @@ class BackendDesignPass:
             except ValueError as exc:
                 return [str(exc)]
         decision = self._decision('architecture', rid, ARCHITECTURE_PROMPT, ARCHITECTURE_SCHEMA,
-                                  {'requirement_id': rid, 'analysis': analysis, 'schema_slice': context,
+                                  {'requirement_id': rid, 'requirement': self.requirement_nodes[rid],
+                                   'analysis': analysis, 'schema_slice': context,
                                    'existing_modules': candidates, 'architecture_feedback': feedback,
                                    'ancestor_context': self.inherited_context}, validate)
         return materialize(decision)
-
-    def _refine(self, trial: dict[str, Any], base: dict[str, Any], rid: str, analysis: dict[str, Any], context: dict[str, Any], schema: dict[str, Any], scenarios: set[str]) -> None:
-        modules = {row['id']: row for row in trial['modules']}
-        old = {row['id'] for row in base['modules']}
-        done = set(old)
-        def refine(key: str) -> None:
-            if key in done:
-                return
-            module = modules[key]
-            for call in module['calls']:
-                refine(call['module_id'])
-            self.log.info(f'MODULE_REFINEMENT_STARTED kind={module["kind"]} '
-                          f'callees={len(module["calls"])}', node_id=key)
-            def validate(value: dict[str, Any]) -> list[str]:
-                mutable = {'spec', 'acceptance_criteria'} | ({'data_access'} if module['kind'] == 'DB' else set())
-                errors = [f'fixed module field changed: {field}' for field in module if field not in mutable and value[field] != module[field]]
-                if access_set(value['data_access']) != access_set(module['data_access']):
-                    errors.append('refinement changed fixed logical data operation scope')
-                candidate = copy.deepcopy(trial)
-                candidate['modules'] = [value if row['id'] == key else row for row in candidate['modules']]
-                return errors + validate_backend_ir(candidate, schema, scenarios)
-            payload = {'fixed_module': module,
-                       'module_context': refinement_context(module, modules, context),
-                       'allowed_scenario_ids': sorted({scenario for criterion in analysis['acceptance_criteria']
-                                                      for scenario in criterion['scenario_ids']} |
-                                                     {scenario for row in self.inherited_context
-                                                      for scenario in row['scenario_ids']}),
-                       'callees': [module_contract(modules[callee]) for callee in
-                                   dict.fromkeys(call['module_id'] for call in module['calls'])]}
-            payload['types'] = required_types(payload, trial['types'])
-            value = self._decision('refinement', key, REFINEMENT_PROMPT, MODULE_SCHEMA, payload, validate)
-            module.clear()
-            module.update(value)
-            done.add(key)
-            self.log.info(f'MODULE_REFINEMENT_COMPLETED criteria={len(module["acceptance_criteria"])}', node_id=key)
-        for module in list(modules.values()):
-            refine(module['id'])
 
     def _compose_parent(self, base: dict[str, Any], rid: str, nodes: dict[str, Any], schema: dict[str, Any], scenarios: set[str]) -> dict[str, Any]:
         self.log.info('PARENT_INTEGRATION_STARTED', node_id=rid)

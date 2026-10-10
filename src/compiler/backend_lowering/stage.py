@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -160,13 +161,22 @@ def lower_backend(output_root: Path, store: CompilerArtifactStore, project_manif
                     current = path.read_text()
                     if current != source and (relative in previous and current != previous[relative] or relative in implementation_files and relative not in previous):
                         raise ValueError(f'Existing source has implementation changes: {relative}')
+            retiring = []
             for relative in previous.keys() - result.sources.keys():
                 path = (root / relative).resolve()
                 if root not in path.parents:
                     raise ValueError(f'Previous generated path escapes project: {relative}')
                 if path.exists():
-                    raise ValueError(f'Previous generated file is no longer planned: {relative}; resolve stale files before lowering')
+                    if path.read_text() != previous[relative]:
+                        raise ValueError(f'Obsolete generated file has implementation changes: {relative}; preserve or move it before lowering')
+                    retiring.append((relative, path))
             result.artifacts.update(store.write_generated_sources(result.sources))
+            archive = store.backend_lowering_root / 'retired' / uuid.uuid4().hex
+            for relative, path in retiring:
+                backup = archive / relative
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                path.rename(backup)
+                result.artifacts[f'retired_source:{relative}'] = str(backup)
             write_json_atomic(installed_path, result.sources)
     except (OSError, ValueError, TypeError) as exc:
         result.errors.append(f'BACKEND_LOWERING_FAILED: {exc}')

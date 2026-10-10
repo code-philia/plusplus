@@ -80,15 +80,8 @@ ANALYSIS_SCHEMA = object_schema({
         "scenario_ids": {"type": "array", "items": {"type": "string"}},
     })},
 })
-DRAFT_SCHEMA = {"anyOf": [], "$defs": MODULE_SCHEMA["$defs"]}
-for reference in MODULE_SCHEMA["anyOf"]:
-    branch = MODULE_SCHEMA["$defs"][reference["$ref"].rsplit("/", 1)[1]]
-    branch = {**branch, "properties": dict(branch["properties"]), "required": list(branch["required"])}
-    branch["properties"].pop("acceptance_criteria")
-    branch["required"].remove("acceptance_criteria")
-    DRAFT_SCHEMA["anyOf"].append(branch)
 ARCHITECTURE_SCHEMA = object_schema({
-    "new_modules": {"type": "array", "items": DRAFT_SCHEMA},
+    "new_modules": {"type": "array", "items": MODULE_SCHEMA},
     "reuse_module_ids": {"type": "array", "items": {"type": "string"}},
     "api_ids": {"type": "array", "items": {"type": "string"}},
 })
@@ -203,7 +196,14 @@ If extension changes behavior, design a new module rather than modifying an exis
 API calls FUNC only, FUNC calls FUNC/DB, DB is a leaf; do not add pass-through layers without responsibility.
 Only DB modules have direct data_access. API includes a technology-neutral entrypoint.
 Each call specifies purpose, optional business condition, and optional predecessor local call IDs.
-Each draft fixes spec, inputs/context/outputs, calls and direct data_access; do not return criteria yet.
+Each new module is a COMPLETE final contract: spec, inputs/context/outputs, calls, direct data_access
+and nonempty module-specific acceptance_criteria. There is no later module refinement pass.
+Use the original requirement to retain exact validation rules and bounds, not just analysis summaries.
+Describe observable success, failure, absence and side effects consistently with declared output types.
+Do not prescribe source paths, SQL/ORM choices or internal implementation algorithms.
+Distribute responsibility by layer; do not copy the entire requirement criteria onto every module.
+API criteria cover boundary behavior; FUNC criteria cover its business responsibility; DB criteria cover
+its declared storage effects. Criteria may use only supplied own/inherited scenario IDs.
 All new modules must be reachable from api_ids. Non-server requirements return three empty lists.
 Materialize EVERY analysis.api_capabilities entry as an API reachable from this requirement's
 api_ids, reusing compatible APIs where available. Copy its operation exactly to entrypoint.operation
@@ -225,28 +225,7 @@ The union of reachable DB operations must EXACTLY match analysis.data_operations
 operation and column: no missing read, extra update or hidden delete. Example: analysis read
 ["id","image_source"] permits splitting these reads across DB leaves, but not adding create.
 Do not redefine an existing shared type; exact identical definitions may be reused.
-Drafts omit acceptance_criteria ONLY in this pass; retain every other required module field.
-'''
-REFINEMENT_PROMPT = COMMON + """Refine the supplied fixed module using its fixed responsibilities,
-module_context and callee interfaces/guarantees. Return the complete module with acceptance_criteria.
-The architecture has already assigned requirement responsibilities to fixed_module.spec.
-Do not reanalyze the entire requirement or expand module scope. allowed_scenario_ids is provenance,
-not a demand for every layer to repeat every requirement rule. API modules handle boundary behavior;
-FUNC modules implement business/runtime obligations; DB modules specify logical storage operations.
-Keep id/name/kind/requirement_ids/inputs/context/outputs/calls/entrypoint exactly unchanged.
-Clarify spec with data sources, call collaboration, observable errors and required consistency.
-Only a DB leaf may refine data_access, within the fixed logical operation scope.
-Every module needs nonempty falsifiable criteria; pure functions must not hide database reads.
-Keep spec and criteria about observable module behavior, never about compiler phases or repair instructions.
-Do not silently invent interfaces or calls.
-"""
-REFINEMENT_PROMPT += '''Refinement-specific checks:
-Return the complete fixed module, not a patch. Only spec and acceptance_criteria may change;
-DB may rewrite data_access representation only if its exact table/operation/column set is unchanged.
-Example: retain id="REQ-1.1::DB.ReadHomeBanners", all inputs/context/outputs and calls exactly;
-add a criterion describing stable display_order sorting to clarify spec. INVALID: add a required
-page_size input, rename a field, remove a call, or add a new read column at refinement time.
-Criteria must remain nonempty and use only supplied own/inherited scenario IDs.
+Return complete modules including final spec and acceptance_criteria; no draft-only records.
 '''
 from ..ir.backend import RequirementBlueprint
 from ..ir.integration import PendingCapability

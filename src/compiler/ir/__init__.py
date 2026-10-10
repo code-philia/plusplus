@@ -17,7 +17,7 @@ from .backend import (
 )
 from .frontend import (
     FrontendIR, UINode, UIData, UIEvent, UIFunction, UICall, UIValue,
-    LiteralValue, ReferenceValue, UIRepeat, UIVisualReference,
+    LiteralValue, ReferenceValue, UIRepeat, UIVisualReference, RequirementUIAssociation,
 )
 
 __all__ = [
@@ -31,4 +31,5 @@ __all__ = [
     "DataAccess", "RequirementBlueprint", "APIEntryPoint",
     "FrontendIR", "UINode", "UIData", "UIEvent", "UIFunction", "UICall",
     "UIValue", "LiteralValue", "ReferenceValue", "UIRepeat", "UIVisualReference",
+    "RequirementUIAssociation",
 ]

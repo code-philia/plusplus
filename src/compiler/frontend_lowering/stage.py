@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from ..typescript_format import format_typescript
 from .runtime import STATE_RUNTIME, UI_RUNTIME
 from .types import Types, js, symbol
+from .planning import plan_ui_units, plan_behavior, api_symbols
 
 
 @dataclass
@@ -20,6 +22,7 @@ class ReactLoweringResult:
     warnings: list[str] = field(default_factory=list)
     implementation_tasks: list[dict[str, Any]] = field(default_factory=list)
     pending_capabilities: list[dict[str, Any]] = field(default_factory=list)
+    ui_plan: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -30,7 +33,7 @@ class ReactLoweringResult:
         return {"status": "LOWERED" if self.ok else "FAILED", "errors": self.errors,
                 "warnings": self.warnings, "files": sorted(self.sources), "bindings": self.bindings,
                 "implementation_tasks": self.implementation_tasks, "implementation_status": "SKELETON",
-                "pending_capabilities": self.pending_capabilities}
+                "pending_capabilities": self.pending_capabilities, "ui_plan": self.ui_plan}
 
 
 class FrontendReactLowerer:
@@ -49,6 +52,16 @@ class FrontendReactLowerer:
                 raise ValueError("Native frontend lowering requires the lightweight frontend_design IR; regenerate old frontend designs.")
             self.types = Types(ir, backend_design)
             self.ui = {row["id"]: row for row in ir["ui"]}
+            self.result.ui_plan = plan_ui_units(ir)
+            self.ui_files = self.result.ui_plan['ui_files']
+            self.ui_units = self.result.ui_plan['ui_units']
+            self.ui_symbols = self.result.ui_plan['ui_symbols']
+            self.result.ui_plan.update(plan_behavior(ir, self.result.ui_plan))
+            self.behavior_symbols = self.result.ui_plan['behavior_symbols']
+            self.function_files = self.result.ui_plan['function_files']
+            self.event_files = self.result.ui_plan['event_files']
+            self.ui_imports: dict[str, list[str]] = {}
+            self.ui_bodies: dict[str, list[str]] = {}
             self.events = {row["id"]: row for row in ir["events"]}
             self.functions = {row["id"]: row for row in ir["functions"]}
             self.data = {row["id"]: row for row in ir["data"]}
@@ -66,6 +79,8 @@ class FrontendReactLowerer:
                 self._event(row)
             for row in ir["ui"]:
                 self._ui(row)
+            for path, bodies in self.ui_bodies.items():
+                self.result.sources[path] = '\n'.join(dict.fromkeys(self.ui_imports[path])) + '\n\n' + '\n\n'.join(bodies) + '\n'
             self._app()
             self.result.sources["frontend/vite.config.ts"] = (
                 'import { defineConfig } from "vite";\nimport react from "@vitejs/plugin-react";\n'
@@ -84,6 +99,10 @@ class FrontendReactLowerer:
                                      "kind": kind, "callees": callees or [],
                                      "requirement_ids": row.get("requirement_ids", [])})
         binding = self.result.bindings[-1]
+        binding['visibility'] = ('local' if kind == 'UI' and self.ui_units[row['id']] != row['id']
+                                 or kind == 'UI_EVENT'
+                                 or kind == 'UI_FUNC' and row['id'] not in self.result.ui_plan['shared_function_ids']
+                                 else 'export')
         if kind in {"UI_FUNC", "UI_EVENT", "API_CLIENT"}:
             identity = row["id"].removeprefix("API_CLIENT::") if kind == "API_CLIENT" else row["id"]
             for direction in ("Input", "Output") if kind != "UI_EVENT" else ("Input",):
@@ -96,14 +115,28 @@ class FrontendReactLowerer:
             "name": row.get("name", row["id"]), "spec": row.get("spec", ""),
             "category": category, "contract": copy.deepcopy(row), "description": description})
 
+    @staticmethod
+    def _relative(source: str, target: str) -> str:
+        value = posixpath.splitext(posixpath.relpath(target, posixpath.dirname(source)))[0]
+        return value if value.startswith('.') else './' + value
+
+    def _emit(self, path: str, lines: list[str]) -> None:
+        self.ui_imports.setdefault(path, []).extend(line for line in lines if line.startswith('import '))
+        self.ui_bodies.setdefault(path, []).append('\n'.join(line for line in lines if not line.startswith('import ')))
+
     def _function(self, row: dict[str, Any]) -> None:
-        name = symbol("fn", row["id"])
-        path = f"frontend/src/functions/{name}.ts"
+        name = self.behavior_symbols[row['id']]
+        path = self.function_files[row['id']]
+        exported = 'export ' if row['id'] in self.result.ui_plan['shared_function_ids'] else ''
         lines = ['import type * as T from "../types";',
-                 'import { unimplemented } from "../runtime/state";',
+                 'import { argumentsFor, context, invokeFunction, registerFunction, unimplemented } from "../runtime/state";',
                  'import type { FunctionContext } from "../runtime/state";',
                  "// Blueprint: " + js(row),
-                 f"export async function {name}(context: FunctionContext, input: T.{symbol('Input', row['id'])}): Promise<T.{symbol('Output', row['id'])}> {{"]
+                 f"{exported}async function {name}(context: FunctionContext, input: T.{symbol('Input', row['id'])}): Promise<T.{symbol('Output', row['id'])}> {{"]
+        for call in row['calls']:
+            target = call['target_id']
+            if call['kind'] == 'FUNC' and self.function_files[target] != path:
+                lines.insert(0, f'import "{self._relative(path, self.function_files[target])}";')
         helpers = []
         for call in row["calls"]:
             target = call["target_id"]
@@ -115,24 +148,28 @@ class FrontendReactLowerer:
                 f"const {helpers[-1]} = (arguments_: T.{symbol('Input', target)}): Promise<T.{symbol('Output', target)}> => "
                 f"context.{'callAPI' if call['kind'] == 'API' else 'callFunction'}({js(target)}, arguments_);",
             ])
-        lines += ["void [context, input" + (", " + ", ".join(helpers) if helpers else "") + "];",
+        lines += ["void [context, input, argumentsFor, invokeFunction" + (", " + ", ".join(helpers) if helpers else "") + "];",
                   "// TODO: Implement computation, state writes, outputs and collaboration timing from spec.",
-                  f"return unimplemented({js(row['id'])});", "}"]
-        self.result.sources[path] = "\n".join(lines) + "\n"
+                  f"return unimplemented({js(row['id'])});", "}",
+                  f"registerFunction({js(row['id'])}, (environment, input) => {name}(context(environment), input as T.{symbol('Input', row['id'])}));"]
+        self._emit(path, lines)
         self._binding(row, path, name, "UI_FUNC", [
             "API_CLIENT::" + call["target_id"] if call["kind"] == "API" else call["target_id"] for call in row["calls"]])
         self._task(row, path, "function", "Implement the typed frontend function using its spec and provided collaboration helpers.")
 
     def _event(self, row: dict[str, Any]) -> None:
-        name, payload_name = symbol("event", row["id"]), symbol("payload", row["id"])
-        path = f"frontend/src/events/{name}.ts"
-        lines = ['import type * as React from "react";', 'import type * as T from "../types";',
-                 'import { argumentsFor, invokeFunction, unimplemented } from "../runtime/state";',
+        name, payload_name = self.behavior_symbols[row['id']], self.behavior_symbols[row['id']] + 'Payload'
+        path = self.event_files[row['id']]
+        lines = ['import type * as T from "../types";',
+                 'import { argumentsFor, context, invokeFunction, registerFunction, unimplemented } from "../runtime/state";',
                  'import type { Environment } from "../runtime/state";',
                  "// Blueprint: " + js(row),
-                 f"export async function {name}(environment: Environment, input: T.{symbol('Input', row['id'])}): Promise<void> {{",
-                 "const results: Record<string, unknown> = {};", "void [environment, input, results, argumentsFor, invokeFunction, unimplemented];"]
+                 f"async function {name}(environment: Environment, input: T.{symbol('Input', row['id'])}): Promise<void> {{",
+                 "const results: Record<string, unknown> = {};", "void [environment, input, results, argumentsFor, context, invokeFunction, registerFunction, unimplemented];"]
         for call in row["handlers"]:
+            target = call['target_id']
+            if self.function_files[target] != path:
+                lines.insert(0, f'import "{self._relative(path, self.function_files[target])}";')
             invocation = f"results[{js(call['id'])}] = await invokeFunction(environment, {js(call['target_id'])}, argumentsFor({js(call['arguments'])}, environment, input, results));"
             if "condition" in call:
                 # Prose conditions are real implementation work, never evaluated as code.
@@ -143,7 +180,7 @@ class FrontendReactLowerer:
                 self._task(row, path, "event_condition", "Implement the business condition on event handler " + call["id"] + ".")
             else:
                 lines.append(invocation)
-        lines += ["}", f"export function {payload_name}(event?: React.SyntheticEvent<HTMLElement>): T.{symbol('Input', row['id'])} {{", "void event;"]
+        lines += ["}", f"function {payload_name}(event?: React.SyntheticEvent<HTMLElement>): T.{symbol('Input', row['id'])} {{", "void event;"]
         fields = row["payload"]
         if not fields:
             lines.append("return {};")
@@ -163,21 +200,24 @@ class FrontendReactLowerer:
             lines.append(f"return unimplemented({js(row['id'] + ':payload')});")
             self._task(row, path, "event_payload", "Implement event payload extraction; the IR does not encode the mapping from DOM/item data to these fields.")
         lines.append("}")
-        self.result.sources[path] = "\n".join(lines) + "\n"
+        self._emit(path, lines)
         self._binding(row, path, name, "UI_EVENT", [call["target_id"] for call in row["handlers"]])
 
     def _ui(self, row: dict[str, Any]) -> None:
-        name = symbol("UI", row["id"])
-        path = f"frontend/src/components/{name}.tsx"
+        name = self.ui_symbols[row["id"]]
+        path = self.ui_files[row['id']]
+        def relative(target: str) -> str:
+            value = posixpath.relpath(target, posixpath.dirname(path))
+            value = posixpath.splitext(value)[0]
+            return value if value.startswith('.') else './' + value
         lines = ['import * as React from "react";', 'import { UIBoundary } from "../runtime/ui";',
                  'import type { UIProps } from "../runtime/ui";']
         for child in dict.fromkeys(row["children"]):
-            child_name = symbol("UI", child)
-            lines.append(f'import {{ {child_name} }} from "./{child_name}";')
+            child_name = self.ui_symbols[child]
+            if self.ui_files[child] != path:
+                lines.append(f'import {{ {child_name} }} from "{relative(self.ui_files[child])}";')
         events = [event for event in self.ir["events"] if event["ui_id"] == row["id"]]
         for event in events:
-            event_name = symbol("event", event["id"])
-            lines.append(f'import {{ {event_name}, {symbol("payload", event["id"])} }} from "../events/{event_name}";')
             if event["name"] not in {"activate", "change", "submit", "enter", "focus", "blur"}:
                 self.result.warnings.append(f"{event['id']}: semantic trigger {event['name']} requires a UI adapter implementation.")
                 self._task(event, path, "event_trigger", "Map the custom semantic trigger to a React interaction without changing its payload/function contract.")
@@ -198,18 +238,19 @@ class FrontendReactLowerer:
             pending.extend(child.get("children", []))
         if descendant_routes:
             node["descendantRoutes"] = descendant_routes
-        lines += ["// Blueprint: " + js(row), f"export function {name}({{ environment }}: UIProps) {{", "void React;",
+        exported = 'export ' if self.ui_units[row['id']] == row['id'] else ''
+        lines += ["// Blueprint: " + js(row), f"{exported}function {name}({{ environment }}: UIProps) {{", "void React;",
                   "return <UIBoundary environment={environment} node={" + js(node) + "}", "events={["]
         for event in events:
             lines.append("{ id: " + js(event["id"]) + ", name: " + js(event["name"]) +
-                         ", payload: " + symbol("payload", event["id"]) + ", execute: (env, input) => " +
-                         symbol("event", event["id"]) + "(env, input as TInput_" + symbol("event", event["id"]) + ") },")
+                         ", payload: " + self.behavior_symbols[event['id']] + 'Payload' + ", execute: (env, input) => " +
+                         self.behavior_symbols[event['id']] + "(env, input as TInput_" + symbol("event", event["id"]) + ") },")
         # Event payload types are imported only when used, avoiding unused imports.
         for event in events:
             lines.insert(0, f'import type {{ {symbol("Input", event["id"])} as TInput_{symbol("event", event["id"])} }} from "../types";')
-        children = "".join(f"<{symbol('UI', child)} environment={{scope}} />" for child in row["children"])
+        children = "".join(f"<{self.ui_symbols[child]} environment={{scope}} />" for child in row["children"])
         lines += ["]} renderChildren={(scope) => { void scope; return <>" + children + "</>; }} />;", "}"]
-        self.result.sources[path] = "\n".join(lines) + "\n"
+        self._emit(path, lines)
         self._binding(row, path, name, "UI", [*row["children"], *[event["id"] for event in events]])
         self._task(row, path, "ui", "Refine semantic controls, layout, styling and accessibility from the UI spec and optional visual references.")
         for data in self.ir["data"]:
@@ -217,20 +258,19 @@ class FrontendReactLowerer:
                 self._binding(data, "frontend/src/types.ts", None, "UI_DATA")
 
     def _app(self) -> None:
-        lines = ['import * as React from "react";', 'import { configure, createEnvironment, context, registerFunction } from "./runtime/state";',
+        root_path = posixpath.splitext(posixpath.relpath(self.ui_files[self.ir['root_ui_id']], 'frontend/src'))[0]
+        lines = ['import * as React from "react";', 'import { configure, createEnvironment } from "./runtime/state";',
                  'import { registerAPIs } from "./api/client";',
-                 f'import {{ {symbol("UI", self.ir["root_ui_id"])} }} from "./components/{symbol("UI", self.ir["root_ui_id"])}";']
-        for row in self.ir["functions"]:
-            name = symbol("fn", row["id"])
-            lines.append(f'import {{ {name} }} from "./functions/{name}";')
-            lines.append(f'import type {{ {symbol("Input", row["id"])} }} from "./types";')
+                 f'import {{ {self.ui_symbols[self.ir["root_ui_id"]]} }} from "./{root_path}";']
         routes = {row["id"]: row["route"] for row in self.ir["ui"] if "route" in row}
         data = [{key: row[key] for key in ("id", "scope_ui_id", "initial") if key in row} for row in self.ir["data"]]
-        lines += ["configure(" + js(data) + ", " + js(routes) + ");", "registerAPIs();", "void [context, registerFunction];"]
-        for row in self.ir["functions"]:
-            lines.append(f"registerFunction({js(row['id'])}, (environment, input) => {symbol('fn', row['id'])}(context(environment), input as {symbol('Input', row['id'])}));")
+        lines += ["configure(" + js(data) + ", " + js(routes) + ");", "registerAPIs();"]
+        # Shared modules register their handlers once when imported. Local handlers
+        # are registered by their owning UI module, preserving runtime ID dispatch.
+        for key in self.result.ui_plan['shared_function_ids']:
+            lines.insert(0, f'import "{self._relative("frontend/src/App.tsx", self.function_files[key])}";')
         lines += ["export default function App() {", "const [environment] = React.useState(createEnvironment);",
-                  f"return <{symbol('UI', self.ir['root_ui_id'])} environment={{environment}} />;", "}"]
+                  f"return <{self.ui_symbols[self.ir['root_ui_id']]} environment={{environment}} />;", "}"]
         self.result.sources["frontend/src/App.tsx"] = "\n".join(lines) + "\n"
         for row in self.ir["data"]:
             if row["scope_ui_id"] is None:
@@ -240,8 +280,9 @@ class FrontendReactLowerer:
         lines = ['import { registerAPI } from "../runtime/state";']
         self.result.sources["frontend/src/api/transport.ts"] = API_TRANSPORT
         registrations = []
+        names = api_symbols(self.types.apis)
         for key, api in self.types.apis.items():
-            name = symbol("api", key)
+            name = names[key]
             route = self.routes.get(key)
             inp, out = symbol("Input", key), symbol("Output", key)
             body = ['import type * as T from "../types";', 'import { request } from "./transport";',
