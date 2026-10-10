@@ -19,17 +19,18 @@ arc = "main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+py-modules = ["main"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = [
-  "arc_agents",
-  "arc_agents.*",
-  "arcbench_agent_runtime",
-  "arcbench_agent_runtime.*",
   "compiler",
   "compiler.*",
-  "core",
-  "core.*",
+  "cli",
+  "cli.*",
+  "model",
+  "model.*",
+  "utils",
+  "utils.*",
 ]

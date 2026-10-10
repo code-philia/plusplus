@@ -12,12 +12,12 @@ from pathlib import Path
 # Allow direct execution without installing the compiler package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from main import _ensure_dotenv_loaded, _locate_requirement_file
-from arcbench_agent_runtime.jsonio import write_json_atomic
-from compiler.artifacts import CompilerArtifactStore
+from cli.commands import _ensure_dotenv_loaded, _locate_requirement_file
+from utils.jsonio import write_json_atomic
+from compiler.runtime.artifacts import CompilerArtifactStore
 from compiler.database_design import DatabaseSchemaPass
-from compiler.model_client import Model, ModelConfigurationError
-from compiler.preprocessing_stage import RequirementPreprocessor
+from model.client import Model, ModelConfigurationError
+from compiler.preprocessing.stage import RequirementPreprocessor
 
 
 def main(argv: list[str] | None = None) -> int:

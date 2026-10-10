@@ -17,8 +17,10 @@ Please first check whether a similar issue or pull request already exists.
 Useful repository areas:
 
 - `src/compiler/`: compiler passes, IR validation, and deterministic lowering
-- `src/core/`: CLI presentation, configuration, and workflow orchestration
-- `src/arcbench_agent_runtime/`: artifact I/O and traceability runtime
+- `src/cli/`: command parsing, presentation, and configuration
+- `src/compiler/runtime/`: compilation workspace, artifacts, checkpoints, and traceability
+- `src/model/`: model interfaces, transport, structured calls, and usage records
+- `src/utils/`: shared logging, Git commands, process execution, and JSON I/O
 - `docs/`: current pipeline contracts and stage guides
 - `README.md`: project overview and research context
 

@@ -17,10 +17,10 @@
 [![CLI](https://img.shields.io/badge/Interface-CLI-16a34a.svg)](#cli-usage)
 [![Status](https://img.shields.io/badge/Status-Active%20Build-9333ea.svg)](#news)
 
-> ARC uses a deterministic compiler controller. Models may later execute schema-constrained semantic passes, but they do not control parsing, linking, scheduling, freezing, or repository permissions.
+> ARC uses a deterministic compiler controller. Models execute schema-constrained design passes; the controller owns stage scheduling, artifact persistence, lowering and implementation permissions.
 
 > [!IMPORTANT]
-> The codebase is being migrated from the original staged-agent implementation to the compiler architecture in [docs/guide.md](docs/guide.md). The deterministic requirement front end is implemented; discovery, design, lowering, implementation, and acceptance passes are still pending. Until those passes land, `arc compile` intentionally exits non-zero after writing front-end artifacts rather than claiming that a runnable application was produced.
+> The current web pipeline connects project initialization, requirement preprocessing, database/backend/frontend design, static lowering, and test-driven implementation. The implemented target is React 18, Tailwind 4, Express, Drizzle and SQLite. Lowering produces infrastructure and business placeholders; implementation completes business behavior. See [compiler pipeline](src/compiler/README.md) for the current stages and artifacts.
 
 ## News &#x2728;
 
@@ -44,7 +44,7 @@ ARC takes a compiler-oriented view instead:
 - Tests are not just verification. They are executable constraints.
 - Traceability is not optional metadata. It is part of the system contract.
 
-In practice, ARC parses requirements into versioned intermediate representations, resolves dependencies into a graph, and records every accepted transformation as traceable artifacts.
+In practice, ARC parses requirements into intermediate representations, resolves dependencies into a graph, and records every accepted transformation as traceable artifacts.
 
 ## What ARC Does
 
@@ -54,8 +54,8 @@ ARC is designed as a requirement-to-system compiler with a staged pipeline:
 | --- | --- |
 | **Structured requirement modeling** | Consumes a hierarchical requirement tree with dependencies, scenarios, and optional multimodal references such as screenshots or design assets. |
 | **Deterministic front end** | Normalizes FOLDER/ATOMIC nodes, assigns stable scenario IDs, preserves provenance, validates dependencies, and emits topological ATOMIC implementation waves. |
-| **Global design (planned)** | Builds Fact IR and a Global Symbol Table before lowering frozen Design IR into a whole-program skeleton. |
-| **Constrained implementation (planned)** | Generates requirement and contract tests, then grants workers write capability only for declared implementation regions. |
+| **System design and lowering** | Builds ER, database-neutral Schema IR, Backend IR and Frontend IR, then statically lowers them to the initialized web stack. |
+| **Constrained implementation** | Generates requirement and contract tests, then grants workers write capability for declared implementation surfaces. |
 | **Traceability by default** | Records the requirement-to-interface-to-test-to-code chain instead of treating generation as a black box. |
 
 ## Getting Started
@@ -66,7 +66,7 @@ Use the following setup as a practical baseline. The installation example below 
 
 - [Python 3.11+](https://www.python.org/downloads/)
 - A virtual environment and package manager such as [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
-- An OpenAI-compatible API endpoint and model is optional until semantic passes are enabled
+- An OpenAI-compatible API endpoint and model for design and implementation passes
 
 Additional requirements for web generation:
 - [Node.js 20+](https://nodejs.org/en/download) with [`pnpm`](https://pnpm.io/installation)
@@ -120,7 +120,7 @@ cp .env_example .env
 Edit `.env` with your configuration:
 
 ```bash
-# Optional: semantic model passes
+# Model configuration for design and implementation passes
 OPENAI_API_KEY=sk-your-api-key-here
 OPENAI_BASE_URL=https://api.openai.com/v1
 MODEL=gpt-5.6
@@ -145,8 +145,8 @@ At minimum, ARC expects:
 
 Conceptually, ARC produces three layers of output:
 
-- **Compiler artifacts**: Requirement IR, dependency graph, and later Fact/Design/Module IR
-- **Runnable system**: the generated target project after all compiler passes are implemented
+- **Compiler artifacts**: Requirement IR, dependency graph, ER model, Schema IR, Backend IR, Frontend IR and lowering manifests
+- **Runnable system**: the generated target project with business behavior completed through implementation
 - **Execution memory**: queue state, debug logs, and intermediate compiler artifacts
 - **Audit trail**: traceability records and git history that explain how requirements became code
 
@@ -175,7 +175,6 @@ arc compile /path/to/my-requirement-dir -o workspace/output
 
 ```bash
 arc compile example/ticketbooking-demo -o workspace/demo \
-  --type web \
   --port 3301 \
   --clean
 ```
@@ -194,22 +193,26 @@ Run `arc --help` or `arc compile --help` for detailed usage.
 | --- | --- |
 | `requirement_path` | Requirement directory containing `requirements.yaml` |
 | `-o, --output-dir` | Output workspace directory (required) |
-| `-t, --type` | Application type: `web`, `android`, or `cli` (default: `web`) |
-| `--port` | Backend port for web applications (default: 3301) |
+| `--port` | Backend port (default: `ARC_WEB_PORT`, then 3000) |
 | `--clean` | Remove existing output directory before compilation |
-| `--resume` | Resume from saved compilation queue |
-| `--retry-failed` | Retry all failed nodes (requires `--resume`) |
-| `--retry NODE_ID...` | Retry specific node IDs (requires `--resume`) |
+| `--resume` | Continue unstarted TDD requirements from the current lowered checkpoint |
+| `--start-from` | Restart after a committed stage in an isolated Git worktree |
+| `--checkpoint-ref` | Select a checkpoint commit or tag |
+| `--restart-output` | Directory for the new restart worktree |
 
 #### Runtime behavior
 
 - Compilation artifacts are written beneath `<output-dir>/.arc/`.
-- `.arc/compiler/requirement_ir.json` contains the normalized source representation and provenance.
-- `.arc/compiler/dependency_graph.json` contains explicit and effective ATOMIC dependencies plus implementation waves.
-- `.arc/compiler/database_facts/` checkpoints one bounded database-fact result per ATOMIC requirement.
-- `.arc/compiler/database_schema.json` contains the deterministically merged whole-system database schema.
-- `.arc/processing_queue.json` is a versioned pass queue; it no longer represents per-node agent sessions.
-- `arc compile --resume` reuses a node fact only when its requirement context and prompt version hashes still match.
+- `.arc/preprocessing/requirement_ir.json` contains the normalized source representation and provenance.
+- `.arc/preprocessing/dependency_graph.json` contains explicit and effective ATOMIC dependencies plus implementation waves.
+- `.arc/design/database/er_model.json` contains the logical ER model.
+- `.arc/design/database/schema.json` contains database-neutral relational Schema IR.
+- `compiler/database_lowering/` selects a database strategy; the current SQLite strategy statically generates DDL, Drizzle bindings, connections and table initialization without executing SQL or generating fixtures.
+- `.arc/lowering/database/` contains the database lowering report and manifest. Generated DDL is written to `backend/sql/schema.sqlite.sql`; `backend/src/db/init.ts` initializes tables explicitly.
+- Generated application and support-script sources use TypeScript with ESM. Node workspaces use NodeNext; development and scripts use `tsx`, while production runs compiled `dist/*.js`. Database sources are consolidated into `backend/src/db/schema.ts`, `client.ts`, `initialize.ts`, and `init.ts`.
+- `.arc/design/backend/backend_ir.json` and `.arc/design/frontend/frontend_ir.json` are the authoritative backend and frontend designs.
+- `.arc/lowering/backend/` and `.arc/lowering/frontend/` record generated files, bindings and implementation tasks.
+- `.arc/checkpoints/current.json` records committed stage snapshots. `arc compile --resume` continues implementation from the current lowered checkpoint; `--start-from` selects a committed stage. Historical IR layouts are not reconstructed automatically.
 
 ## Visualization
 

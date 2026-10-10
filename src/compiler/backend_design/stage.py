@@ -11,10 +11,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from arcbench_agent_runtime.jsonio import write_json_atomic
-from core.logging import SynchronousLog
-from ..model_client import StructuredModel, describe_model_error
-from ..requirement_traversal import children_by_id, postorder
+from utils.jsonio import write_json_atomic
+from utils.logging import SynchronousLog
+from model.contracts import StructuredModel
+from model.client import describe_model_error
+from compiler.preprocessing.traversal import children_by_id, postorder
 from .contracts import (
     ANALYSIS_SCHEMA, ARCHITECTURE_SCHEMA,
     ANALYSIS_PROMPT, ARCHITECTURE_PROMPT,

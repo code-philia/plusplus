@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..typescript_format import format_typescript
+from compiler.lowering.formatting import format_typescript
 from .runtime import STATE_RUNTIME, UI_RUNTIME
 from .types import Types, js, symbol
 from .planning import plan_ui_units, plan_behavior, api_symbols

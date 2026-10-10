@@ -10,11 +10,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from core.logging import SynchronousLog
+from utils.logging import SynchronousLog
 
 from ..ir import SchemaIR
-from ..model_client import StructuredModel, describe_model_error
-from ..trace_payload import format_payload_trace
+from model.contracts import StructuredModel
+from model.client import describe_model_error
+from utils.trace import format_payload_trace
 from .common import _format_error
 from .contracts import (
     ENTITY_DECISION_SCHEMA,

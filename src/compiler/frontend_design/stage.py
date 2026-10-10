@@ -8,12 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from arcbench_agent_runtime.jsonio import write_json_atomic
-from core.logging import SynchronousLog
+from utils.jsonio import write_json_atomic
+from utils.logging import SynchronousLog
 
-from ..model_client import StructuredModel, describe_model_error
-from ..requirement_traversal import children_by_id, postorder
-from ..visual_reference import ResolvedVisualReference, VisualModel, VisualStructuredModel
+from model.contracts import StructuredModel
+from model.client import describe_model_error
+from compiler.preprocessing.traversal import children_by_id, postorder
+from compiler.preprocessing.visual import ResolvedVisualReference
+from model.vision import VisualModel
+from model.contracts import VisualStructuredModel
 from .contracts import PHASE_TABLES, PROMPTS, patch_schema
 from .context import TABLES, frontend_ir_traceability, local_context, ranked, required_types
 

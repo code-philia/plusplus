@@ -8,9 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from arcbench_agent_runtime.jsonio import write_json_atomic
+from utils.jsonio import write_json_atomic
 
-from ..artifacts import CompilerArtifactStore
+from compiler.runtime.artifacts import CompilerArtifactStore
 from ..database_design import validate_schema_ir
 from ..lowering.files import GlobalFilePlanner
 from ..lowering.types import TypeLowerer

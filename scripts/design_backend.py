@@ -14,10 +14,10 @@ from pathlib import Path
 # Allow direct execution without installing the compiler package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from main import build_compile_parser, _ensure_dotenv_loaded, _locate_requirement_file
-from compiler.artifacts import CompilerArtifactStore
+from cli.commands import build_compile_parser, _ensure_dotenv_loaded, _locate_requirement_file
+from compiler.runtime.artifacts import CompilerArtifactStore
 from compiler.backend_design import BackendDesignPass
-from compiler.model_client import Model
+from model.client import Model
 
 
 def main(argv: list[str] | None = None) -> int:
