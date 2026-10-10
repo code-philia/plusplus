@@ -79,12 +79,20 @@ class CompilerArtifactStore:
         """Persist incremental design, including partial results, without the legacy validator."""
         from .frontend_generation import ui_data_associations
         paths: dict[str, str] = {}
-        for table in ("components", "data", "ui", "properties", "events", "handlers", "effects", "api_dependencies"):
+        canonical = frontend_ir.get("ir_kind") == "frontend_design"
+        if canonical:
+            canonical_path = self.frontend_design_root / "frontend_ir.json"
+            write_json_atomic(canonical_path, frontend_ir)
+            paths["frontend_ir"] = str(canonical_path)
+        tables = ("ui", "data", "events", "functions", "types") if canonical else (
+            "components", "data", "ui", "properties", "events", "handlers", "effects", "api_dependencies")
+        for table in tables:
             path = self.frontend_design_root / f"{table}.json"
             write_json_atomic(path, {table: frontend_ir.get(table, [])})
             paths[f"frontend_{table}"] = str(path)
         metadata_path = self.frontend_design_root / "metadata.json"
-        write_json_atomic(metadata_path, {"root_component_id": frontend_ir.get("root_component_id")})
+        write_json_atomic(metadata_path, {key: frontend_ir[key] for key in
+            ("ir_kind", "backend_ref", "root_ui_id", "root_component_id") if key in frontend_ir})
         paths["frontend_metadata"] = str(metadata_path)
         visual_path = self.frontend_design_root / "visual_references.json"
         write_json_atomic(visual_path, {"visual_references": frontend_ir.get("visual_references", [])})

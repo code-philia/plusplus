@@ -468,7 +468,8 @@ class Compiler:
 
         # Keep canonical blueprints in design artifacts/checkpoints. Existing
         # consumers receive a deterministic view, never a second model design.
-        design = SimpleNamespace(design_ir=project_lowering_design(design.design_ir))
+        backend_blueprint = design.design_ir
+        design = SimpleNamespace(design_ir=project_lowering_design(backend_blueprint))
 
         # ===================================================================
         #                  Backend Lowering: Symbol Planning
@@ -740,12 +741,12 @@ class Compiler:
                 artifacts["frontend_visual_references"] = str(visual_path)
             await self._log(
                 "Compiler",
-                "Generating frontend IR in three requirement-scheduled passes: UI/data, component assembly, behavior.",
+                "Generating frontend IR in four passes: system topology, UI hierarchy/reuse, data bindings, events/functions/API integration; no review or validation.",
             )
             frontend = FrontendIRGenerationPass(model, artifact_store.root).compile(
                 preprocessing.requirement_ir,
                 preprocessing.dependency_graph,
-                design.design_ir,
+                backend_blueprint,
                 visuals.references,
                 visual_analysis.references,
             )

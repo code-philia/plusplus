@@ -108,6 +108,8 @@ class TraceabilityStore:
             "event_ids",
             "handler_ids",
             "effect_ids",
+            "function_ids",
+            "api_ids",
         }
         for requirement_id, frontend_links in sorted(links.items()):
             row = requirements.get(requirement_id)

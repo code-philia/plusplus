@@ -84,8 +84,8 @@ def validate_snapshot(snapshot: Any, stage: str) -> None:
         raise ValueError("Partial frontend IR cannot be used as a checkpoint")
     if stage in {"frontend-ir", "lowered"}:
         frontend = payload["frontend"].get("frontend_ir")
-        if not isinstance(frontend, dict) or not frontend.get("root_component_id"):
-            raise ValueError("Checkpoint requires the new seven-entity frontend IR")
+        if not isinstance(frontend, dict) or not (frontend.get("root_ui_id") or frontend.get("root_component_id")):
+            raise ValueError("Checkpoint has no frontend UI root")
 
 
 def prepare_restart(source: Path, stage: str, revision: str | None = None,
@@ -185,23 +185,26 @@ def legacy_snapshot(history: ProjectGitHistory, commit: str, stage: str) -> dict
         except Exception:
             pass  # Historical projects predating backend blueprints.
     if stage in {"frontend-ir", "lowered"}:
-        frontend_tables = {}
-        for table in ("components", "data", "ui", "properties", "events", "handlers", "effects", "api_dependencies"):
-            frontend_tables[table] = read_first(
-                f".arc/design/frontend/{table}.json",
-                ".arc/design/frontend/frontend.json",
-            ).get(table, [])
-        metadata = read_first(".arc/design/frontend/metadata.json", ".arc/design/frontend/frontend.json")
-        frontend_ir = {"root_component_id": metadata.get("root_component_id") or next(
-            (row["id"] for row in frontend_tables["components"] if row.get("name") == "App"), None
-        ), **frontend_tables}
-        visual = read_first(".arc/design/frontend/visual_references.json", ".arc/design/frontend/visual-references.json")
-        frontend_ir["visual_references"] = visual.get("visual_references", [])
+        try:
+            frontend_ir = read(".arc/design/frontend/frontend_ir.json")
+        except Exception:
+            frontend_tables = {}
+            for table in ("components", "data", "ui", "properties", "events", "handlers", "effects", "api_dependencies"):
+                frontend_tables[table] = read_first(
+                    f".arc/design/frontend/{table}.json",
+                    ".arc/design/frontend/frontend.json",
+                ).get(table, [])
+            metadata = read_first(".arc/design/frontend/metadata.json", ".arc/design/frontend/frontend.json")
+            frontend_ir = {"root_component_id": metadata.get("root_component_id") or next(
+                (row["id"] for row in frontend_tables["components"] if row.get("name") == "App"), None
+            ), **frontend_tables}
+            visual = read_first(".arc/design/frontend/visual_references.json", ".arc/design/frontend/visual-references.json")
+            frontend_ir["visual_references"] = visual.get("visual_references", [])
         payload["frontend"] = {"frontend_ir": frontend_ir,
                                "report": read_first(".arc/design/frontend/report.json")}
         if payload["frontend"]["report"]["status"] not in {"GENERATED", "GENERATED_WITH_WARNINGS"}:
             raise ValueError("Historical frontend IR is partial; select backend-ir instead")
-        if "root_component_id" not in payload["frontend"]["frontend_ir"]:
+        if not (frontend_ir.get("root_ui_id") or frontend_ir.get("root_component_id")):
             raise ValueError("Historical Thin Frontend IR is not supported")
     if stage == "lowered" and read_first(".arc/lowering/frontend/lowering.json", ".arc/code/frontend/lowering.json").get("build_status") != "PASSED":
         raise ValueError("Historical lowering has no successful build record")

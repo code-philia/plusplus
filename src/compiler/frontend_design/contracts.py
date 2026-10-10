@@ -1,0 +1,150 @@
+"""Model output shapes and instructions; no output validation is performed."""
+from __future__ import annotations
+
+import types
+from typing import Any, ForwardRef, Literal, NotRequired, Required, Union, get_args, get_origin, get_type_hints, is_typeddict
+
+from ..ir.frontend import UINode, UIData, UIEvent, UIFunction
+from ..ir.backend import BackendTypeDefinition
+
+TABLE_TYPES = {"ui": UINode, "data": UIData, "events": UIEvent,
+               "functions": UIFunction, "types": BackendTypeDefinition}
+PHASE_TABLES = {
+    "topology": ("ui",),
+    "ui": ("ui",),
+    "data": ("ui", "data", "types"),
+    "interaction": ("ui", "data", "types", "events", "functions"),
+}
+
+
+def patch_schema(phase: str) -> dict[str, Any]:
+    """Derive full-record delta shapes from the shared IR TypedDicts."""
+    defs: dict[str, Any] = {
+        "JSONValue": {"anyOf": [
+            {"type": "string"}, {"type": "number"}, {"type": "boolean"}, {"type": "null"},
+            {"type": "array", "items": {"$ref": "#/$defs/JSONValue"}},
+            {"type": "object", "additionalProperties": {"$ref": "#/$defs/JSONValue"}},
+        ]},
+    }
+
+    def convert(annotation: Any) -> dict[str, Any]:
+        origin, args = get_origin(annotation), get_args(annotation)
+        if isinstance(annotation, ForwardRef):
+            return {"$ref": "#/$defs/" + annotation.__forward_arg__}
+        if origin in (Required, NotRequired):
+            return convert(args[0])
+        if origin is Literal:
+            return {"enum": list(args)}
+        if origin in (Union, types.UnionType):
+            return {"anyOf": [convert(item) for item in args]}
+        if origin is list:
+            return {"type": "array", "items": convert(args[0])}
+        if origin is dict:
+            return {"type": "object", "additionalProperties": convert(args[1])}
+        if is_typeddict(annotation):
+            name = annotation.__name__
+            if name not in defs:
+                defs[name] = {}
+                hints = get_type_hints(annotation, include_extras=True)
+                defs[name] = {"type": "object", "additionalProperties": False,
+                    "properties": {key: convert(value) for key, value in hints.items()},
+                    "required": [key for key, value in hints.items() if get_origin(value) is not NotRequired]}
+            return {"$ref": "#/$defs/" + name}
+        return {"type": {str: "string", int: "integer", float: "number", bool: "boolean", type(None): "null"}[annotation]}
+
+    def obj(properties: dict[str, Any]) -> dict[str, Any]:
+        return {"type": "object", "additionalProperties": False,
+                "properties": properties, "required": list(properties)}
+
+    strings = {"type": "array", "items": {"type": "string"}}
+    tables = PHASE_TABLES[phase]
+    schema = obj({
+        "upserts": obj({table: {"type": "array", "items": convert(TABLE_TYPES[table])} for table in tables}),
+        "deletes": obj({table: strings for table in tables}),
+        "reuse_ids": strings,
+    })
+    return {**schema, "$defs": defs, "x-arc-output-mode": "json_object"}
+
+
+COMMON = """Design a technology-neutral frontend blueprint from requirements and optional visual evidence.
+Return only the requested JSON delta. No components, React, JSX, DOM elements, CSS, HTTP routes,
+files, stores, handlers/effects tables, version, audit, scores or validation results.
+The UI tree is a semantic composition tree, not a framework component tree.
+Use supplied exact IDs for existing objects; use the supplied new_id_prefix plus meaningful suffixes
+for new objects (e.g. <prefix>ui.query, <prefix>fn.search, <prefix>data.query).
+For every changed/new object return its COMPLETE final record in upserts, not a field patch.
+For unchanged reused objects return their IDs in reuse_ids, not duplicate records.
+deletes contains only IDs intentionally superseded by your design changes. Otherwise use empty lists.
+Keep all existing requirement_ids when changing shared objects. Add current requirement attribution.
+Existing shared responsibilities must survive changes. Read supplied related requirement scenarios.
+Do not invent product behaviors. Parent requirements describe shared composition; do not duplicate
+child-specific UI and behavior. Backend-only requirements may return an entirely empty delta.
+The compiler maintains root_ui_id; preserve that root. children are ordered IDs, not embedded nodes.
+Every non-root UI has ONE parent. Reusing the same surface means referencing/updating its existing
+node at its existing position, never attaching it to a second parent. Similar controls at different
+locations are distinct UI instances; reuse their data/functions where appropriate. Repeated items
+use repeat, not copied subtrees. To move a UI update both old and new parent children.
+scope_ui_id=null means shared application data; otherwise local to that UI subtree instance.
+Only bind/read/write scoped data from within its owner subtree. A shared function reused across
+screens needs explicit typed inputs or shared data; do not capture a different screen's local state.
+Values: {kind:literal,value:JSON}, or {kind:data|input|result|item,id:string,path?:[string|integer]}.
+UI bindings use literal/data/item only. input refers to current event payload/function input semantic_id.
+result refers to an earlier local call ID and its output semantic_id in path[0]. item refers to a
+current/ancestor repeat UI ID. No executable expressions; derived values use ordinary functions.
+Fields: semantic_id,name,type,required,nullable,description. Types use scalar/array/named exactly
+as backend IR. Scalars: string,integer,number,boolean,date,datetime,json,uuid.
+Reuse backend named types; put only frontend-specific definitions in types.
+UI kinds: screen,group,text,input,choice,action,image,list,feedback.
+bindings keys are semantic attributes such as label,value,options,visible,enabled,items.
+presentation is optional natural-language layout/visual intent. Reference images are optional;
+use only supplied visual_reference_ids and preserve their relevant layout and visual cues.
+"""
+
+PROMPTS = {
+    "topology": COMMON + """
+Pass 1: plan application topology from the requirement catalog. Create only screens and shared
+structural groups. Give screens logical routes when required. Compose them under the existing root.
+Identify common navigation/header/footer regions once, at the appropriate shared ancestor.
+Attribute each surface to ALL relevant supplied requirements so subsequent local passes find it.
+Do not enumerate leaf controls, data, events or functions. If a surface already exists, refine/reuse it.
+This is a design pass, not a review. Use a minimal hierarchy that later requirements can expand.
+""",
+    "ui": COMMON + """
+Pass 2: discover/refine the current requirement's UI subtree using existing topology and reuse
+candidates. Add semantic regions, text, controls, list containers and feedback as required.
+Place all new nodes into the tree by returning updated parent records, including shared ancestors.
+Reuse the existing screen/surface rather than creating a new screen for every requirement.
+Define visual composition and static bindings now; leave dynamic bindings for the next pass.
+Do not create data/events/functions. Preserve already established shared layouts and sibling nodes.
+""",
+    "data": COMMON + """
+Pass 3: define typed frontend data and UI bindings for this requirement's committed UI.
+Reuse existing state when its meaning, lifecycle and type match. Use local subtree scope by default;
+promote genuinely shared state to the nearest shared ancestor or application scope.
+Cover user input, display results, loading, empty/error/selection states as requirements need them.
+Include initialization rules in data spec. Omitted initial means uninitialized, not null.
+Use supplied backend API types for data crossing the API boundary, preserving named type IDs.
+Complete repeat source and stable item keys, dynamic visible/enabled/value/items bindings.
+If a derived value is needed, define its data slot and describe the required computation for the
+interaction pass. Never insert code or expression strings. Do not create events or functions yet.
+""",
+    "interaction": COMMON + """
+Pass 4: mount semantic events on existing UI nodes and connect ordered frontend function calls.
+Complete the full interaction: payload -> function arguments -> state reads -> backend API calls ->
+result/state writes -> bound UI, including initialization/enter, derived state recomputation,
+local-only actions, navigation and applicable success/failure/loading/empty behavior.
+Reuse an existing function only when its interface and responsibilities match; otherwise create one.
+Events use name activate/change/submit/enter etc., payload fields, handlers (ordered FUNC calls only).
+Functions have inputs/outputs, direct reads/writes of data IDs, and ordered calls (FUNC or API).
+API target_id must copy a supplied backend API ID exactly. arguments keys are its INPUT semantic_ids.
+Never call backend FUNC/DB or pass backend trusted context as client arguments. Copy output types.
+Each function spec must state how inputs/results become outputs/state, conditions, navigation targets,
+and applicable error, reentry/concurrency rules. reads/writes lists alone are not behavior.
+Call failures stop the list unless caller spec explicitly defines handling; never use a skipped result
+unconditionally. Specify call interleaving with local computations in spec; no executable step DSL.
+Preserve shared function behavior for its original requirements when updating it.
+If no available API supplies a required capability, do not invent one; describe the unresolved
+integration in function spec while still designing the local UI/interaction.
+This pass generates behavior; do not audit or reject the existing design.
+""",
+}

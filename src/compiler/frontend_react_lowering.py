@@ -63,6 +63,8 @@ class FrontendReactLowerer:
 
     def lower(self, ir: dict[str, Any], backend_design: dict[str, Any],
               backend_routes: dict[str, Any], backend_port: int) -> ReactLoweringResult:
+        from .frontend_design.projection import project_skeleton_ir
+        ir = project_skeleton_ir(ir, backend_design)
         self.result = ReactLoweringResult()
         self.ir = ir
         self.rows: dict[str, dict[str, Any]] = {}
@@ -324,7 +326,7 @@ class FrontendReactLowerer:
     def _contract_comment(self, row: dict[str, Any]) -> str:
         """Preserve deterministic design facts beside the generated declaration."""
         facts = {key: self._contract_value(row[key]) for key in (
-            "spec", "ui_root_id", "source_ui_id", "event_id", "handler_id", "handlers",
+            "spec", "blueprint", "ui_root_id", "source_ui_id", "event_id", "handler_id", "handlers",
             "reads", "writes", "invokes", "emits", "target", "dependencies", "activation",
             "async_policy", "cleanup", "trigger", "ui_id", "handler_ids", "event_name", "arguments",
         ) if row.get(key) not in (None, [], "")}
@@ -390,7 +392,8 @@ class FrontendReactLowerer:
             for p in ready:
                 n, typ = self.symbol(p["id"]), ts_type(p["type"])
                 if p["kind"] == "STATE":
-                    lines.append(f"const [{n}, set_{n}] = React.useState<{typ}>(() => ({self.expr(p['initial'])}));")
+                    initial = self.expr(p['initial']) if p.get("initial") is not None else f"undefined as unknown as {typ}"
+                    lines.append(f"const [{n}, set_{n}] = React.useState<{typ}>(() => ({initial}));")
                 elif p["kind"] == "REF":
                     lines.append(f"const {n} = React.useRef<{typ}>({self.expr(p['initial'])});")
                     lines.append(f"const set_{n} = (value: {typ}) => {{ {n}.current = value; }};")
