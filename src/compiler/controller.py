@@ -19,7 +19,7 @@ from .database_design import (
 )
 from .database_lowering import lower_database
 from .backend_design import BackendDesignPass, design_traceability
-from .backend_design.projection import project_lowering_design
+from .backend_lowering.projection import project_lowering_design
 from .frontend_design import FrontendIRGenerationPass, frontend_ir_traceability
 from .frontend_lowering import FrontendReactLowerer
 from .git_history import GitStageError, ProjectGitHistory

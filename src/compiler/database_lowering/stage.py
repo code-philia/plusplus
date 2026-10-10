@@ -12,9 +12,9 @@ from arcbench_agent_runtime.jsonio import write_json_atomic
 
 from ..artifacts import CompilerArtifactStore
 from ..database_design import validate_schema_ir
-from ..file_planning import GlobalFilePlanner
-from ..skeleton_lowering import TypeLowerer
-from ..symbol_planning import GlobalSymbolPlanner
+from ..lowering.files import GlobalFilePlanner
+from ..lowering.types import TypeLowerer
+from ..lowering.symbols import GlobalSymbolPlanner
 from .strategy import get_strategy
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..module_lowering import _relative_specifier, _group_imports, RUNTIME_IMPORTS, DRIZZLE_OPERATORS
+from .skeletons import _relative_specifier, _group_imports, RUNTIME_IMPORTS, DRIZZLE_OPERATORS
 
 
 def render_blueprint_module(kind: str, module: dict[str, Any], symbol: dict[str, Any],

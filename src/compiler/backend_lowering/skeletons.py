@@ -489,7 +489,7 @@ def _render_module(
     current_path: str,
     context_contract: dict[str, Any] | None = None,
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
-    from .backend_lowering.modules import render_blueprint_module
+    from .modules import render_blueprint_module
     return render_blueprint_module(kind, module, function_symbol, input_contract,
                                    output_contract, context_contract, dependencies,
                                    database_rows, current_path)

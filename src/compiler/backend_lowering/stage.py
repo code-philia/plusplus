@@ -11,13 +11,13 @@ from typing import Any
 
 from arcbench_agent_runtime.jsonio import write_json_atomic
 from ..artifacts import CompilerArtifactStore
-from ..backend_design.projection import project_lowering_design
+from .projection import project_lowering_design
 from ..backend_design.validation import validate_backend_ir
 from ..database_design import validate_schema_ir
-from ..file_planning import GlobalFilePlanner
-from ..module_lowering import ModuleSkeletonLowerer
-from ..skeleton_lowering import TypeLowerer
-from ..symbol_planning import GlobalSymbolPlanner
+from ..lowering.files import GlobalFilePlanner
+from .skeletons import ModuleSkeletonLowerer
+from ..lowering.types import TypeLowerer
+from ..lowering.symbols import GlobalSymbolPlanner
 from .glue import BackendGlueLowerer
 
 PROFILE = 'web-react18-tailwind4-express-drizzle-sqlite'
