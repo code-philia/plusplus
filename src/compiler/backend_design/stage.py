@@ -1,7 +1,7 @@
 """Postorder leaf design and single-pass parent integration using existing APIs."""
 from __future__ import annotations
 
-from ..ir import table_constraints
+from ..ir import table_constraints, module_fields
 
 import copy
 import hashlib
@@ -113,7 +113,7 @@ def _candidates(ir: dict[str, Any], rid: str, dependencies: dict[str, Any], tabl
     scored = []
     for module in modules.values():
         graph = reachable([module['id']], modules)
-        data = {access['table'] for key in graph for access in modules[key]['data_access']}
+        data = {access['table'] for key in graph for access in modules[key].get('data_access', [])}
         overlap = len(tokens & set(re.findall(r'\w+', module['spec'].lower())))
         score = 20 * len(data & tables) + 30 * bool(set(module['requirement_ids']) & ancestors) + overlap
         if score:
@@ -182,8 +182,9 @@ class BackendDesignPass:
     def compile(self, requirement_ir: dict[str, Any], dependency_graph: dict[str, Any], database_schema: dict[str, Any]) -> BackendDesignResult:
         ir = {'ir_kind': 'backend_design',
               'schema_ref': '.arc/design/database/schema.json', 'schema_hash': _hash(database_schema),
-              'types': [], 'requirements': [], 'modules': []}
+              'types': [], 'modules': []}
         states, errors = {}, []
+        self.pending_capabilities = []
         self.sequence = 0
         self.node_order = []
         self.inherited_context = []
@@ -272,10 +273,8 @@ class BackendDesignPass:
                 states[rid] = 'FAILED'
                 errors.append(f'{rid}: {exc}')
                 self.log.info(f'REQUIREMENT_FAILED {exc}', node_id=rid)
-        self.log.info(f'GLOBAL_VALIDATION_STARTED requirements={len(ir["requirements"])} modules={len(ir["modules"])}')
+        self.log.info(f'GLOBAL_VALIDATION_STARTED modules={len(ir["modules"])}')
         errors += validate_backend_ir(ir, database_schema, scenarios)
-        if {key for _, key in events} != {row['requirement_id'] for row in ir['requirements']}:
-            errors.append('Final backend IR does not cover every requirement tree node')
         return self._finish(ir, states, errors)
 
     def _analyze(self, ir: dict[str, Any], rid: str, requirement: dict[str, Any], schema: dict[str, Any], dependencies: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -285,7 +284,7 @@ class BackendDesignPass:
                    'scenario_ids': sorted(_scenario_ids(requirement, rid)), 'related_data': related,
                    'ancestor_context': self.inherited_context,
                    'schema_index': [{'name': row['name'], 'description': row['description']} for row in schema['tables']],
-                   'types': ir['types'], 'dependency_requirements': [row for row in ir['requirements'] if row['requirement_id'] in _closure(rid, dependencies)],
+                   'types': ir['types'], 'dependency_requirements': [copy.deepcopy(nodes) for key, nodes in self.requirement_nodes.items() if key in _closure(rid, dependencies)],
                    'existing_modules': _candidates(ir, rid, dependencies, set(related), str(requirement))}
         self.log.info(f'ANALYSIS_CONTEXT tables={len(context["tables"])} '
                       f'existing_modules={len(payload["existing_modules"])}', node_id=rid)
@@ -362,11 +361,11 @@ class BackendDesignPass:
                 if module['kind'] == 'API':
                     for direction in ('inputs', 'context', 'outputs'):
                         catalog = {row['semantic_id']: row for row in analysis[direction]}
-                        for field in module[direction]:
+                        for field in module_fields(module, direction):
                             reference = catalog.get(field['semantic_id'])
                             if reference is None or any(field[prop] != reference[prop] for prop in ('type', 'required', 'nullable')):
                                 raise ValueError(f'API {direction} field is outside fixed analysis: {field["semantic_id"]}')
-                for call in module['calls']:
+                for call in module.get('calls', []):
                     call['module_id'] = mapping.get(call['module_id'], call['module_id'])
                     if call['module_id'] not in mapping.values() and call['module_id'] not in value['reuse_module_ids']:
                         raise ValueError('every existing direct callee must appear in reuse_module_ids')
@@ -374,29 +373,26 @@ class BackendDesignPass:
             api_ids = [mapping.get(key, key) for key in value['api_ids']]
             if any(key not in mapping.values() and key not in value['reuse_module_ids'] for key in api_ids):
                 raise ValueError('existing API entry must appear in reuse_module_ids')
-            related = _related_data(schema, rid)
-            for access in analysis['data_operations']:
-                related.setdefault(access['table'], [])
-                related[access['table']] = sorted(set(related[access['table']]) | set(access['read'] + access['create'] + access['update']))
-            trial['requirements'].append({'requirement_id': rid, 'spec': analysis['spec'], 'server_state': analysis['server_state'],
-                                          'api_ids': api_ids, 'related_data': related,
-                                          'acceptance_criteria': copy.deepcopy(analysis['acceptance_criteria'])})
             modules = {row['id']: row for row in trial['modules']}
-            capabilities = {row['operation']: row for row in analysis['api_capabilities']}
             entries = [modules[key] for key in api_ids if key in modules and modules[key]['kind'] == 'API']
-            if {row['entrypoint']['operation'] for row in entries} != set(capabilities):
-                raise ValueError('API capability coverage differs from the complete scenario analysis')
+            if len(api_ids) != len(set(api_ids)) or len(entries) != len(api_ids) or bool(entries) != analysis['server_state']:
+                raise ValueError('API coverage differs from server requirement analysis')
+            unmatched = list(analysis['api_capabilities'])
             for entry in entries:
-                capability = capabilities[entry['entrypoint']['operation']]
-                for direction in ('inputs', 'context', 'outputs'):
-                    if {field['semantic_id'] for field in entry[direction]} != set(capability[direction]):
-                        raise ValueError(f'API {entry["id"]} {direction} differs from its analyzed capability')
+                matches = [capability for capability in unmatched if all(
+                    {field['semantic_id'] for field in module_fields(entry, direction)} == set(capability[direction])
+                    for direction in ('inputs', 'context', 'outputs'))]
+                if not matches:
+                    raise ValueError(f'API {entry["id"]} differs from its analyzed capability')
+                unmatched.remove(matches[0])
+            if unmatched:
+                raise ValueError('Missing analyzed API capabilities')
             used = reachable(api_ids, modules)
             if set(value['reuse_module_ids']) - used:
                 raise ValueError('unused reuse_module_ids')
             for key in used:
                 modules[key]['requirement_ids'] = sorted(set(modules[key]['requirement_ids']) | {rid})
-            actual = access_set([access for key in used for access in modules[key]['data_access']])
+            actual = access_set([access for key in used for access in modules[key].get('data_access', [])])
             expected = access_set(analysis['data_operations'])
             if actual != expected:
                 raise ValueError(f'data operation coverage mismatch: missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}')
@@ -418,78 +414,43 @@ class BackendDesignPass:
         descendants, pending = set(), list(self.children[rid])
         while pending:
             key = pending.pop()
-            if key in descendants:
-                continue
-            descendants.add(key)
-            pending.extend(self.children[key])
-        requirements = [row for row in base['requirements'] if row['requirement_id'] in descendants]
+            if key not in descendants:
+                descendants.add(key)
+                pending.extend(self.children[key])
         modules = {row['id']: row for row in base['modules']}
-        available = {key for row in requirements for key in row['api_ids']}
-        related_data: dict[str, list[str]] = {}
-        for row in requirements:
-            for table, columns in row['related_data'].items():
-                related_data[table] = sorted(set(related_data.get(table, [])) | set(columns))
-
-        def materialize(value: dict[str, Any]) -> dict[str, Any]:
-            requirement = copy.deepcopy(value['requirement'])
-            requirement['related_data'] = copy.deepcopy(related_data)
-            requirement['pending_capabilities'] = copy.deepcopy(value['pending_capabilities'])
-            for gap in requirement['pending_capabilities']:
-                gap['requirement_ids'] = sorted(set(gap['requirement_ids']) | {rid})
-            if requirement['requirement_id'] != rid:
-                raise ValueError('Parent requirement id changed')
-            if set(requirement['api_ids']) - available:
-                raise ValueError('Parent may only associate existing descendant APIs; new interfaces are forbidden')
-            covered = {key for row in requirement['acceptance_criteria'] for key in row['scenario_ids']}
-            if not _scenario_ids(nodes[rid], rid) <= covered:
-                raise ValueError('Parent scenarios are not fully covered')
-            trial = copy.deepcopy(base)
-            trial['requirements'].append(requirement)
-            targets = {row['id']: row for row in trial['modules']}
-            for key in reachable(requirement['api_ids'], targets):
-                targets[key]['requirement_ids'] = sorted(set(targets[key]['requirement_ids']) | {rid})
-            return trial
+        available = {key for key, module in modules.items() if module['kind'] == 'API'
+                     and descendants & set(module['requirement_ids'])}
+        payload = {'requirement_id': rid, 'requirement': nodes[rid],
+                   'ancestor_context': self.inherited_context,
+                   'child_requirements': [nodes[key] for key in self.children[rid]],
+                   'available_api_ids': sorted(available),
+                   'api_contracts': [module_contract(modules[key]) for key in sorted(available)],
+                   'pending_capabilities': copy.deepcopy(self.pending_capabilities)}
+        payload['types'] = required_types(payload, base['types'])
 
         def validate(value: dict[str, Any]) -> list[str]:
-            try:
-                return validate_backend_ir(materialize(value), schema, scenarios)
-            except ValueError as exc:
-                return [str(exc)]
+            return ['Parent may only associate existing descendant APIs'] if set(value['api_ids']) - available else []
 
-        payload = {'requirement_id': rid, 'requirement': nodes[rid],
-             'scenario_ids': sorted(_scenario_ids(nodes[rid], rid)), 'ancestor_context': self.inherited_context,
-             'child_requirements': [{key: row[key] for key in
-                                    ('requirement_id', 'api_ids', 'pending_capabilities') if key in row}
-                                   for row in requirements], 'available_api_ids': sorted(available),
-             'api_contracts': [module_contract(modules[key]) for key in sorted(available)],
-             'related_data': related_data}
-        payload['types'] = required_types(payload, base['types'])
-        # Only an explicitly empty grouping node can bypass semantic integration.
-        # A parent with prose may contain genuine capabilities missing from its children.
-        if (str(nodes[rid].get('type', '')).upper() in {'CATEGORY', 'GROUP'}
-                and not str(nodes[rid].get('description', '')).strip() and not nodes[rid].get('scenarios')):
-            decision = {'requirement': {'requirement_id': rid,
-                'spec': 'Aggregate completed descendant capabilities.', 'server_state': bool(available),
-                'api_ids': sorted(available), 'related_data': related_data,
-                'acceptance_criteria': [{'id': rid + '.composition', 'given': 'Completed descendant designs.',
-                    'when': 'Their capabilities are composed.',
-                    'then': 'Existing descendant API contracts and behavior are preserved.', 'scenario_ids': []}]},
-                'pending_capabilities': []}
-        else:
-            decision = self._decision('parent_composition', rid, PARENT_DESIGN_PROMPT,
-                                      PARENT_DESIGN_SCHEMA, payload, validate)
-        return materialize(decision)
+        decision = self._decision('parent_composition', rid, PARENT_DESIGN_PROMPT,
+                                  PARENT_DESIGN_SCHEMA, payload, validate)
+        trial = copy.deepcopy(base)
+        targets = {row['id']: row for row in trial['modules']}
+        for key in reachable(decision['api_ids'], targets):
+            targets[key]['requirement_ids'] = sorted(set(targets[key]['requirement_ids']) | {rid})
+        for gap in decision['pending_capabilities']:
+            gap['requirement_ids'] = sorted(set(gap['requirement_ids']) | {rid})
+            self.pending_capabilities.append(gap)
+        return trial
 
     def _finish(self, ir: dict[str, Any], states: dict[str, str], errors: list[str]) -> BackendDesignResult:
         errors = list(dict.fromkeys(errors))
         pending: dict[str, Any] = {}
-        for row in ir['requirements']:
-            for source in row.get('pending_capabilities', []):
-                gap = copy.deepcopy(source)
-                prior = pending.get(gap['id'], {})
-                gap['requirement_ids'] = sorted(set(prior.get('requirement_ids', [])) | set(gap['requirement_ids']))
-                gap['function_ids'] = sorted(set(prior.get('function_ids', [])) | set(gap['function_ids']))
-                pending[gap['id']] = gap
+        for source in self.pending_capabilities:
+            gap = copy.deepcopy(source)
+            prior = pending.get(gap['id'], {})
+            gap['requirement_ids'] = sorted(set(prior.get('requirement_ids', [])) | set(gap['requirement_ids']))
+            gap['function_ids'] = sorted(set(prior.get('function_ids', [])) | set(gap['function_ids']))
+            pending[gap['id']] = gap
         warnings = [f"{gap['id']}: pending backend capability: {gap['capability']} ({gap['reason']})"
                     for gap in pending.values()]
         write_json_atomic(self.root / 'backend_ir.json', ir)
@@ -499,7 +460,7 @@ class BackendDesignPass:
                                                     'model_calls': self.sequence,
                                                     'traversal': 'depth_first_postorder', 'node_order': self.node_order})
         self.log.info(f'BACKEND_DESIGN_FINISHED success={not errors} '
-                      f'requirements={len(ir["requirements"])} modules={len(ir["modules"])} '
+                      f'requirements={len(states)} modules={len(ir["modules"])} '
                       f'model_calls={self.sequence} errors={len(errors)} '
                       f'duration_seconds={time.perf_counter() - self.started_at:.1f} '
                       f'ir={self.root / "backend_ir.json"} report={self.root / "report.json"}')

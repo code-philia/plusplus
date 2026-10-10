@@ -101,6 +101,9 @@ class CodeBindingLowerer:
                 "input_type": input_type,
                 "output_type": output_type,
                 "context_type": context_type,
+                "parameters": copy.deepcopy(lowered.get("parameters", [])),
+                "calling_convention": lowered.get("calling_convention"),
+                "store_types": [_type_reference(type_id, type_by_id) for type_id in lowered.get("referenced_type_ids", [])],
                 "props_type": None,
                 "route": _compact_backend_route(route),
                 "callees": _strings(module.get("callees")),
@@ -297,7 +300,7 @@ def _compact_backend_route(route: dict[str, Any] | None) -> dict[str, Any] | Non
         return None
     return {
         key: copy.deepcopy(route.get(key))
-        for key in ("route_id", "method", "path", "input_source")
+        for key in ("route_id", "method", "path", "input_source", "request_fields", "status_code", "content_type")
     }
 
 

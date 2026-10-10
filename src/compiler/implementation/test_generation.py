@@ -877,11 +877,6 @@ def _build_context_pack(
             if isinstance(reference, dict) and reference.get("file") and reference.get("type_id") not in known_types:
                 relevant_types.append(copy.deepcopy(reference))
                 known_types.add(reference.get("type_id"))
-    shared_type_symbols = sorted({
-        str(row["symbol"])
-        for row in relevant_types
-        if row.get("symbol")
-    })
     output_files = {
         layer: _test_file(requirement_id, layer)
         for layer in required_layers
@@ -909,11 +904,10 @@ def _build_context_pack(
         if layer == "INTEGRATION":
             imports[0]["symbols"] = ["beforeEach", "describe", "expect", "test"]
             imports.append({"specifier": "supertest", "symbols": ["default"]})
-        if layer in {"INTEGRATION", "E2E"}:
-            imports.append({
-                "specifier": "@arc/shared", "symbols": shared_type_symbols,
-                "type_only": True,
-            })
+        for type_row in relevant_types:
+            if type_row.get("symbol") and type_row.get("file"):
+                imports.append({"specifier": _relative_import(test_file, type_row["file"]),
+                                "symbols": [type_row["symbol"]], "type_only": True})
         if layer == "E2E":
             imports.append({"specifier": "@playwright/test", "symbols": ["Page"], "type_only": True})
             imports.append({
@@ -929,16 +923,6 @@ def _build_context_pack(
                 for card in cards
                 if card.get("kind") == "FUNC"
             )
-            shared_types = sorted(
-                {
-                    str(reference.get("symbol", ""))
-                    for card in cards
-                    for reference in (card.get("input_type"), card.get("output_type"))
-                    if isinstance(reference, dict) and reference.get("symbol")
-                }
-            )
-            if shared_types:
-                imports.append({"specifier": "@arc/shared", "symbols": shared_types})
         allowed_imports[layer] = imports
 
     model_requirement = {
@@ -1164,6 +1148,8 @@ def _project_test_target(row: dict[str, Any]) -> dict[str, Any]:
             "file",
             "symbol",
             "input_type",
+            "parameters",
+            "calling_convention",
             "output_type",
             "props_type",
             "route",
@@ -1662,6 +1648,8 @@ def _layer_source_cards(
                 "file",
                 "symbol",
                 "input_type",
+                "parameters",
+                "calling_convention",
                 "output_type",
                 "props_type",
                 "route",

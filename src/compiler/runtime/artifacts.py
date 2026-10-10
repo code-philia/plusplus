@@ -48,10 +48,8 @@ class CompilerArtifactStore:
     def write_design(self, *, design_ir: dict[str, Any]) -> dict[str, str]:
         if design_ir.get("ir_kind") != "backend_design":
             raise ValueError("Expected the current canonical Backend IR")
-        requirements = design_ir.get("requirements", [])
         modules = design_ir.get("modules", [])
         paths = {
-            "design_requirements": self.backend_design_root / "requirements.json",
             "design_modules": self.backend_design_root / "modules.json",
             "design_modules_db": self.backend_design_root / "modules_db.json",
             "design_modules_func": self.backend_design_root / "modules_func.json",
@@ -60,7 +58,6 @@ class CompilerArtifactStore:
         paths["backend_ir"] = self.backend_design_root / "backend_ir.json"
         write_json_atomic(paths["backend_ir"], design_ir)
         paths["backend_design_report"] = self.backend_design_root / "report.json"
-        write_json_atomic(paths["design_requirements"], {"requirements": requirements})
         write_json_atomic(paths["design_modules"], {"modules": modules})
         for kind, key in (("DB", "design_modules_db"), ("FUNC", "design_modules_func"), ("API", "design_modules_api")):
             write_json_atomic(paths[key], {"modules": [row for row in modules if row.get("kind") == kind]})

@@ -1,4 +1,4 @@
-"""Technology-neutral backend module blueprints.
+"""Backend module contracts with explicit REST interfaces.
 
 Define responsibilities, interfaces, collaboration and acceptance criteria, not
 internal execution steps. TypedDicts are contracts, not runtime validators.
@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Literal, NotRequired, TypedDict
 
 from .database import SchemaDataType
-from .integration import PendingCapability
 
 
 class ScalarType(TypedDict):
@@ -82,50 +81,44 @@ class DataAccess(TypedDict):
     delete: bool
 
 
-class APIEntryPoint(TypedDict):
-    operation: str
-    authentication: Literal["none", "required", "optional"]
-
-
 class ModuleBase(TypedDict):
     id: str
-    name: str
     requirement_ids: list[str]
     spec: str
-    inputs: list[BackendField]
-    # Trusted identity, time and other ambient values, separate from inputs.
-    context: list[BackendField]
-    outputs: list[BackendField]
-    calls: list[ModuleCall]
-    data_access: list[DataAccess]
-    acceptance_criteria: list[AcceptanceCriterion]
+    context: NotRequired[list[BackendField]]
+    calls: NotRequired[list[ModuleCall]]
+    acceptance_criteria: NotRequired[list[AcceptanceCriterion]]
 
 
 class APIModule(ModuleBase):
     kind: Literal["API"]
-    entrypoint: APIEntryPoint
+    path: str
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
+    authentication: Literal["none", "required", "optional"]
+    request: list[APIRequestField]
+    response: list[BackendField]
+    status_code: int
+    content_type: str
+
+
+class APIRequestField(BackendField):
+    source: Literal["path", "query", "header", "body"]
 
 
 class FunctionModule(ModuleBase):
     kind: Literal["FUNC"]
+    parameters: list[BackendField]
+    returns: list[BackendField]
 
 
 class DatabaseModule(ModuleBase):
     kind: Literal["DB"]
+    parameters: list[BackendField]
+    returns: list[BackendField]
+    data_access: list[DataAccess]
 
 
 BackendModule = APIModule | FunctionModule | DatabaseModule
-
-
-class RequirementBlueprint(TypedDict):
-    requirement_id: str
-    spec: str
-    server_state: bool
-    api_ids: list[str]
-    # Candidate associations, not an authoritative list of actual operations.
-    related_data: dict[str, list[str]]
-    acceptance_criteria: list[AcceptanceCriterion]
-    pending_capabilities: NotRequired[list[PendingCapability]]
 
 
 class BackendIR(TypedDict):
@@ -133,7 +126,6 @@ class BackendIR(TypedDict):
     schema_ref: str
     schema_hash: str
     types: list[BackendTypeDefinition]
-    requirements: list[RequirementBlueprint]
     modules: list[BackendModule]
 
 
@@ -141,5 +133,14 @@ __all__ = [
     "BackendIR", "BackendModule", "APIModule",
     "FunctionModule", "DatabaseModule", "ModuleBase", "BackendField",
     "BackendType", "BackendTypeDefinition", "AcceptanceCriterion",
-    "ModuleCall", "DataAccess", "RequirementBlueprint", "APIEntryPoint",
+    "ModuleCall", "DataAccess", "APIRequestField", "module_fields",
 ]
+
+
+def module_fields(module: dict, direction: str) -> list[dict]:
+    """Project public field contracts for design and lowering consumers."""
+    if direction == "context":
+        return module.get("context", [])
+    key = ({"inputs": "request", "outputs": "response"} if module["kind"] == "API"
+           else {"inputs": "parameters", "outputs": "returns"})[direction]
+    return module[key]

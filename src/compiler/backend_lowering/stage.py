@@ -1,4 +1,4 @@
-"""Static backend framework generation from the current canonical blueprint."""
+"""Plan module files and exported types, then emit signatures and server routes."""
 from __future__ import annotations
 
 import copy
@@ -19,6 +19,7 @@ from ..lowering.types import TypeLowerer
 from ..lowering.symbols import GlobalSymbolPlanner
 from .glue import BackendGlueLowerer
 from .database_bindings import render_bindings
+from .module_types import attach_module_types
 from ..database_lowering.sqlite import storage_type
 
 PROFILE = 'web-react18-tailwind4-express-drizzle-sqlite'
@@ -45,7 +46,7 @@ class BackendLoweringResult:
 
 
 class BackendLowerer:
-    """Plan every path before rendering. No model calls, SQL execution or fixtures."""
+    """Plan module/type ownership before emitting unimplemented function frameworks."""
 
     def lower(self, blueprint: dict[str, Any], schema: dict[str, Any], project_manifest: dict[str, Any],
               database_manifest: dict[str, Any], output_root: Path, *, default_port: int = 3000) -> BackendLoweringResult:
@@ -59,7 +60,7 @@ class BackendLowerer:
                 raise ValueError('Backend profile requires SQLite database initialization')
             if database_manifest.get('status') != 'DATABASE_SCHEMA_LOWERED':
                 raise ValueError('Database lowering must finish before backend lowering')
-            scenarios = {key for row in blueprint['requirements'] for criterion in row['acceptance_criteria'] for key in criterion['scenario_ids']}
+            scenarios = {key for row in blueprint['modules'] for criterion in row.get('acceptance_criteria', []) for key in criterion['scenario_ids']}
             problems = validate_backend_ir(blueprint, schema, scenarios)
             if problems:
                 raise ValueError('; '.join(problems))
@@ -84,13 +85,20 @@ class BackendLowerer:
             if len(paths) != len({path.casefold() for path in paths}):
                 raise ValueError('File plan contains paths that collide on case-insensitive filesystems')
             types = checked(TypeLowerer().lower(symbols.registry, files.registry))
+            attach_module_types(blueprint, design, symbols.registry, files.registry, types)
             bindings_sources, tables = render_bindings(schema, symbols.registry, files.registry,
                                                        storage_type=storage_type)
-            backend_database_manifest = {**database_manifest, 'orm': 'drizzle', 'tables': tables}
+            backend_database_manifest = {
+                **database_manifest, 'orm': 'drizzle', 'tables': tables,
+                'generated_files': sorted(set(database_manifest.get('generated_files', [])) | set(bindings_sources)),
+            }
             manifests = {'type': types.manifest, 'database': backend_database_manifest}
             sources = {**types.sources, **bindings_sources}
             for kind in ('DB', 'FUNC', 'API'):
                 lowered = checked(ModuleSkeletonLowerer().lower(kind, design, symbols.registry, files.registry))
+                for row in lowered.manifest['modules']:
+                    planned_file = next(file for file in files.registry['files'] if file['path'] == row['path'])
+                    row['exports'] = list(dict.fromkeys([*row['exports'], *planned_file['exports']]))
                 manifests[kind] = lowered.manifest
                 for path, source in lowered.sources.items():
                     if path in sources and sources[path] != source:
@@ -119,8 +127,10 @@ class BackendLowerer:
             result.tables = {'symbols': symbols.registry, 'files': files.registry, 'types': types.manifest,
                              'database': backend_database_manifest, 'modules_db': manifests['DB'],
                              'modules_func': manifests['FUNC'], 'modules_api': manifests['API'],
-                             'routes': glue.route_registry, 'imports': glue.import_plan, 'manifest': result.manifest}
-            result.warnings = ['Business bodies, request decoding, and identity/context middleware require implementation.']
+                             'routes': glue.route_registry, 'imports': glue.import_plan, 'manifest': result.manifest,
+                             'module_plan': {'modules': files.registry['module_locations'],
+                                             'types': types.manifest['definitions']}}
+            result.warnings = ['Module functions and HTTP handlers contain signatures only; business bodies require implementation.']
         except (AttributeError, KeyError, TypeError, ValueError, RecursionError) as exc:
             result.errors.append(f'BACKEND_LOWERING_INVALID: {exc}')
             result.sources.clear()

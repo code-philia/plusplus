@@ -295,50 +295,22 @@ def _plan_routes(
     api_rows: dict[str, dict[str, Any]],
     errors: list[str],
 ) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    by_base_path: dict[str, list[str]] = {}
-    for module_id, row in sorted(api_rows.items()):
-        parsed = _parse_module_id(module_id)
-        if parsed is None or parsed[1] != "API":
-            errors.append(f"ARC3805 ROUTE_DERIVATION_FAILED: invalid API module id {module_id!r}.")
-            continue
-        owner, _, local_name = parsed
-        operation_name = str(modules[module_id].get("entrypoint", {}).get("operation") or local_name)
-        base_path = f"/api/{_kebab_case(operation_name)}"
-        by_base_path.setdefault(base_path, []).append(module_id)
-        module = modules[module_id]
-        method, method_rule = _derive_http_method(module)
-        candidates.append(
-            {
-                "route_id": f"ROUTE::{module_id}",
-                "module_id": module_id,
-                "method": method,
-                "base_path": base_path,
-                "owner_requirement": owner,
-                "requirement_ids": list(module.get("requirement_ids", [owner])),
-                "authentication": module.get("entrypoint", {}).get("authentication", "none"),
-                "handler_symbol": str(row.get("function_symbol", "")),
-                "handler_path": str(row.get("path", "")),
-                "input_source": "query" if method in {"GET", "DELETE"} else "body",
-                "derivation": {
-                    "method": method_rule,
-                    "path": "BUSINESS_OPERATION" if "backend_module" in module else "API_MODULE_NAME",
-                },
-            }
-        )
-
     routes: list[dict[str, Any]] = []
-    for candidate in candidates:
-        base_path = str(candidate.pop("base_path"))
-        collisions = by_base_path[base_path]
-        if len(collisions) == 1:
-            path = base_path
-        else:
-            owner_segment = _kebab_case(str(candidate["owner_requirement"]))
-            path = f"/api/{owner_segment}/{base_path.removeprefix('/api/')}"
-            candidate["derivation"]["path"] = "API_MODULE_NAME_WITH_REQUIREMENT_DISAMBIGUATION"
-        candidate["path"] = path
-        routes.append(candidate)
+    for module_id, row in sorted(api_rows.items()):
+        module = modules[module_id]
+        routes.append({
+            "route_id": f"ROUTE::{module_id}", "module_id": module_id,
+            "method": module["method"], "path": module["path"],
+            "owner_requirement": module_id.split("::", 1)[0],
+            "requirement_ids": list(module["requirement_ids"]),
+            "authentication": module["authentication"],
+            "handler_symbol": str(row.get("function_symbol", "")),
+            "handler_path": str(row.get("path", "")),
+            "input_source": "query" if module["method"] == "GET" else "body",
+            "request_fields": module["backend_module"]["request"],
+            "status_code": module["status_code"], "content_type": module["content_type"],
+            "derivation": {"method": "EXPLICIT_IR", "path": "EXPLICIT_IR"},
+        })
 
     seen: set[tuple[str, str]] = set()
     for route in routes:
@@ -353,25 +325,6 @@ def _plan_routes(
                 f"ARC3805 ROUTE_DERIVATION_FAILED: handler binding missing for {route['module_id']}."
             )
     return sorted(routes, key=lambda item: (item["path"], item["method"], item["module_id"]))
-
-
-def _derive_http_method(module: dict[str, Any]) -> tuple[str, str]:
-    effects = module.get("effects", [])
-    operations = {
-        str(effect.get("operation", "")).upper()
-        for effect in effects
-        if isinstance(effect, dict) and effect.get("operation")
-    }
-    if operations and operations <= {"READ"}:
-        return "GET", "READ_ONLY_EFFECTS"
-    if "DELETE" in operations and operations <= {"READ", "DELETE"}:
-        return "DELETE", "DELETE_EFFECT"
-    if "UPDATE" in operations and operations <= {"READ", "UPDATE"}:
-        return "PATCH", "UPDATE_EFFECT"
-    inputs = module.get("inputs", [])
-    if not operations and isinstance(inputs, list) and not inputs:
-        return "GET", "PURE_NO_INPUT_OPERATION"
-    return "POST", "COMMAND_OR_MIXED_EFFECTS"
 
 
 def _render_glue(
@@ -425,7 +378,7 @@ def _render_glue(
         )
     sources[router_path] = _render_router(router_imports, routes)
     imports[router_path] = router_imports
-    exports[router_path] = ["router"]
+    exports[router_path] = ["router", "registerRoutes"]
 
     all_modules = {
         module_id: row
@@ -449,32 +402,13 @@ def _render_glue(
     imports[module_registry_path] = module_registry_imports
     exports[module_registry_path] = ["moduleRegistry"]
 
-    dependency_rows = {
-        module_id: row
-        for kind in ("FUNC", "API")
-        for module_id, row in module_rows[kind].items()
-    }
     dependency_registry_path = "backend/src/generated/dependency-registry.ts"
-    dependency_registry_imports: list[dict[str, Any]] = []
-    dependency_entries: list[tuple[str, str]] = []
-    for module_id, row in sorted(dependency_rows.items()):
-        row_exports = row.get("exports", [])
-        dependency_symbol = str(row_exports[1]) if isinstance(row_exports, list) and len(row_exports) > 1 else ""
-        if dependency_symbol:
-            dependency_registry_imports.append(
-                _import(
-                    dependency_symbol,
-                    _relative_specifier(dependency_registry_path, str(row["path"])),
-                    source=str(row["path"]),
-                )
-            )
-            dependency_entries.append((module_id, dependency_symbol))
-    sources[dependency_registry_path] = _render_registry(
-        "dependencyRegistry",
-        dependency_entries,
-        dependency_registry_imports,
+    sources[dependency_registry_path] = (
+        '// Generated module collaboration references.\nexport const dependencyRegistry = '
+        + json.dumps({key: list(row.get('callees', [])) for key, row in sorted(all_modules.items())},
+                     ensure_ascii=False, indent=2) + ' as const;\n'
     )
-    imports[dependency_registry_path] = dependency_registry_imports
+    imports[dependency_registry_path] = []
     exports[dependency_registry_path] = ["dependencyRegistry"]
 
     app_path = "backend/src/app.ts"
@@ -484,7 +418,8 @@ def _render_glue(
         _import("fileURLToPath", "node:url"),
         _import("bindDatabaseClient", "./db/client.js", source=database_path),
         _import("DatabaseClient", "./db/client.js", source=database_path, type_only=True),
-        _import("router", "./generated/router.js", source=router_path),
+        _import("registerRoutes", "./generated/router.js", source=router_path),
+        _import("Router", "express"),
         _import("toErrorBody", "./runtime/errors.js", source="backend/src/runtime/errors.ts"),
     ]
     sources[app_path] = _render_app(app_imports)
@@ -497,7 +432,9 @@ def _render_glue(
         _import("createDatabaseClient", "./db/client.js", source=database_path),
         _import("initializeDatabase", "./db/initialize.js", source="backend/src/db/initialize.ts"),
     ]
-    sources[server_path] = _render_server(server_imports, default_port)
+    server_imports.extend(_import(str(route["handler_symbol"]), _relative_specifier(server_path, str(route["handler_path"])),
+                                  source=str(route["handler_path"])) for route in routes)
+    sources[server_path] = _render_server(server_imports, default_port, routes)
     imports[server_path] = server_imports
     exports[server_path] = ["port", "server"]
 
@@ -565,12 +502,11 @@ def _render_router(
     imports: list[dict[str, Any]],
     routes: list[dict[str, Any]],
 ) -> str:
-    lines = ["// Generated by ARC. Do not edit.", *_render_imports(imports), "", "export const router = Router();"]
+    lines = ["// Generated by ARC. Do not edit.", *_render_imports(imports), "",
+             "export function registerRoutes(router: ReturnType<typeof Router>): void {"]
     for route in routes:
-        lines.append(
-            f'router.{str(route["method"]).lower()}("{route["path"]}", {route["handler_symbol"]});'
-        )
-    lines.append("")
+        lines.append(f'  router.{str(route["method"]).lower()}({json.dumps(route["path"])}, {route["handler_symbol"]});')
+    lines += ["}", "export const router = Router();", "registerRoutes(router);", ""]
     return "\n".join(lines)
 
 
@@ -602,7 +538,10 @@ def _render_app(imports: list[dict[str, Any]]) -> str:
             'const frontendIndex = fileURLToPath(new URL("../../frontend/dist/index.html", import.meta.url));',
 
             "",
-            "export const app = express();",
+            "function buildApp(configureRoutes: typeof registerRoutes) {",
+            "const app = express();",
+            "const router = Router();",
+            "configureRoutes(router);",
             "app.use(express.json());",
             'app.get("/__arc/health", (_request, response) => {',
             '  response.status(200).json({ status: "ok", service: "arc-backend" });',
@@ -625,16 +564,19 @@ def _render_app(imports: list[dict[str, Any]]) -> str:
             "  response.status(status === 500 ? 503 : status).json(body);",
             "};",
             "app.use(errorHandler);",
-            "export function createApp(client: DatabaseClient) {",
+            "return app;",
+            "}",
+            "export const app = buildApp(registerRoutes);",
+            "export function createApp(client: DatabaseClient, configureRoutes = registerRoutes) {",
             "  bindDatabaseClient(client);",
-            "  return app;",
+            "  return buildApp(configureRoutes);",
             "}",
             "",
         ]
     )
 
 
-def _render_server(imports: list[dict[str, Any]], default_port: int) -> str:
+def _render_server(imports: list[dict[str, Any]], default_port: int, routes: list[dict[str, Any]]) -> str:
     port = max(1, min(65535, int(default_port)))
     return "\n".join(
         [
@@ -643,7 +585,9 @@ def _render_server(imports: list[dict[str, Any]], default_port: int) -> str:
             "",
             "const client = createDatabaseClient();",
             "try { initializeDatabase(client.connection); } catch (error) { client.close(); throw error; }",
-            "const app = createApp(client);",
+            "const app = createApp(client, (router) => {",
+            *[f'  router.{route["method"].lower()}({json.dumps(route["path"])}, {route["handler_symbol"]});' for route in routes],
+            "});",
             f'const configuredPort = Number.parseInt(process.env.PORT ?? "{port}", 10);',
             f"export const port = Number.isInteger(configuredPort) ? configuredPort : {port};",
             'const host = process.env.NODE_ENV === "test" ? "127.0.0.1" : "0.0.0.0";',

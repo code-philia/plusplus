@@ -292,7 +292,7 @@ class FrontendReactLowerer:
                 body += ["const wireInput: Record<string, unknown> = {};", "void input;"]
                 for wire, field in request.items():
                     body.append(f"if (input[{js(field['semantic_id'])}] !== undefined) wireInput[{js(wire)}] = input[{js(field['semantic_id'])}];")
-                body.append(f"const result = await request({js(route['method'])}, {js(route['path'])}, {js(route['input_source'])}, wireInput, signal);")
+                body.append(f"const result = await request({js(route['method'])}, {js(route['path'])}, {js(route['input_source'])}, wireInput, signal, {js(route.get('request_fields', []))});")
                 body.append("void result;")
                 body.append("return {" + ", ".join(js(field["semantic_id"]) + ": result[" + js(field["name"]) + "]" for field in api["outputs"]) + f"}} as T.{out};")
             else:
@@ -313,20 +313,31 @@ class FrontendReactLowerer:
 
 
 API_TRANSPORT = r'''
-export async function request(method: string, route: string, source: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+export async function request(method: string, route: string, source: string, input: Record<string, unknown>, signal?: AbortSignal, fields: Array<{ name: string; source: string }> = []): Promise<Record<string, unknown>> {
     const rest = { ...input };
     let path = route.replace(/:([A-Za-z0-9_]+)/g, (_, key: string) => {
         if (rest[key] == null) throw new Error(`Missing API path parameter ${key}`);
         const value = encodeURIComponent(String(rest[key])); delete rest[key]; return value;
     });
     const init: RequestInit = { method, signal, credentials: "same-origin" };
-    if (source === "query") {
-        const query = new URLSearchParams();
-        for (const [key, value] of Object.entries(rest)) if (value !== undefined) query.set(key, value !== null && typeof value === "object" ? JSON.stringify(value) : String(value));
-        if (query.size) path += (path.includes("?") ? "&" : "?") + query.toString();
-    } else {
-        init.headers = { "content-type": "application/json" }; init.body = JSON.stringify(rest);
+    const query = new URLSearchParams();
+    const headers: Record<string, string> = {};
+    const body: Record<string, unknown> = {};
+    const locations = new Map(fields.map(field => [field.name, field.source]));
+    for (const [key, value] of Object.entries(rest)) {
+        if (value === undefined) continue;
+        const location = locations.get(key) ?? source;
+        const encoded = value !== null && typeof value === "object" ? JSON.stringify(value) : String(value);
+        if (location === "query") query.set(key, encoded);
+        else if (location === "header") headers[key] = encoded;
+        else if (location === "body") body[key] = value;
     }
+    if (query.size) path += (path.includes("?") ? "&" : "?") + query.toString();
+    if (Object.keys(body).length || fields.some(field => field.source === "body")) {
+        headers["content-type"] = "application/json";
+        init.body = JSON.stringify(body);
+    }
+    init.headers = headers;
     const response = await fetch(path, init);
     const text = await response.text();
     if (!response.ok) throw Object.assign(new Error(text || response.statusText), { status: response.status });

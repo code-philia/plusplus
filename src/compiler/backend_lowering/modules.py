@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from ..ir.backend import module_fields
 
 from .skeletons import _relative_specifier, _group_imports, RUNTIME_IMPORTS, DRIZZLE_OPERATORS
 
@@ -12,9 +13,7 @@ def render_blueprint_module(kind: str, module: dict[str, Any], symbol: dict[str,
                             context_contract: dict[str, Any] | None, dependencies: list[dict[str, str]],
                             tables: list[dict[str, str]], path: str) -> tuple[str, list[str], list[dict[str, Any]]]:
     name = symbol['symbol']
-    operation = name + 'Operation' if kind == 'API' else name
-    dependency_name = name + 'Dependencies'
-    blueprint_name = name + 'Blueprint'
+    operation = name
     imports: list[dict[str, Any]] = []
 
     def add(value: str, source: str, *, type_only: bool = False, specifier: str | None = None) -> None:
@@ -22,8 +21,8 @@ def render_blueprint_module(kind: str, module: dict[str, Any], symbol: dict[str,
                         'type_only': type_only})
 
     for contract in (input_contract, output_contract, context_contract):
-        if contract:
-            add(contract['symbol'], contract['source_path'], type_only=True, specifier='@arc/shared')
+        if contract and contract['source_path'] != path:
+            add(contract['symbol'], contract['source_path'], type_only=True)
     for value, source in RUNTIME_IMPORTS:
         add(value, source)
     for row in dependencies:
@@ -40,9 +39,8 @@ def render_blueprint_module(kind: str, module: dict[str, Any], symbol: dict[str,
         for value in ('Request', 'Response'):
             add(value, 'express', type_only=True, specifier='express')
         add('ApiErrorBody', 'shared/src/contracts/runtime.ts', type_only=True, specifier='@arc/shared')
-        add('sendError', 'backend/src/runtime/errors.ts')
-        add('getRequestContext', 'backend/src/runtime/context.ts')
 
+    imports.extend(module['type_plan']['imports'])
     input_type = input_contract['symbol'] if input_contract else 'Record<string, never>'
     output_type = output_contract['symbol'] if output_contract else 'void'
     context_type = context_contract['symbol'] if context_contract else 'Record<string, never>'
@@ -55,38 +53,36 @@ def render_blueprint_module(kind: str, module: dict[str, Any], symbol: dict[str,
         lines.append(' * Atomic writes use schemaTransaction with a synchronous callback; business validation belongs to repository and service implementations.')
     for line in blueprint['spec'].splitlines():
         lines.append(' * ' + line.replace('*/', '* /'))
-    for criterion in blueprint['acceptance_criteria']:
+    for criterion in blueprint.get('acceptance_criteria', []):
         lines.append(' * ' + f'[{criterion["id"]}] Given {criterion["given"]}; When {criterion["when"]}; Then {criterion["then"]}'.replace('*/', '* /').replace('\n', '\n * '))
-    lines += [' */', f'export const {blueprint_name} = {json.dumps(blueprint, ensure_ascii=False, indent=2)} as const;', '']
-    runtime = ['HttpError', 'newId', 'now', 'nowIso']
-    dep_symbols = [row['symbol'] for row in dependencies] + runtime
-    if kind in {'DB', 'FUNC'}:
-        dep_symbols.append('schemaTransaction')
-    if kind == 'DB':
-        dep_symbols += ['database'] + [row['symbol'] for row in tables] + list(DRIZZLE_OPERATORS)
-    dependency_entries = ["get database() { return database; }" if value == "database" else value
-                          for value in dict.fromkeys(dep_symbols)]
-    lines += [f'export const {dependency_name} = {{ {", ".join(dependency_entries)} }} as const;', '',
-              f'export async function {operation}(', f'  input: {input_type},', f'  context: {context_type},',
-              f'): Promise<{output_type}> {{', '  // @arc-implementation-start', '  void input;', '  void context;',
-              f'  throw new NotImplementedError({json.dumps(module["id"])});',
-              '  // @arc-implementation-end', '}', '']
-    exports = [name, dependency_name, blueprint_name]
+    lines += [' */', *module['type_plan']['declarations'], '']
+    parameters = module_fields(blueprint, 'inputs')
+    signature, unused = [], []
+    if kind != 'API':
+        for parameter in parameters:
+            parameter_type = module['type_plan']['parameter_types'][parameter['name']]
+            if not parameter['required']:
+                parameter_type += ' | undefined'
+            signature.append(f'  {parameter["name"]}: {parameter_type}{" = undefined" if not parameter["required"] else ""},')
+            unused.append(f'  void {parameter["name"]};')
+        if module_fields(blueprint, 'context'):
+            signature.append(f'  _context: {context_type},')
+            unused.append('  void _context;')
+    if kind != 'API':
+        lines += [f'export async function {operation}(', *signature,
+                  f'): Promise<{output_type}> {{', '  // @arc-implementation-start', *unused,
+                  f'  throw new NotImplementedError({json.dumps(module["id"])});',
+                  '  // @arc-implementation-end', '}', '']
+    exports = [name]
     if kind == 'API':
-        exports.append(operation)
         response_type = f'{output_type} | ApiErrorBody' if output_contract else 'ApiErrorBody'
-        required_context = [{'name': field['name'], 'nullable': field['nullable']}
-                            for field in blueprint['context'] if field['required']]
-        lines += ['/** HTTP adapter: trusted context comes from server middleware, never request data. */',
+        lines += ['/** HTTP handler. Request decoding and business behavior are implemented later. */',
                   f'export async function {name}(',
                   f'  req: Request<Record<string, string>, {response_type}, {input_type}>,',
-                  f'  res: Response<{response_type}>,', '): Promise<void> {', '  try {',
-                  f'    const context = getRequestContext<{context_type}>(res, {json.dumps(blueprint["entrypoint"]["authentication"])}, {json.dumps(required_context)});',
-                  '    // Request decoding/validation is an implementation responsibility.',
-                  f'    const input = (req.method === "GET" || req.method === "DELETE" ? req.query : req.body) as unknown as {input_type};',
-                  f'    const output = await {operation}(input, context);']
-        lines += ['    res.status(200).json(output);'] if output_contract else ['    void output;', '    res.status(204).end();']
-        lines += ['  } catch (error) {', '    sendError(res, error);', '  }', '}', '']
+                  f'  res: Response<{response_type}>,', '): Promise<void> {',
+                  '  // @arc-implementation-start', '  void req;', '  void res;',
+                  f'  throw new NotImplementedError({json.dumps(module["id"])});',
+                  '  // @arc-implementation-end', '}', '']
     return '\n'.join(lines), exports, imports
 
 

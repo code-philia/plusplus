@@ -407,7 +407,7 @@ class Compiler:
 
         if rank < 4:
             self._runtime.events.mark_phase_started("SKELETON", "Generating backend framework from Backend IR.")
-            await self._log("Compiler", "Planning backend files, separate input/context/output contracts, module dependencies, and HTTP adapters.")
+            await self._log("Compiler", "Planning backend module files, exported local types, typed parameter lists, and server routes.")
             lowered_backend = lower_backend(
                 request.output_dir, artifact_store, project_manifest,
                 blueprint=backend_blueprint, schema=database.schema,
@@ -421,7 +421,7 @@ class Compiler:
             if not lowered_backend.ok:
                 return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
             backend_glue = SimpleNamespace(route_registry=lowered_backend.route_registry)
-            await self._log("Compiler", "Backend framework generated; business bodies remain for implementation.")
+            await self._log("Compiler", "Backend module signatures and routes generated; business bodies remain for implementation.")
             history.commit("3.2 backend lowering", [".arc/lowering/backend", "backend/src", "shared/src"])
             stage_checkpoint(request.output_dir, "backend-lowering")
             failed_gate = await self._build_gate(request, "3.2 backend lowering", root_id, states, artifacts)

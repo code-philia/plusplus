@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ..ir.backend import module_fields
+
 from .contracts import IR_SCHEMA, FIELD_NAME_PATTERN, SEMANTIC_ID_PATTERN
 
 
@@ -85,7 +87,7 @@ def reachable(api_ids: list[str], modules: dict[str, dict[str, Any]]) -> set[str
         if key in seen or key not in modules:
             continue
         seen.add(key)
-        pending.extend(call['module_id'] for call in modules[key]['calls'])
+        pending.extend(call['module_id'] for call in modules[key].get('calls', []))
     return seen
 
 
@@ -94,9 +96,8 @@ def validate_backend_ir(ir: dict[str, Any], schema: dict[str, Any], scenarios: s
     if errors:
         return errors
     modules = {row['id']: row for row in ir['modules']}
-    requirements = {row['requirement_id']: row for row in ir['requirements']}
     definitions = {row['id']: row for row in ir['types']}
-    for label, rows, key in [('module', ir['modules'], 'id'), ('requirement', ir['requirements'], 'requirement_id'), ('type', ir['types'], 'id')]:
+    for label, rows, key in [('module', ir['modules'], 'id'), ('type', ir['types'], 'id')]:
         if len(rows) != len({row[key] for row in rows}):
             errors.append(f'duplicate {label} id')
     semantic_types: dict[str, Any] = {}
@@ -151,33 +152,49 @@ def validate_backend_ir(ir: dict[str, Any], schema: dict[str, Any], scenarios: s
     for key, module in modules.items():
         if not re.fullmatch(r'.+::(API|FUNC|DB)\.[A-Za-z][A-Za-z0-9_]*', key) or f'::{module["kind"]}.' not in key:
             errors.append(f'invalid qualified module id {key}')
-        if not module['name'].strip() or not module['spec'].strip():
-            errors.append(f'{key}: empty name/spec')
-        if not module['requirement_ids'] or set(module['requirement_ids']) - requirements.keys():
+        if not module['spec'].strip():
+            errors.append(f'{key}: empty spec')
+        if not module['requirement_ids'] or any(not rid.strip() for rid in module['requirement_ids']):
             errors.append(f'{key}: unknown/empty requirement_ids')
         if len(module['requirement_ids']) != len(set(module['requirement_ids'])):
             errors.append(f'{key}: duplicate requirement association')
-        check_criteria(module['acceptance_criteria'], key)
+        if 'acceptance_criteria' in module:
+            check_criteria(module['acceptance_criteria'], key)
         for direction in ('inputs', 'context', 'outputs'):
-            check_fields(module[direction], f'{key}.{direction}')
-        if {row['name'] for row in module['inputs']} & {row['name'] for row in module['context']}:
+            check_fields(module_fields(module, direction), f'{key}.{direction}')
+        if {row['name'] for row in module_fields(module, 'inputs')} & {row['name'] for row in module_fields(module, 'context')}:
             errors.append(f'{key}: input/context field names must be distinct')
-        if {row['semantic_id'] for row in module['inputs']} & {row['semantic_id'] for row in module['context']}:
+        if {row['semantic_id'] for row in module_fields(module, 'inputs')} & {row['semantic_id'] for row in module_fields(module, 'context')}:
             errors.append(f'{key}: trusted context must not also be an untrusted input')
-        if module['kind'] != 'DB' and module['data_access']:
+        if module['kind'] != 'DB' and module.get('data_access', []):
             errors.append(f'{key}: only DB leaves may access data directly')
-        if module['kind'] == 'API' and not module['entrypoint']['operation'].strip():
-            errors.append(f'{key}: empty business entrypoint')
+        if module['kind'] == 'API':
+            if not re.fullmatch(r'/(?:[a-zA-Z0-9_:/.-]*)', module['path']):
+                errors.append(f'{key}: invalid REST path')
+            if not 100 <= module['status_code'] <= 599:
+                errors.append(f'{key}: invalid HTTP status code')
+            if module['content_type'] != 'application/json':
+                errors.append(f'{key}: response content_type must be application/json')
+            path_fields = {field['name'] for field in module['request'] if field['source'] == 'path'}
+            path_parameters = set(re.findall(r':([a-z][a-z0-9_]*)', module['path']))
+            if path_fields != path_parameters:
+                errors.append(f'{key}: path parameters differ from request fields')
+            if module['method'] == 'GET' and any(field['source'] == 'body' for field in module['request']):
+                errors.append(f'{key}: GET cannot have request body')
+            if module['status_code'] in {204, 304} and module['response']:
+                errors.append(f'{key}: no-body status cannot have response fields')
+            if not module['response'] and module['status_code'] not in {204, 304}:
+                errors.append(f'{key}: empty response requires no-body status')
         # Criteria may also originate from inherited parent rules. Global
         # scenario existence is checked above; provenance/composition is audited.
-        if module['kind'] == 'DB' and not module['data_access']:
+        if module['kind'] == 'DB' and not module.get('data_access', []):
             errors.append(f'{key}: DB leaf has no operation')
-        errors += [f'{key}: {error}' for error in validate_data_access(module['data_access'], schema)]
-        call_ids = {call['id'] for call in module['calls']}
-        if len(call_ids) != len(module['calls']):
+        errors += [f'{key}: {error}' for error in validate_data_access(module.get('data_access', []), schema)]
+        call_ids = {call['id'] for call in module.get('calls', [])}
+        if len(call_ids) != len(module.get('calls', [])):
             errors.append(f'{key}: duplicate call id')
         prior = set()
-        for call in module['calls']:
+        for call in module.get('calls', []):
             target = modules.get(call['module_id'])
             if not call['id'].strip() or not call['purpose'].strip():
                 errors.append(f'{key}: empty call identity/purpose')
@@ -197,34 +214,21 @@ def validate_backend_ir(ir: dict[str, Any], schema: dict[str, Any], scenarios: s
         if key in finished or key not in modules:
             return
         visiting.add(key)
-        for call in modules[key]['calls']:
+        for call in modules[key].get('calls', []):
             visit(call['module_id'])
         visiting.remove(key)
         finished.add(key)
 
     for key in modules:
         visit(key)
-    all_reachable = set()
-    tables = {row['name']: row for row in schema.get('tables', [])}
-    for rid, requirement in requirements.items():
-        check_criteria(requirement['acceptance_criteria'], rid)
-        if not requirement['spec'].strip():
-            errors.append(f'{rid}: empty requirement spec')
-        for table, columns in requirement['related_data'].items():
-            if table not in tables or set(columns) - {row['name'] for row in tables[table]['columns']}:
-                errors.append(f'{rid}: invalid related_data {table}')
-        if requirement['server_state'] != bool(requirement['api_ids']):
-            errors.append(f'{rid}: server_state/API coverage mismatch')
-        if len(requirement['api_ids']) != len(set(requirement['api_ids'])):
-            errors.append(f'{rid}: duplicate API association')
-        for key in requirement['api_ids']:
-            if key not in modules or modules[key]['kind'] != 'API':
-                errors.append(f'{rid}: unknown API {key}')
-        scope = reachable(requirement['api_ids'], modules)
-        all_reachable |= scope
-        for key in scope:
-            if rid not in modules[key]['requirement_ids']:
-                errors.append(f'{key}: missing usage association {rid}')
+    endpoints: set[tuple[str, str]] = set()
+    for module in modules.values():
+        if module['kind'] == 'API':
+            endpoint = (module['method'], module['path'])
+            if endpoint in endpoints:
+                errors.append(f'duplicate REST endpoint {endpoint}')
+            endpoints.add(endpoint)
+    all_reachable = reachable([key for key, module in modules.items() if module['kind'] == 'API'], modules)
     if set(modules) - all_reachable:
         errors.append(f'unreachable modules: {sorted(set(modules) - all_reachable)}')
     return list(dict.fromkeys(errors))

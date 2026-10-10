@@ -1,8 +1,11 @@
 """Postorder frontend passes with explicit direct ownership and reuse associations."""
 from __future__ import annotations
 
+from ..ir.backend import module_fields
+
 import base64
 import copy
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,8 +58,8 @@ class FrontendIRGenerationPass:
         self.batches, self.failures, self.warnings = [], [], []
         self.apis = [copy.deepcopy(row) for row in backend_design_ir.get("modules", []) if row.get("kind") == "API"]
         self.backend_types = backend_design_ir.get("types", [])
-        self.api_owners = {row.get("requirement_id", row.get("id")): row.get("api_ids", [])
-                           for row in backend_design_ir.get("requirements", [])}
+        self.api_owners = {rid: [row["id"] for row in self.apis if rid in row["requirement_ids"]]
+                           for rid in self.nodes}
         self.visuals = []
         self.visual_objects = {}
         analyses = {row.get("id", row.get("reference_id")): row for row in visual_analyses or []}
@@ -73,16 +76,9 @@ class FrontendIRGenerationPass:
                        "requirement_ids": [], "children": [], "bindings": {},
                    }], "data": [], "events": [], "functions": [], "pending_capabilities": [],
                    "requirement_links": {}}
-        gaps: dict[str, Any] = {}
-        for requirement in backend_design_ir.get("requirements", []):
-            for source in requirement.get("pending_capabilities", []):
-                gap = copy.deepcopy(source)
-                prior = gaps.get(gap["id"], {})
-                gap["requirement_ids"] = list(dict.fromkeys([
-                    *prior.get("requirement_ids", []), *gap["requirement_ids"], requirement["requirement_id"]]))
-                gap["function_ids"] = list(dict.fromkeys([*prior.get("function_ids", []), *gap["function_ids"]]))
-                gaps[gap["id"]] = gap
-        self.ir["pending_capabilities"] = list(gaps.values())
+        report_path = self.artifact_root / "design" / "backend" / "report.json"
+        backend_report = json.loads(report_path.read_text()) if report_path.is_file() else {}
+        self.ir["pending_capabilities"] = copy.deepcopy(backend_report.get("pending_capabilities", []))
         if self.visuals:
             self.ir["visual_references"] = [{"id": row["id"], "path": row["path"]} for row in self.visuals]
         # Design children before their parent; schedule every requirement once.
@@ -187,9 +183,10 @@ class FrontendIRGenerationPass:
     def _api(row: dict[str, Any]) -> dict[str, Any]:
         def fields(key: str) -> list[dict[str, Any]]:
             return [{**copy.deepcopy(field), "type": copy.deepcopy(field.get("backend_type", field["type"]))}
-                    for field in row.get(key, [])]
+                    for field in module_fields(row, key)]
         return {"id": row["id"], "spec": row.get("spec", ""), "inputs": fields("inputs"),
-                "outputs": fields("outputs"), "entrypoint": row.get("entrypoint", {})}
+                "outputs": fields("outputs"),
+                **{key: row[key] for key in ("path", "method", "authentication", "status_code", "content_type")}}
 
     def _merge(self, phase: str, output: dict[str, Any], requirements: list[str]) -> None:
         """Mechanical atomic merge only: no shape/type/reference/coverage inspection."""

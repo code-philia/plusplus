@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 from typing import Any
+from ..ir.backend import module_fields
 
 
 def project_lowering_design(ir: dict[str, Any]) -> dict[str, Any]:
@@ -35,42 +36,50 @@ def project_lowering_design(ir: dict[str, Any]) -> dict[str, Any]:
         active.add(key)
         module = modules[key]
         rows = []
-        for access in module['data_access']:
+        for access in module.get('data_access', []):
             for operation in ('read', 'create', 'update'):
                 if access[operation]:
                     rows.append({'id': f'{key}:{access["table"]}:{operation}', 'operation': operation.upper(),
                                  'target': access['table'], 'fields': access[operation]})
             if access['delete']:
                 rows.append({'id': f'{key}:{access["table"]}:delete', 'operation': 'DELETE', 'target': access['table'], 'fields': []})
-        for call in module['calls']:
+        for call in module.get('calls', []):
             rows += effects(call['module_id'], active)
         return list({(row['operation'], row['target'], tuple(row['fields'])): row for row in rows}.values())
 
     callers: dict[str, list[str]] = {key: [] for key in modules}
     for key, module in modules.items():
-        for call in module['calls']:
+        for call in module.get('calls', []):
             callers[call['module_id']].append(key)
     projected = []
     for key, module in modules.items():
         # Retain full collaboration/criteria/context for implementation prompts,
         # including consumers that read the serialized module spec downstream.
-        blueprint = json.dumps({'context': module['context'], 'calls': module['calls'],
-                                'data_access': module['data_access'], 'acceptance_criteria': module['acceptance_criteria']},
+        blueprint = json.dumps({'context': module_fields(module, 'context'), 'calls': module.get('calls', []),
+                                'data_access': module.get('data_access', []), 'acceptance_criteria': module.get('acceptance_criteria', [])},
                                ensure_ascii=False, separators=(',', ':'))
         projected.append({**copy.deepcopy(module), 'owner_requirement': key.split('::', 1)[0],
+                          'name': key.rsplit('.', 1)[-1],
+                          'calls': copy.deepcopy(module.get('calls', [])),
+                          'data_access': copy.deepcopy(module.get('data_access', [])),
+                          'acceptance_criteria': copy.deepcopy(module.get('acceptance_criteria', [])),
                           # Separate context contracts keep trusted values out
                           # of HTTP input and ordinary input interfaces.
-                          'inputs': fields(module['inputs']),
-                          'context': fields(module['context']),
+                          'inputs': fields(module_fields(module, 'inputs')),
+                          'context': fields(module_fields(module, 'context')),
                           'backend_module': copy.deepcopy(module),
-                          'outputs': fields(module['outputs']),
+                          'outputs': fields(module_fields(module, 'outputs')),
                           'spec': module['spec'] + '\nImplementation blueprint: ' + blueprint,
                           'effects': effects(key), 'callers': sorted(set(callers[key])),
-                          'callees': list(dict.fromkeys(call['module_id'] for call in module['calls'])),
+                          'callees': list(dict.fromkeys(call['module_id'] for call in module.get('calls', []))),
                           'obligations': [], 'self_obligation_ids': [], 'parent_id': None})
     projected_map = {row['id']: row for row in projected}
     requirements = []
-    for row in ir['requirements']:
+    associations = sorted({rid for module in modules.values() for rid in module['requirement_ids']})
+    for rid in associations:
+        api_ids = [key for key, module in modules.items() if module['kind'] == 'API' and rid in module['requirement_ids']]
+        row = {'requirement_id': rid, 'api_ids': api_ids, 'server_state': bool(api_ids),
+               'spec': '\n'.join(modules[key]['spec'] for key in api_ids)}
         inputs, outputs = {}, {}
         for key in row['api_ids']:
             for direction, destination in [('inputs', inputs), ('outputs', outputs)]:
