@@ -518,7 +518,7 @@ class Compiler:
                              frontend={"frontend_ir": frontend.frontend_ir,
                                        "report": frontend.report})
         self._runtime.events.mark_phase_started("FRONTEND_LOWERING", "Lowering frontend IR to React.")
-        await self._log("Compiler", "Deterministically lowering React components, types, wiring and behavior placeholders; no model calls.")
+        await self._log("Compiler", "Planning React subtree components and frontend function files; generating local types, props, handler and function skeletons.")
         lowered_frontend = FrontendReactLowerer(request.output_dir).lower(
             frontend.frontend_ir, design.design_ir, backend_glue.route_registry, request.web_port,
         )

@@ -129,11 +129,18 @@ class CodeBindingLowerer:
                         "visibility": location.get('visibility', 'local' if kind == 'UI'
                                                    and identity in ui_units and ui_units[identity] != identity else 'export'),
                         "input_type": copy.deepcopy(location.get("input_type")),
-                        "output_type": copy.deepcopy(location.get("output_type")), "props_type": None,
+                        "output_type": copy.deepcopy(location.get("output_type")),
+                        "props_type": copy.deepcopy(location.get("props_type")),
+                        "context_type": copy.deepcopy(location.get("context_type")),
+                        "component_id": location.get("component_id"),
+                        "parameters": copy.deepcopy(location.get("parameters", [])),
+                        "calling_convention": location.get("calling_convention"),
+                        "store_types": copy.deepcopy(location.get("store_types", [])),
                         "route": {"path": item["route"]} if "route" in item else None,
                         "callees": _strings(location.get("callees"))})
                     type_bindings.extend(_frontend_declared_types([
-                        location[key] for key in ("input_type", "output_type") if isinstance(location.get(key), dict)]))
+                        *[location[key] for key in ("input_type", "output_type", "props_type", "context_type") if isinstance(location.get(key), dict)],
+                        *location.get("store_types", [])]))
             for location in locations.values():
                 if location.get("kind") != "API_CLIENT":
                     continue
@@ -143,10 +150,17 @@ class CodeBindingLowerer:
                     "owner_requirements": _strings(location.get("requirement_ids")), "kind": "API_CLIENT",
                     "file": location["file"], "symbol": location["symbol"],
                     "input_type": copy.deepcopy(location.get("input_type")),
-                    "output_type": copy.deepcopy(location.get("output_type")), "props_type": None,
+                    "output_type": copy.deepcopy(location.get("output_type")),
+                    "props_type": copy.deepcopy(location.get("props_type")),
+                    "context_type": copy.deepcopy(location.get("context_type")),
+                    "component_id": location.get("component_id"),
+                    "parameters": copy.deepcopy(location.get("parameters", [])),
+                    "calling_convention": location.get("calling_convention"),
+                    "store_types": copy.deepcopy(location.get("store_types", [])),
                     "route": _compact_backend_route(backend_routes.get(api_id)), "callees": [api_id]})
                 type_bindings.extend(_frontend_declared_types([
-                    location[key] for key in ("input_type", "output_type") if isinstance(location.get(key), dict)]))
+                    *[location[key] for key in ("input_type", "output_type", "props_type", "context_type") if isinstance(location.get(key), dict)],
+                    *location.get("store_types", [])]))
         type_bindings = _deduplicate_type_bindings(type_bindings, errors)
 
         bindings.sort(key=lambda row: str(row.get("module_id", "")))

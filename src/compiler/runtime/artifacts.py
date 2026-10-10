@@ -116,6 +116,8 @@ class CompilerArtifactStore:
         write_json_atomic(report_path, report)
         write_json_atomic(root / "bindings.json", {"bindings": report.get("bindings", [])})
         write_json_atomic(root / "ui_plan.json", report.get("ui_plan", {}))
+        write_json_atomic(root / "module_plan.json", report.get("ui_plan", {}))
+        write_json_atomic(root / "function_plan.json", report.get("ui_plan", {}).get("function_plan", []))
         write_json_atomic(root / "implementation_tasks.json", {
             "implementation_tasks": report.get("implementation_tasks", [])
         })
@@ -146,6 +148,19 @@ class CompilerArtifactStore:
         previous = getattr(self, "_previous_frontend_sources", {})
         if not isinstance(previous, dict):
             raise ValueError("Invalid prior frontend source manifest")
+        # Check all destinations before replacing any installed skeleton.
+        for relative, source in sources.items():
+            target = (workspace / relative).resolve()
+            if workspace not in target.parents:
+                raise ValueError(f"Frontend source escapes workspace: {relative}")
+            if target.is_file():
+                current = target.read_text(encoding="utf-8")
+                if relative in previous and current != source and current != previous[relative].replace("\r\n", "\n"):
+                    raise ValueError(f"Existing frontend source has implementation changes: {relative}")
+                if relative not in previous and current != source and relative.startswith(
+                    ("frontend/src/components/", "frontend/src/pages/", "frontend/src/functions/", "frontend/src/api/", "frontend/src/runtime/")
+                ):
+                    raise ValueError(f"Frontend source is not owned by this lowering: {relative}")
         retiring = []
         current_paths = {str((workspace / relative).resolve()).casefold() for relative in sources}
         for relative, old_content in previous.items():

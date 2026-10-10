@@ -1,7 +1,6 @@
 """Stable TypeScript names and lossless frontend/backend value types."""
 from __future__ import annotations
 
-from compiler.ir.frontend import frontend_events
 from compiler.ir.backend import module_fields
 
 import hashlib
@@ -49,30 +48,5 @@ class Types:
         return "{\n" + "\n".join(
             js(field["semantic_id"] if semantic else field["name"]) +
             ("" if field["required"] else "?") + ": " +
-            self.value(field.get("backend_type", field["type"]), field.get("nullable", False)) + ";"
+            self.value(field["type"], field.get("nullable", False)) + ";"
             for field in fields) + "\n}"
-
-    def source(self) -> str:
-        lines = ["export type JSONValue = string | number | boolean | null | JSONValue[] | { [key: string]: JSONValue };", ""]
-        for key, row in sorted(self.definitions.items()):
-            value = self.fields(row["fields"], semantic=False) if row["kind"] == "object" else " | ".join(js(v) for v in row["values"]) or "never"
-            lines.append(f"export type {symbol('Type', key)} = {value};")
-        for table, ins, outs in (("functions", "inputs", "outputs"), ("events", "payload", None)):
-            for row in (frontend_events(self.ir) if table == "events" else self.ir[table]):
-                lines.append(f"export type {symbol('Input', row['id'])} = {self.fields(row[ins])};")
-                if outs:
-                    lines.append(f"export type {symbol('Output', row['id'])} = {self.fields(row[outs])};")
-        for key, row in self.apis.items():
-            lines.append(f"export type {symbol('Input', key)} = {self.fields(row['inputs'])};")
-            lines.append(f"export type {symbol('Output', key)} = {self.fields(row['outputs'])};")
-        lines.append("export interface DataValues {")
-        for row in self.ir["data"]:
-            lines.append("// Data blueprint: " + js(row))
-            lines.append(js(row["id"]) + ": " + self.value(row["type"], row["nullable"]) + (" | undefined" if "initial" not in row else "") + ";")
-        lines.append("}")
-        for name, rows in (("FunctionContracts", self.ir["functions"]), ("APIContracts", list(self.apis.values()))):
-            lines.append(f"export interface {name} {{")
-            for row in rows:
-                lines.append(js(row["id"]) + ": { input: " + symbol("Input", row["id"]) + "; output: " + symbol("Output", row["id"]) + " };")
-            lines.append("}")
-        return "\n".join(lines) + "\n"

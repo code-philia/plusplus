@@ -64,6 +64,14 @@ def frontend_subgraph(ir: dict[str, Any], requirement_id: str, target_ids: set[s
         selected = (target_ids & rows.keys()) | {key for key, row in rows.items()
                                                 if requirement_id in row.get("requirement_ids", [])}
         selected.update(set(ir.get('requirement_links', {}).get(requirement_id, {}).get('uses', [])) & rows.keys())
+        # A component can contain UI from several requirements. Supply its whole
+        # planned region so edits preserve the other surfaces and local handlers.
+        from compiler.frontend_lowering.planning import plan_ui_units
+        plan = plan_ui_units(ir)
+        components = {plan["ui_units"][key] for key in selected if key in ui}
+        components.update(plan["ui_units"][event["ui_id"]] for event in frontend_events(ir)
+                          if event["id"] in selected)
+        selected.update(key for unit in plan["units"] if unit["id"] in components for key in unit["ui_ids"])
         structural = set()
         for key in list(selected):
             seen = set()
