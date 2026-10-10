@@ -43,6 +43,8 @@ class ERModelIR(TypedDict):
     status: Literal["RESOLVED", "PROPOSED"]
     entities: list[EREntity]
     relationships: list[ERRelationship]
+    contributions: dict[str, Any]
+    conflicts: list[dict[str, Any]]
 
 
 SchemaDataType = Literal["string", "integer", "number", "boolean", "date", "datetime", "json", "uuid"]
@@ -54,6 +56,7 @@ class SchemaDefault(TypedDict):
 
 
 class SchemaColumn(TypedDict):
+    """Storage semantics are explicit; ER properties are never interpreted at lowering."""
     name: str
     type: SchemaDataType
     nullable: bool
@@ -61,7 +64,6 @@ class SchemaColumn(TypedDict):
     generation: Literal["none", "application_uuid"]
     description: str
     origin: str
-    properties: dict[str, Any]
     requirement_ids: list[str]
 
 
@@ -70,6 +72,7 @@ class SchemaConstraint(TypedDict):
     kind: Literal["PRIMARY_KEY", "UNIQUE", "FOREIGN_KEY", "CHECK"]
     columns: list[str]
     requirement_ids: list[str]
+    comparison: NotRequired[Literal["exact", "case_insensitive"]]
     referenced_table: NotRequired[str]
     referenced_columns: NotRequired[list[str]]
     on_delete: NotRequired[Literal["RESTRICT"]]
@@ -87,10 +90,20 @@ class SchemaTable(TypedDict):
     requirement_ids: list[str]
 
 
+class MinimumParticipation(TypedDict):
+    owner_table: str
+    owner_columns: list[str]
+    related_table: str
+    related_columns: list[str]
+    minimum: Literal[1]
+
+
 class RuntimeRule(TypedDict):
+    """Backend transaction obligation; lowering must not guess a database constraint."""
+    responsibility: Literal["backend"]
     scope: str
-    kind: str
-    value: Any
+    kind: Literal["minimum_participation"]
+    value: MinimumParticipation
     reason: str
     requirement_ids: list[str]
 

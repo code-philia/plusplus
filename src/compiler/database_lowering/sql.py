@@ -51,6 +51,8 @@ def constraint_sql(constraint: dict[str, Any]) -> str:
     if kind == 'PRIMARY_KEY':
         return prefix + f'PRIMARY KEY ({columns})'
     if kind == 'UNIQUE':
+        if constraint.get('comparison') == 'case_insensitive':
+            columns = ', '.join(identifier(value) + ' COLLATE NOCASE' for value in constraint['columns'])
         return prefix + f'UNIQUE ({columns})'
     if kind == 'CHECK':
         return prefix + f'CHECK ({predicate(constraint["predicate"])})'

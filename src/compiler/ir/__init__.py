@@ -7,7 +7,7 @@ producers and consumers can share the same definitions.
 from .database import (
     ERAttribute, EREntity, ERModelIR, ERRelationship,
     SchemaColumn, SchemaConstraint, SchemaDefault, SchemaIR, SchemaTable,
-    SchemaDataType, RuntimeRule,
+    SchemaDataType, RuntimeRule, MinimumParticipation,
 )
 from .backend import (
     BackendIR, BackendModule, APIModule, FunctionModule,
@@ -21,7 +21,7 @@ from .frontend import (
 
 __all__ = [
     "ERAttribute", "EREntity", "ERModelIR", "ERRelationship", "SchemaDataType",
-    "RuntimeRule", "SchemaColumn", "SchemaConstraint", "SchemaDefault",
+    "RuntimeRule", "MinimumParticipation", "SchemaColumn", "SchemaConstraint", "SchemaDefault",
     "SchemaIR", "SchemaTable",
     "BackendIR", "BackendModule", "APIModule",
     "FunctionModule", "DatabaseModule", "ModuleBase", "BackendField",

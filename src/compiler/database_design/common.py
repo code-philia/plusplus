@@ -13,7 +13,7 @@ def _compact_properties(raw: Any) -> dict[str, Any]:
     return {
         key: copy.deepcopy(value)
         for key, value in raw.items()
-        if value is not None and not (key in {"date_past", "date_future"} and value is False)
+        if value is not None
     }
 
 

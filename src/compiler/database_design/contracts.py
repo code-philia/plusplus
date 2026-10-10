@@ -51,20 +51,17 @@ FIELD_PROPERTIES_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "min_length", "max_length", "pattern", "enum", "format", "minimum", "maximum", "date_past",
-        "date_future", "default",
+        "min_length", "max_length", "enum", "minimum", "maximum", "default", "unique", "comparison",
     ],
     "properties": {
         "min_length": _nullable({"type": "integer", "minimum": 0}),
         "max_length": _nullable({"type": "integer", "minimum": 0}),
-        "pattern": _nullable({"type": "string"}),
         "enum": _nullable({"type": "array", "items": {"type": "string"}, "minItems": 1}),
-        "format": _nullable({"type": "string"}),
         "minimum": _nullable({"type": "number"}),
         "maximum": _nullable({"type": "number"}),
-        "date_past": _nullable({"type": "boolean"}),
-        "date_future": _nullable({"type": "boolean"}),
         "default": _nullable({"type": ["string", "number", "boolean"]}),
+        "unique": _nullable({"type": "boolean"}),
+        "comparison": _nullable({"enum": ["exact", "case_insensitive"]}),
     },
 }
 
@@ -158,72 +155,59 @@ Valid empty output example:
 """
 
 
-FIELD_INSTRUCTIONS = """You are an ER-modeling specialist focused on persistent entity attributes.
-Your task is to refine the shared ER model for exactly one atomic requirement, using only its related_entities.
-These are logical attributes and business-domain constraints, not MySQL column types or physical storage options.
-Do not create entities, relationships, foreign-key fields, cross-field constraints, APIs, modules, or SQL.
-Do not persist transient form inputs, confirmation passwords, search criteria, selection state, or derived display
-values unless the requirement explicitly gives them a persistent domain meaning.
-
-Compare the requirement with each supplied entity's current fields:
-- Existing field already sufficient: silently use it; omit it from both field lists. There is no reuse_fields key.
-- Missing attribute: add a complete declaration to new_fields. Its name must not already exist on that entity.
-- Existing attribute needs revision: add its complete resulting declaration to update_fields, with exactly the
-  same name. This is a full replacement, not a patch: include unchanged attributes and all retained properties.
-  Preserve constraints needed by earlier requirements; reconcile them with the current requirement. Do not weaken
-  or erase earlier constraints merely because the current requirement does not repeat them. Use null to remove a
-  property only when the combined requirements justify removal. Do not rename fields or emit unchanged updates.
-- The same field must not occur twice or appear in both lists. Use [] when a list has no changes.
-- Never create or update id, names ending in _id, or fields with origin SYSTEM or RELATIONSHIP. The compiler owns
-  identifiers and Pass 3 owns relationships and their references. Return only entities with field changes.
-
-Every new_fields and update_fields declaration has exactly these five attributes:
-- name: nonempty singular snake_case identifier matching ^[a-z][a-z0-9_]*$. In update_fields it identifies the
-  existing attribute; in new_fields it identifies a new attribute. Choose names by domain meaning.
-- type: exactly one of string (text), integer (whole number), number (integer or fractional number), boolean
-  (true/false), date (calendar date), datetime (date and time), json (structured JSON value). Use logical types,
-  not SQL types. uuid and foreign_key are reserved for the compiler.
-- nullable: boolean. true permits absent/null values; false requires a value on every stored instance of the
-  entity. A form requiring input does not by itself prove all stored instances must have a non-null value.
-- description: string explaining the attribute's persistent domain meaning.
-- properties: object containing all ten keys below. Use null for every inapplicable or unspecified property;
-  false is also allowed for inactive date flags. Do not invent constraints, formats or defaults.
-
-Allowed properties and their values:
-- min_length: nonnegative integer or null; minimum character count, string only.
-- max_length: nonnegative integer or null; maximum character count, string only; must be >= min_length.
-- pattern: regex string or null; required text pattern, string only. Use the regular-expression syntax supported
-  by the Python re validator; this is a domain rule, not SQL.
-- enum: nonempty list of distinct strings or null; allowed domain values, string only.
-- format: string or null; requirement-supported semantic format label such as email, uri, date or date-time,
-  on string/date/datetime only. This is descriptive metadata, not an SQL type or an enforced format validator.
-- minimum: finite number or null; inclusive lower bound, integer/number only; whole number for integer fields.
-- maximum: finite number or null; inclusive upper bound, integer/number only; must be >= minimum; whole number
-  for integer fields.
-- date_past: boolean or null; true requires a date/datetime strictly before the current date/time. false/null
-  imposes no past-only rule. Only date/datetime; must not be true together with date_future.
-- date_future: boolean or null; true requires a date/datetime strictly after the current date/time. false/null
-  imposes no future-only rule. Only date/datetime; must not be true together with date_past.
-- default: string, finite number, boolean or null; a requirement-supported literal matching the field's type and
-  constraints. null means no declared default, not an explicit DEFAULT NULL. SQL expressions and JSON object/array
-  defaults are not supported by this protocol. Do not encode CURRENT_TIMESTAMP or other expressions as strings.
-
-Return exactly one JSON object with these keys and no others:
-- requirement_id: copy requirement.requirement_id exactly.
-- entities: [{"entity": existing_key, "new_fields": [complete declarations],
-  "update_fields": [complete resulting declarations]}]. Omit entities with no changes. If no entity changes,
-  return entities: []. Never emit an entity with both lists empty.
-
-Valid new-field output example:
-{"requirement_id":"REQ-3.2","entities":[{"entity":"booking","new_fields":[{"name":"booking_number","type":"string","nullable":false,"description":"Public booking number.","properties":{"min_length":1,"max_length":20,"pattern":null,"enum":null,"format":null,"minimum":null,"maximum":null,"date_past":null,"date_future":null,"default":null}}],"update_fields":[]}]}
-Valid update example (username already exists; retain its meaning and constraints and require at most 20 characters):
-{"requirement_id":"REQ-1.2","entities":[{"entity":"user","new_fields":[],"update_fields":[{"name":"username","type":"string","nullable":false,"description":"Account username.","properties":{"min_length":1,"max_length":20,"pattern":null,"enum":null,"format":null,"minimum":null,"maximum":null,"date_past":null,"date_future":null,"default":null}}]}]}
-Valid unchanged-field output example:
-{"requirement_id":"REQ-3.1","entities":[]}
+ER_SCOPE = """Scope: design the initial schema for a brand-new SQLite project, not migrations, existing data,
+fixtures, query/index tuning, or inferred implementation optimizations. ER contains persistent domain
+entities, logical attributes, semantic relationships, and explicitly requirement-backed storage invariants.
+Entity names beginning with arc_ or sqlite_ are reserved for the compiler/database.
+A storage invariant applies to every stored instance, not just a form, operation, actor, or state transition.
+Do not place UI validation, authorization, workflows, concurrency protocols, cross-field calculations,
+regex/email/URL validation, or time-relative rules (past/future/current time) in ER properties or descriptions
+as storage constraints. These belong to backend specifications derived from the original requirements.
+Unknown or unexpressible rules must not be approximated by invented columns or constraints.
 """
 
+FIELD_INSTRUCTIONS = ER_SCOPE + """You are an ER-modeling specialist focused on persistent attributes.
+Analyze exactly one requirement using related_entities. Do not create entities, foreign keys, relationships,
+cross-field constraints, modules, SQL or physical database options. Do not persist transient inputs or display values.
 
-RELATIONSHIP_INSTRUCTIONS = """You are an ER-modeling specialist discovering relationships from an existing shared ER graph.
+- A missing field goes in new_fields. An existing field needing a contribution goes in update_fields.
+- Both lists use complete declarations with name, type, nullable, description, properties.
+- An update is THIS requirement's complete contribution, not a replacement of the shared definition.
+  Include only storage invariants justified by this requirement; null means this requirement contributes no
+  constraint. Do not copy another requirement's bounds/default/enum just because they are in the shared field.
+- The compiler merges contributions: type must agree; nullable uses AND; lower bounds use max, upper bounds
+  use min; enum sets intersect; uniqueness uses OR. Specified defaults and unique comparison semantics must
+  agree. Empty intersections, invalid ranges and incompatible types are conflicts, never last-write-wins.
+- Updating this requirement's contribution cannot remove any other requirement's facts.
+- An existing field requiring no new or changed fact is reused silently. No reuse_fields key.
+- Do not rename fields or modify id, *_id, SYSTEM or RELATIONSHIP fields. Return only entities with changes.
+
+Field attributes:
+- name: singular snake_case matching ^[a-z][a-z0-9_]*$.
+- type: string, integer, number, boolean, date, datetime or json. uuid/foreign_key are compiler-owned.
+- nullable: true unless this requirement explicitly requires the field on every stored instance.
+  Mandatory form input alone is insufficient for nullable=false.
+- description: persistent domain meaning, without workflows or hidden constraints.
+- properties: all eight keys below; null for unspecified/inapplicable rules. Only explicit storage invariants:
+  min_length/max_length: nonnegative integer, string only, inclusive Unicode code point count; NUL is unsupported;
+  minimum/maximum: finite inclusive bounds, integer/number only; integral values for integer;
+  enum: nonempty distinct strings, string only, allowed values for ALL stored rows (not a dropdown's subset);
+  unique: true for an explicit single-field business key; false/null contributes no constraint;
+  comparison: exact/case_insensitive for a unique string; null means exact when unique=true.
+    case_insensitive means ASCII A-Z folding only, not Unicode case folding or locale-specific comparison;
+  default: a type-compatible literal string/finite number/boolean, null means no contributed default.
+    A default is a storage insertion default, not a form initial value, example, SQL expression or current time.
+
+Return {"requirement_id": supplied requirement.requirement_id, "entities": [
+  {"entity": existing_key, "new_fields": [complete declarations], "update_fields": [complete declarations]}
+]}. Empty list when unchanged; omit entities with both lists empty.
+Example:
+{"requirement_id":"REQ-1.2","entities":[{"entity":"user","new_fields":[],"update_fields":[{"name":"username","type":"string","nullable":true,"description":"Account username.","properties":{"min_length":null,"max_length":20,"enum":null,"minimum":null,"maximum":null,"default":null,"unique":null,"comparison":null}}]}]}
+"""
+ENTITY_INSTRUCTIONS = ER_SCOPE + ENTITY_INSTRUCTIONS
+
+
+RELATIONSHIP_INSTRUCTIONS = ER_SCOPE + """You are an ER-modeling specialist discovering relationships from an existing shared ER graph.
 The analysis unit is focus_entity, not a single requirement. Read its complete fields and all associated
 related_requirements together; they describe the domain meaning of this entity across the application.
 The er_graph contains every entity's name, description, attribute headers and requirement IDs, plus existing
@@ -245,11 +229,13 @@ means parent_max=many and child_max=one, MANY_TO_MANY means many/many. Do not us
 optionality; use the four cardinality values.
 
 An existing relationship with the same key is the same semantic relationship. Repeat its complete current definition
-only when additional requirement evidence or stronger minimum participation is found. Minimum participation may be strengthened from 0 to 1 when explicitly
-required, but must not be weakened. Preserve endpoints, direction and maximum cardinalities; contradictory definitions
+only when additional requirement evidence or stronger minimum participation is found. Minimum participation is a contribution: 0 means no minimum contributed, 1 means an explicitly required
+storage invariant. The compiler merges minima using max; a later 0 cannot erase an earlier 1. Preserve endpoints, direction and maximum cardinalities; contradictory definitions
 must not be silently replaced or bypassed by inventing a new key. Different roles between the same entity pair require
 different keys. For self-relationships, explain the two roles in description. Do not emit unchanged relationships merely
-because entities co-occur. Return [] when no stable association
+because entities co-occur. Minimum participation must hold for every stored instance, not only after
+a particular workflow step. Parent-side and many-to-many minima become explicit backend transaction obligations,
+not database-global scans. Do not assert them merely because the UI displays related records. Return [] when no stable association
 is established. Self-relationships are allowed when the requirement clearly describes them. Do not emit alternatives.
 
 Return exactly one JSON object with entity_key (copy focus_entity.key) and relationships. Each relationship contains exactly:

@@ -51,6 +51,8 @@ class DatabaseSchemaPass:
     def __init__(self, model: StructuredModel, artifact_root: Path) -> None:
         self._model = model
         self._artifact_root = artifact_root.expanduser().resolve()
+        if hasattr(model, "set_usage_path"):
+            model.set_usage_path(self._artifact_root / "model_usage.jsonl")
         self._log = SynchronousLog("DatabaseSchemaPass", workspace_root=self._artifact_root.parent)
         self._retry_count = _bounded_env_int("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", 2, 0, 10)
         self._trace_enabled = _enabled_env_flag("ARC_DATABASE_TRACE", default=True)
@@ -145,6 +147,10 @@ class DatabaseSchemaPass:
         errors.extend(refined.errors)
         state.warnings.extend(refined.warnings)
         schema = refined.schema
+        if errors:
+            schema["status"] = "PROPOSED"
+            er_model["status"] = "PROPOSED"
+        schema["er_model"] = er_model
         states.update({node_id: "SCHEMA_ANALYZED" if not errors else "FAILED" for node_id in requirements})
         return DatabasePassResult(schema, states, errors, state.warnings)
 
@@ -165,7 +171,9 @@ class DatabaseSchemaPass:
         if phase == "pass1_entities":
             return {"requirement": requirement, "existing_entities": state.entity_headers()}
         if phase == "pass2_fields":
-            return {"requirement": requirement, "related_entities": state.schema_slice(node_id)["entities"]}
+            return {"requirement": requirement, "related_entities": state.schema_slice(node_id)["entities"],
+                    "own_field_contributions": {key: copy.deepcopy(rows[node_id])
+                                                for key, rows in state.contributions["fields"].items() if node_id in rows}}
         raise ValueError(f"Unknown database design phase: {phase}")
 
     def _relationship_context(

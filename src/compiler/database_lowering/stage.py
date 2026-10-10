@@ -75,7 +75,6 @@ class DatabaseLowerer:
             lowered = strategy.lower(schema, symbols.registry, files.registry)
             sources = {**types.sources, **lowered.sources}
             result.warnings.extend(lowered.warnings)
-            result.warnings.extend(f'DATABASE_RUNTIME_RULE: {rule["scope"]}: {rule["kind"]}' for rule in schema.get('runtime_rules', []))
             result.sources = sources
             result.manifest = {
                 'schema_version': 5, 'status': 'DATABASE_SCHEMA_LOWERED',

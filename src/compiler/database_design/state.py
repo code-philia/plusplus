@@ -17,6 +17,7 @@ from .common import (
     _relationship_id,
 )
 from .contracts import FIELD_TYPES, IDENTIFIER_PATTERN, RELATIONSHIP_TYPES
+from .merging import merge_field_contributions
 
 
 class DatabaseSchemaState:
@@ -31,6 +32,8 @@ class DatabaseSchemaState:
         self.requirement_relationship_links: dict[str, set[str]] = {}
         self.requirement_constraint_links: dict[str, set[str]] = {}
         self.warnings: list[str] = []
+        self.contributions: dict[str, Any] = {"fields": {}, "relationships": {}}
+        self.conflicts: list[dict[str, Any]] = []
 
     def entity_headers(self) -> list[dict[str, str]]:
         return [{"key": item["key"], "description": item["description"]} for item in self._ordered_entities()]
@@ -69,7 +72,7 @@ class DatabaseSchemaState:
                 }
                 self._add_field(key, {
                     "name": "id", "type": "uuid", "nullable": False,
-                    "description": "Compiler-provided stable primary key.", "properties": {"format": "uuid"},
+                    "description": "Compiler-provided stable primary key.", "properties": {},
                     "origin": "SYSTEM", "references": None,
                 }, requirement_id, errors, trace=False)
             self._link_entity(requirement_id, key)
@@ -90,12 +93,7 @@ class DatabaseSchemaState:
                 if name in self.entities[key]["fields"]:
                     errors.append(_format_error("ARC2223", f"Pass 2 cannot recreate existing field: {key}.{name}; use update_fields.", node_id=requirement_id))
                     continue
-                self._add_field(key, {
-                    "name": name, "type": raw_field.get("type"), "nullable": raw_field.get("nullable"),
-                    "description": str(raw_field.get("description", "")).strip(),
-                    "properties": _compact_properties(raw_field.get("properties", {})),
-                    "origin": "REQUIREMENT", "references": None,
-                }, requirement_id, errors)
+                self._apply_field_contribution(key, raw_field, requirement_id, errors)
             for raw_field in item.get("update_fields", []):
                 name = _normalize_identifier(str(raw_field.get("name", "")))
                 existing = self.entities[key]["fields"].get(name)
@@ -105,15 +103,29 @@ class DatabaseSchemaState:
                 if name == "id" or name.endswith("_id") or existing["origin"] != "REQUIREMENT":
                     errors.append(_format_error("ARC2224", f"Pass 2 cannot update system or foreign-key field: {key}.{name}.", node_id=requirement_id))
                     continue
-                # A declaration is the complete resulting definition. Replace
-                # domain attributes, retaining identity, origin and provenance.
-                existing.update({
-                    "type": raw_field["type"],
-                    "nullable": raw_field["nullable"],
-                    "description": raw_field["description"].strip(),
-                    "properties": _compact_properties(raw_field["properties"]),
-                })
-                self._link_field(requirement_id, key, name)
+                self._apply_field_contribution(key, raw_field, requirement_id, errors)
+
+    def _apply_field_contribution(self, key: str, raw: dict[str, Any], rid: str, errors: list[str]) -> None:
+        reference = key + "." + raw["name"]
+        candidates = copy.deepcopy(self.contributions["fields"].get(reference, {}))
+        candidates[rid] = copy.deepcopy(raw)
+        try:
+            merged = merge_field_contributions(key, candidates)
+        except ValueError as exc:
+            self._record_conflict(reference, rid, raw, str(exc), errors)
+            return
+        existing = self.entities[key]["fields"].get(raw["name"])
+        if existing is None:
+            self._add_field(key, {**merged, "origin": "REQUIREMENT", "references": None}, rid, errors)
+        else:
+            existing.update(merged)
+            self._link_field(rid, key, raw["name"])
+        self.contributions["fields"][reference] = candidates
+
+    def _record_conflict(self, scope: str, rid: str, candidate: dict[str, Any], reason: str, errors: list[str]) -> None:
+        self.conflicts.append({"scope": scope, "requirement_id": rid,
+                               "candidate": copy.deepcopy(candidate), "reason": reason})
+        errors.append(_format_error("ARC2228", f"Conflicting contribution {scope}: {reason}", node_id=rid))
 
     def apply_relationships(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
         related = set(self.entities)
@@ -141,14 +153,21 @@ class DatabaseSchemaState:
                 }
                 self.relationships[relationship_id] = relationship
             else:
-                if any(relationship[name] != raw[name] for name in ("parent", "child", "type", "parent_max", "child_max")) or any(raw[name] < relationship[name] for name in ("parent_min", "child_min")):
-                    errors.append(_format_error("ARC2233", f"Conflicting ER definition for relationship: {relationship_key}.", node_id=requirement_id))
+                if any(relationship[name] != raw[name] for name in ("parent", "child", "type", "parent_max", "child_max")):
+                    self._record_conflict(relationship_id, requirement_id, raw,
+                                          "incompatible endpoints or maximum cardinalities", errors)
                     continue
-                relationship.update({"parent": parent, "child": child, "type": relationship_type,
-                    "parent_min": int(raw["parent_min"]), "parent_max": raw["parent_max"],
-                    "child_min": int(raw["child_min"]), "child_max": raw["child_max"],
-                    "child_required": int(raw["child_min"]) == 1,
-                    "description": str(raw.get("description", "")).strip()})
+                relationship["parent_min"] = max(relationship["parent_min"], int(raw["parent_min"]))
+                relationship["child_min"] = max(relationship["child_min"], int(raw["child_min"]))
+                relationship["child_required"] = relationship["child_min"] == 1
+                descriptions = set(relationship["description"].split("\n")) | {raw["description"].strip()}
+                relationship["description"] = "\n".join(sorted(descriptions - {""}))
+            ledger = self.contributions["relationships"].setdefault(relationship_id, {})
+            # Entity-focused discovery can repeat the same evidence. Keep all distinct proposals.
+            proposals = ledger.setdefault(requirement_id, [])
+            if raw not in proposals:
+                proposals.append(copy.deepcopy(raw))
+                proposals.sort(key=lambda value: json.dumps(value, sort_keys=True))
             _append_unique(relationship["requirement_ids"], requirement_id)
             for evidence_id in raw["evidence_requirement_ids"]:
                 _append_unique(relationship["evidence_requirement_ids"], evidence_id)
@@ -173,6 +192,8 @@ class DatabaseSchemaState:
                         self._add_constraint("PRIMARY_KEY", [ref], "Entity primary key.", source)
                     if not field_item["nullable"]:
                         self._add_constraint("NOT_NULL", [ref], "Field is required.", source)
+                    if field_item.get("properties", {}).get("unique") is True:
+                        self._add_constraint("UNIQUE", [ref], "Attribute business key.", source)
                     if field_item.get("references"):
                         self._add_constraint(
                             "FOREIGN_KEY", [ref, field_item["references"]], "Relationship foreign key.", source,
@@ -221,6 +242,8 @@ class DatabaseSchemaState:
         return {
             "ir_kind": "er_model",
             "status": "PROPOSED",
+            "contributions": copy.deepcopy(self.contributions),
+            "conflicts": copy.deepcopy(self.conflicts),
             "entities": [self._public_entity(item) for item in self._ordered_entities()],
             "relationships": [
                 {name: copy.deepcopy(item[name]) for name in (
@@ -320,7 +343,7 @@ class DatabaseSchemaState:
             }
             self._add_field(association, {
                 "name": "id", "type": "uuid", "nullable": False,
-                "description": "Compiler-provided stable primary key.", "properties": {"format": "uuid"},
+                "description": "Compiler-provided stable primary key.", "properties": {},
                 "origin": "SYSTEM", "references": None,
             }, requirement_id, errors, trace=False)
         self._link_entity(requirement_id, association)
