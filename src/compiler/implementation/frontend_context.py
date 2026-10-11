@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from compiler.ir.frontend import frontend_events
 from compiler.ir.frontend_storage import read_frontend_ir
+from compiler.preprocessing.visual_cache import cache_path, read_cache
 
 import copy
 import json
@@ -17,12 +18,9 @@ def implementation_requirement(
     """Project visual references for model input without mutating requirement IR."""
     cache: dict[str, Any] = {}
     if frontend:
-        path = project_root / ".arc/design/frontend/visual_cache.json"
+        path = cache_path(project_root / ".arc")
         if path.is_file():
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                cache = {posixpath.normpath(key.replace(chr(92), "/")): row
-                         for key, row in loaded.items()}
+            cache = read_cache(path)
     missing: list[str] = []
 
     def project(value: Any) -> Any:
@@ -111,33 +109,11 @@ def frontend_subgraph(ir: dict[str, Any], requirement_id: str, target_ids: set[s
 
 def visual_context(project_root: Path, requirement_id: str) -> list[dict[str, Any]]:
     root = project_root / ".arc/design/frontend"
-    # The exported reference table may be empty while the path-keyed cache
-    # contains the actual analyses. Read both; an index must not mask evidence.
+    # All visual evidence comes from the one design-level analysis store.
     cached: dict[str, Any] = {}
-    for filename in ("visual_cache.json", "visual-references.json", "visual_references.json"):
-        path = root / filename
-        if not path.is_file():
-            continue
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        rows = payload.get("visual_references")
-        entries = enumerate(rows) if isinstance(rows, list) else payload.items()
-        for key, row in entries:
-            if not isinstance(row, dict):
-                continue
-            identity = str(row.get("id") or row.get("reference_id") or key)
-            previous = cached.get(identity, {})
-            merged = {**previous, **row}
-            if previous.get("analysis") and not row.get("analysis"):
-                merged["analysis"] = previous["analysis"]
-            merged["requirement_ids"] = sorted(set(previous.get("requirement_ids", []))
-                                               | set(row.get("requirement_ids", [])))
-            merged.setdefault("source_path", str(key))
-            cached[identity] = merged
+    for key, row in read_cache(cache_path(project_root / ".arc")).items():
+        identity = str(row.get("id") or row.get("reference_id") or key)
+        cached[identity] = row
 
     # Traceability is the authoritative requirement -> visual link.  Older
     # caches may only use the image path as their key, so retain both ids and

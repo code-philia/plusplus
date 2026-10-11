@@ -89,7 +89,8 @@ class CompilerArtifactStore:
             ("ir_kind", "backend_ref", "root_ui_id") if key in frontend_ir})
         paths["frontend_metadata"] = str(metadata_path)
         visual_path = self.frontend_design_root / "visual_references.json"
-        write_json_atomic(visual_path, {"visual_references": frontend_ir.get("visual_references", [])})
+        write_json_atomic(visual_path, {"analysis_ref": "../visual_cache.json",
+                                      "visual_references": frontend_ir.get("visual_references", [])})
         report_path = self.frontend_design_root / "report.json"
         write_json_atomic(report_path, report)
         requirements_path = self.frontend_design_root / "requirements.json"
@@ -97,6 +98,7 @@ class CompilerArtifactStore:
         write_json_atomic(requirements_path, {"requirements": traceability})
         write_json_atomic(ui_data_path, {"ui_data": ui_data_associations(frontend_ir)})
         paths.update({"frontend_visual_references": str(visual_path),
+                      "visual_cache": str(self.design_root / "visual_cache.json"),
                       "frontend_report": str(report_path),
                       "frontend_requirements": str(requirements_path),
                       "frontend_ui_data": str(ui_data_path)})

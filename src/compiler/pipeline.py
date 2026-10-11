@@ -236,7 +236,7 @@ class Compiler:
                 request.requirement_path, preprocessing.requirement_ir,
             )
             if visuals.references:
-                visual_path = artifact_store.frontend_design_root / "visual_cache.json"
+                visual_path = artifact_store.design_root / "visual_cache.json"
                 visual_future = visual_executor.submit(
                     VisualReferenceAnalyzer.from_env(artifact_store.root).analyze_cached,
                     visuals.references, visual_path,
@@ -440,7 +440,7 @@ class Compiler:
 
         if rank < 4:
             assert visuals is not None
-            visual_path = artifact_store.frontend_design_root / "visual_cache.json"
+            visual_path = artifact_store.design_root / "visual_cache.json"
             if visual_future is not None:
                 await self._log("Compiler", "Waiting for visual reference analysis before frontend IR generation.")
                 try:
@@ -458,10 +458,10 @@ class Compiler:
             else:
                 visual_analysis = VisualReferenceAnalysisResult()
             if visual_path.is_file():
-                artifacts["frontend_visual_references"] = str(visual_path)
+                artifacts["visual_cache"] = str(visual_path)
             await self._log(
                 "Compiler",
-                "Generating frontend IR in depth-first postorder: four local passes per node, including parent composition; no review or validation.",
+                "Generating frontend IR in depth-first postorder: three local passes per node, including parent composition; no review or validation.",
             )
             frontend = FrontendIRGenerationPass(model, artifact_store.root).compile(
                 preprocessing.requirement_ir,

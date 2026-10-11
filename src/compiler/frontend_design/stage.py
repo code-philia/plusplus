@@ -22,6 +22,7 @@ from .contracts import PHASE_TABLES, PROMPTS, patch_schema
 from .context import TABLES, frontend_ir_traceability, local_context, ranked, required_types, visual_screen_matches, context_ui_nodes
 from compiler.ir.frontend import frontend_events
 from compiler.ir.frontend_storage import read_frontend_ir, write_frontend_ir
+from compiler.preprocessing.visual_cache import cache_path, image_key, persist_records, read_cache, consolidate_cache
 
 
 @dataclass
@@ -59,9 +60,10 @@ class FrontendIRGenerationPass:
         self.api_owners = {rid: [row["id"] for row in self.apis if rid in row["requirement_ids"]]
                            for rid in self.nodes}
         self.visuals = []
-        cache_path = self.root / "visual_cache.json"
+        visual_path = cache_path(self.artifact_root)
         try:
-            cached = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.is_file() else {}
+            consolidate_cache(visual_path)
+            cached = read_cache(visual_path)
         except (OSError, ValueError):
             cached = {}
             self.warnings.append("Visual analysis cache could not be read; using supplied analyses.")
@@ -69,12 +71,18 @@ class FrontendIRGenerationPass:
             cached = {}
         analyses = {row.get("id", row.get("reference_id")): row for row in
                     [*cached.values(), *(visual_analyses or [])] if isinstance(row, dict)}
+        published = []
         for visual in visual_references:
             row = visual if isinstance(visual, dict) else visual.analysis_payload()
             key = row.get("id", row.get("reference_id"))
+            path = row.get("path", row.get("source_path"))
+            analysis = row.get("analysis") or analyses.get(key, {}).get("analysis", {})
+            if analysis and path:
+                published.append({**row, "id": key, "source_path": path, "analysis": analysis})
             self.visuals.append({"id": key, "path": row.get("path", row.get("source_path")),
                                  "requirement_ids": row.get("requirement_ids", []),
-                                 "analysis": row.get("analysis") or analyses.get(key, {}).get("analysis", {})})
+                                 "analysis": analysis})
+        persist_records(published, visual_path)
         self.ir = {"ir_kind": "frontend_design", "backend_ref": "../backend/backend_ir.json",
                    "types": [], "root_ui_id": "ui.app", "ui": [{
                        "id": "ui.app", "name": "application_shell", "kind": "group", "spec": "Application UI composition root.",
@@ -103,7 +111,9 @@ class FrontendIRGenerationPass:
         self.ir["pending_capabilities"] = list(gaps.values())
         if self.visuals:
             visuals = {row["id"]: row for row in self.ir.get("visual_references", [])}
-            visuals.update({row["id"]: {"id": row["id"], "path": row["path"]} for row in self.visuals})
+            visuals.update({row["id"]: {"id": row["id"], "path": row["path"],
+                           "analysis_ref": "../visual_cache.json", "analysis_key": image_key(row["path"])}
+                            for row in self.visuals})
             self.ir["visual_references"] = list(visuals.values())
         # Design children before their parent; schedule every requirement once.
         for rid in order:

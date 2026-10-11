@@ -366,18 +366,15 @@ class VisualReferenceAnalyzer:
     def analyze_cached(self, references: Sequence[ResolvedVisualReference], path: Path,
                        *, persist: bool = True) -> VisualReferenceAnalysisResult:
         """Find prior observations by image path, including sibling runs; verify content."""
-        try:
-            cached = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-        except (OSError, ValueError):
-            cached = {}
-        if not isinstance(cached, dict):
-            cached = {}
+        from .visual_cache import read_cache, image_key, persist_records, consolidate_cache
+        consolidate_cache(path)
+        cached = read_cache(path)
         # Generated runs share an output parent, but each owns its local cache.
         # Only read other runs; never modify their artifacts or requirement attribution.
         prior_caches: list[tuple[Path, dict[str, Any]]] | None = None
 
         def lookup(values: dict[str, Any], reference: ResolvedVisualReference) -> dict[str, Any] | None:
-            return next((values.get(key) for key in [reference.source_path, *reference.aliases]
+            return next((values.get(key) for key in [image_key(item) for item in [reference.source_path, *reference.aliases]]
                          if isinstance(values.get(key), dict)
                          and values[key].get("sha256") == reference.sha256
                          and not _visual_analysis_error(values[key].get("analysis"), reference.id)), None)
@@ -389,13 +386,15 @@ class VisualReferenceAnalyzer:
             if saved is None:
                 if prior_caches is None:
                     prior_caches = []
-                    # path = <output-parent>/<run>/.arc/design/frontend/visual_cache.json
-                    candidates = path.resolve().parents[4].glob("*/.arc/design/frontend/visual_cache.json")
+                    # path = <output-parent>/<run>/.arc/design/visual_cache.json
+                    siblings = path.resolve().parents[3]
+                    candidates = [*siblings.glob("*/.arc/design/visual_cache.json"),
+                                  *siblings.glob("*/.arc/design/frontend/visual_cache.json")]
                     for candidate in sorted(candidates):
                         if candidate.resolve() == path.resolve():
                             continue
                         try:
-                            value = json.loads(candidate.read_text(encoding="utf-8"))
+                            value = read_cache(candidate)
                         except (OSError, ValueError):
                             continue
                         if isinstance(value, dict):
@@ -407,6 +406,9 @@ class VisualReferenceAnalyzer:
                         break
             if saved is not None:
                 record = reference.to_ir(saved["analysis"])
+                # Imported cache records must be local even if fresh analysis
+                # publication is deferred by the pipeline.
+                persist_records([record], path)
                 self._log.info(f"VISUAL_CACHE_HIT path={reference.source_path} cache={origin}")
             else:
                 result = self.analyze([reference])
@@ -416,25 +418,16 @@ class VisualReferenceAnalyzer:
                 record = result.references[0]
             records.append(record)
             # Reuse aliases/content within this batch even when publication is deferred.
-            for key in [reference.source_path, *reference.aliases]:
+            for key in [image_key(item) for item in [reference.source_path, *reference.aliases]]:
                 cached[key] = record
-            if persist:
-                write_json_atomic(path, cached)
+            if persist and saved is None:
+                persist_records([record], path)
         return VisualReferenceAnalysisResult(references=records, errors=errors)
 
     @staticmethod
     def persist_cached(references: Sequence[dict[str, Any]], path: Path) -> None:
-        try:
-            cached = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-        except (OSError, ValueError):
-            cached = {}
-        if not isinstance(cached, dict):
-            cached = {}
-        for record in references:
-            for key in [record["source_path"], *record.get("aliases", [])]:
-                cached[key] = record
-        if references:
-            write_json_atomic(path, cached)
+        from .visual_cache import persist_records
+        persist_records(references, path)
 
     def _analyze_one(
         self,

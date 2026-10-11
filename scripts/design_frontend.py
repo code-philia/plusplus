@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
             if visuals:
                 print(f"Loading/analyzing {len(visuals)} optional reference images.", flush=True)
                 analyzed = VisualReferenceAnalyzer.from_env(store.root).analyze_cached(
-                    visuals, store.frontend_design_root / "visual_cache.json",
+                    visuals, store.design_root / "visual_cache.json",
                 )
                 analyses = analyzed.references
                 warnings.extend(issue.format() for issue in analyzed.errors)

@@ -111,6 +111,8 @@ class UIFunction(TypedDict):
 class UIVisualReference(TypedDict):
     id: str
     path: str
+    analysis_ref: NotRequired[str]
+    analysis_key: NotRequired[str]
     description: NotRequired[str]
 
 
