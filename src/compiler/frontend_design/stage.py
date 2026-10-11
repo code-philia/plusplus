@@ -22,7 +22,7 @@ from compiler.preprocessing.visual import ResolvedVisualReference
 from model.vision import VisualModel
 from model.contracts import VisualStructuredModel
 from .contracts import PHASE_TABLES, PROMPTS, patch_schema, DISCOVERY_PROMPT, discovery_schema
-from .context import TABLES, frontend_ir_traceability, local_context, ranked, required_types, ui_summary
+from .context import TABLES, frontend_ir_traceability, local_context, ranked, required_types, ui_summary, visual_screen_matches
 from compiler.ir.frontend import frontend_events
 
 
@@ -136,8 +136,13 @@ class FrontendIRGenerationPass:
             return
         ui = {row["id"]: row for row in self.ir["ui"]}
         parents = {child: row["id"] for row in ui.values() for child in row.get("children", [])}
-        pending, visited = [self.ir["root_ui_id"]], set()
+        matches = visual_screen_matches(self.ir, rid, self.nodes)
+        screens = list(dict.fromkeys(row["screen_id"] for row in matches))
+        pending, visited = [*screens, self.ir["root_ui_id"]], set()
         selected = self.requested_ui.setdefault(rid, set())
+        for key in screens:
+            if sum(len(json.dumps(ui[item], ensure_ascii=False)) for item in selected | {key}) <= 24000:
+                selected.add(key)
         while pending:
             owner = pending.pop(0)
             if owner in visited or owner not in ui:
@@ -153,7 +158,7 @@ class FrontendIRGenerationPass:
                 payload = {"requirement": self._requirement(rid),
                            "parent": {key: value for key, value in ui_summary(ui[owner], parents).items() if key != "children"},
                            "catalog": catalog, "offset": offset, "total_children": len(children),
-                           "selected_ids": sorted(selected)}
+                           "selected_ids": sorted(selected), "preferred_screen_matches": matches}
                 task_id = f"discovery-{len(self.batches) + 1:05d}"
                 record = {"task_id": task_id, "phase": "discovery", "requirement_ids": [rid], "input": payload}
                 try:
@@ -187,7 +192,9 @@ class FrontendIRGenerationPass:
             descendants.add(key)
             pending.extend(self.children[key])
         related = list(dict.fromkeys([*related, *sorted(descendants)]))
-        context = local_context(self.ir, rid, requirement, set(related), self.requested_ui.get(rid, set()))
+        matches = visual_screen_matches(self.ir, rid, self.nodes)
+        context = local_context(self.ir, rid, requirement, set(related), self.requested_ui.get(rid, set()),
+                                screen_matches=matches)
         owners = set(related) | {rid}
         attached = {key for owner in owners for key in self.api_owners.get(owner, [])}
         primary = [row for row in self.apis if row["id"] in attached
@@ -231,7 +238,7 @@ class FrontendIRGenerationPass:
     def _requirement(self, rid: str, compact: bool = False) -> dict[str, Any]:
         row = self.nodes[rid]
         result = {"id": rid, **{key: copy.deepcopy(row[key]) for key in
-                  ("name", "type", "parent_id", "description", "scenarios", "visual_reference_ids") if key in row}}
+                  ("name", "type", "parent_id", "description", "scenarios", "visual_reference_ids", "visual_references") if key in row}}
         if compact:
             result["description"] = str(result.get("description", ""))[:900]
             result.pop("scenarios", None)

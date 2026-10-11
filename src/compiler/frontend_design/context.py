@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import posixpath
 import re
 
 from compiler.ir.frontend import frontend_events
@@ -78,14 +79,71 @@ def frontend_ir_traceability(ir: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return links
 
 
+def visual_screen_matches(ir: dict[str, Any], rid: str,
+                          requirements: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Index requirement image paths to existing screens without loading images."""
+    ui = {row["id"]: row for row in ir["ui"]}
+    parents = {child: row["id"] for row in ui.values() for child in row.get("children", [])}
+    def normalize(path: str) -> str:
+        return posixpath.normpath(path.replace(chr(92), "/"))
+
+    owners_by_path: dict[str, set[str]] = {}
+    for owner, row in requirements.items():
+        for path in row.get("visual_references", []):
+            owners_by_path.setdefault(normalize(path), set()).add(owner)
+    references = {normalize(path) for path in requirements.get(rid, {}).get("visual_references", [])}
+    events = frontend_events(ir)
+
+    def screen_for(key: str) -> str | None:
+        seen = set()
+        while key in ui and key not in seen:
+            seen.add(key)
+            if ui[key]["kind"] == "screen":
+                return key
+            key = parents.get(key)
+        return None
+
+    result = []
+    for reference in sorted(references):
+        owners = owners_by_path[reference]
+        anchors = {row["id"] for row in ui.values() if owners & set(row.get("requirement_ids", []))}
+        linked = {key for owner in owners for field in ("implements", "uses")
+                  for key in ir.get("requirement_links", {}).get(owner, {}).get(field, [])}
+        anchors.update(linked & ui.keys())
+        anchors.update(event["ui_id"] for event in events if event["id"] in linked
+                       or owners & set(event.get("requirement_ids", [])))
+        screens = sorted({screen for key in anchors if (screen := screen_for(key)) is not None})
+        for screen in screens:
+            result.append({"screen_id": screen, "visual_reference_path": reference,
+                           "reason": "shared_visual_path", "association": "requirement_reference",
+                           "ambiguous": len(screens) > 1,
+                           "matched_ui_ids": sorted(key for key in anchors if screen_for(key) == screen),
+                           "matched_requirement_ids": sorted(owners)})
+    return result
+
+
 def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
                   related_ids: set[str], requested_ui_ids: set[str] | None = None,
-                  max_chars: int = 48000) -> dict[str, Any]:
+                  max_chars: int = 48000, *,
+                  screen_matches: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     rows = {row["id"]: row for table in TABLES for row in ir[table]}
     events = frontend_events(ir)
     rows.update({event["id"]: event for event in events})
     ui = {row["id"]: row for row in ir["ui"]}
     parents = {child: row["id"] for row in ui.values() for child in row.get("children", [])}
+    matches = screen_matches or []
+    preferred_screens = {row["screen_id"] for row in matches}
+    preferred = preferred_screens | {key for row in matches for key in row["matched_ui_ids"]}
+    # Offer a bounded preview of the matched subtree, including unrelated
+    # siblings only as summaries/IDs once the preview budget is exhausted.
+    preview, pending = set(), sorted(preferred_screens)
+    while pending and len(preview) < 24:
+        key = pending.pop(0)
+        if key in preview or key not in ui:
+            continue
+        preview.add(key)
+        pending.extend(child for child in ui[key].get("children", []) if ui.get(child, {}).get("kind") != "screen")
+    preferred.update(preview)
     # Direct ownership is never inherited through a requirement or UI ancestor.
     owned = {key for key, row in rows.items() if rid in row.get("requirement_ids", [])}
     used = set(ir.get("requirement_links", {}).get(rid, {}).get("uses", []))
@@ -98,7 +156,7 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
     requested = (requested_ui_ids or set()) & ui.keys()
     if len(ui) <= 64 and sum(len(json.dumps(row, ensure_ascii=False)) for row in ui.values()) <= 24000:
         requested = set(ui)
-    selected = owned | (used & rows.keys()) | requested
+    selected = owned | (used & rows.keys()) | requested | preferred
     selected.update(event["ui_id"] for event in events if event["id"] in selected)
     selected.update(row["id"] for row in [*candidates, *shared_functions, *shared_data])
     # Candidate screen/group records expose children IDs, never all sibling features.
@@ -148,7 +206,9 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
     candidates = [(table, row) for table in records for row in ir[table]
                   if row["id"] in selected]
     candidates.sort(key=lambda pair: (pair[1]["id"] not in requested,
-                                      pair[1]["id"] not in owned, pair[1]["id"]))
+                                      pair[1]["id"] not in preferred_screens,
+                                      pair[1]["id"] not in owned,
+                                      pair[1]["id"] not in preferred, pair[1]["id"]))
     for table, row in candidates:
         cost = len(json.dumps(row, ensure_ascii=False))
         if size + cost > max_chars:
@@ -165,7 +225,10 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
         "root_ui_id": ir["root_ui_id"], "existing": records,
         "structural_ui": structural_records,
         "requirement_links": copy.deepcopy(ir.get("requirement_links", {}).get(rid, {"implements": [], "uses": []})),
-        "ui_catalog": [ui_summary(row, parents) for row in ranked(list(ui.values()), requirement, 24)],
+        "ui_catalog": [ui_summary(row, parents) for row in
+                       [*[ui[key] for key in sorted(preferred_screens)],
+                        *ranked([row for row in ui.values() if row["id"] not in preferred_screens], requirement, 24)]],
+        "preferred_screen_matches": copy.deepcopy(matches),
         "omitted_ids": sorted((selected & rows.keys()) - loaded - {event["id"] for event in events}),
         "context_budget_chars": max_chars,
         "function_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}

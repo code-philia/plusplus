@@ -106,6 +106,16 @@ The compiler maintains root_ui_id; preserve that root. children are ordered IDs,
 UI containment follows application layout and navigation, not the requirement tree. Reuse existing
 application shell, screens and regions; one screen may implement several requirements and one
 requirement may affect several screens. Ancestors supply context, not additional feature tasks.
+preferred_screen_matches is deterministic path-based reuse evidence: in this project, requirements
+sharing the same image PATH describe the SAME screen. visual_reference_path is the index key;
+image content hashes and analysis IDs do not establish screen identity. Use the matched existing screen for that
+image; refine/reuse its controls or add missing children there instead of creating a duplicate screen.
+This does not mean every control is identical. Match each control by responsibility and position.
+When ambiguous=true, inspect the listed screens with load_ui_ids to resolve existing associations;
+do not create another screen to bypass ambiguity. Different images may refer to different screens.
+Screen retrieval uses requirement image paths and their existing UI ownership/use links.
+An image match is discovery evidence, not permission to edit an
+unloaded UI record. Preserve other requirements and sibling controls within the matched subtree.
 Do not create login/search/booking surfaces just because an ancestor mentions them during a leaf task.
 When building shared shell structure, add only the regions needed to host the current leaf surface.
 structural_ui contains compact ancestor summaries for discovery only. Before updating an ancestor,
@@ -207,6 +217,9 @@ Choose select_ids for existing surfaces/controls that should be reused or refine
 Choose expand_ids for containers whose children you need to inspect. Use exact supplied IDs.
 A page may implement many requirements; match responsibility, route and position, not requirement ID.
 Different locations are distinct UI instances. Prefer existing screens, shared navigation and regions.
+Prioritize preferred_screen_matches: shared image paths identify the same screen in this project.
+Inspect relevant children of matched screens before exploring unrelated regions. Reuse matching
+surfaces while leaving unrelated sibling features unchanged; ambiguous matches need inspection.
 Directory nodes are summaries, not editable full records. The compiler paginates children automatically.
 Return empty lists when no existing region is relevant. Do not invent IDs.
 """
