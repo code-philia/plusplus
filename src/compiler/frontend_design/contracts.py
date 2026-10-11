@@ -1,10 +1,10 @@
-"""Model output shapes and instructions; no output validation is performed."""
+"""Typed frontend deltas and instructions for page-scoped incremental design."""
 from __future__ import annotations
 
 import types
 from typing import Any, ForwardRef, Literal, NotRequired, Required, Union, get_args, get_origin, get_type_hints, is_typeddict
 
-from ..ir.frontend import UINode, FrontendState, UIFunction
+from ..ir.frontend import UINode, UIEvent, FrontendState, UIFunction, ValueSource
 from ..ir.backend import BackendTypeDefinition
 from ..ir.integration import PendingCapability
 
@@ -12,7 +12,6 @@ TABLE_TYPES = {"ui": UINode, "data": FrontendState,
                "functions": UIFunction, "types": BackendTypeDefinition,
                "pending_capabilities": PendingCapability}
 PHASE_TABLES = {
-    "topology": ("ui",),
     "ui": ("ui",),
     "data": ("ui", "data", "types", "pending_capabilities"),
     "interaction": ("ui", "data", "types", "functions", "pending_capabilities"),
@@ -20,7 +19,7 @@ PHASE_TABLES = {
 
 
 def patch_schema(phase: str) -> dict[str, Any]:
-    """Derive full-record delta shapes from the shared IR TypedDicts."""
+    """New records are complete; existing UI uses typed, field-level deltas."""
     defs: dict[str, Any] = {
         "JSONValue": {"anyOf": [
             {"type": "string"}, {"type": "number"}, {"type": "boolean"}, {"type": "null"},
@@ -60,8 +59,23 @@ def patch_schema(phase: str) -> dict[str, Any]:
 
     strings = {"type": "array", "items": {"type": "string"}}
     tables = PHASE_TABLES[phase]
+    ui_fields = {key: convert(value) for key, value in get_type_hints(UINode, include_extras=True).items()
+                 if key not in {"id", "children", "bindings", "events", "requirement_ids"}}
+    optional_fields = [key for key, value in get_type_hints(UINode, include_extras=True).items()
+                       if get_origin(value) is NotRequired]
+    update = {"type": "object", "additionalProperties": False, "required": ["id"], "properties": {
+        "id": {"type": "string"},
+        "set": {"type": "object", "additionalProperties": False, "properties": ui_fields},
+        "unset": {"type": "array", "items": {"enum": optional_fields}},
+        "children": obj({"remove": strings, "add": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False, "required": ["id"], "properties": {
+                "id": {"type": "string"}, "before_id": {"anyOf": [{"type": "string"}, {"type": "null"}]}}}}}),
+        "bindings": obj({"set": {"type": "object", "additionalProperties": convert(ValueSource)}, "remove": strings}),
+        "events": obj({"upserts": {"type": "array", "items": convert(UIEvent)}, "deletes": strings}),
+    }}
     schema = obj({
         "upserts": obj({table: {"type": "array", "items": convert(TABLE_TYPES[table])} for table in tables}),
+        "ui_updates": {"type": "array", "items": update},
         "deletes": obj({table: strings for table in tables}),
         "reuse_ids": strings,
         "implements_ids": strings,
@@ -80,9 +94,23 @@ Names must not include requirement IDs, generated hashes or framework terminolog
 of existing objects unless their responsibility changes. IDs remain stable when names change.
 Use supplied exact IDs for existing objects; use the supplied new_id_prefix plus meaningful suffixes
 for new objects (e.g. <prefix>ui.query, <prefix>fn.search, <prefix>data.query).
-For every changed/new object return its COMPLETE final record in upserts, not a field patch.
+For NEW UI only, return COMPLETE records in upserts.ui, with children as ordered IDs.
+For EXISTING UI, use ui_updates instead of regenerating the complete record:
+{id,set?:{changed fields},unset?:[optional fields],
+ children?:{remove:[IDs],add:[{id,before_id?:ID|null}]},
+ bindings?:{set:{attribute:ValueSource},remove:[attributes]},
+ events?:{upserts:[complete changed/new events],deletes:[event IDs]}}.
+Omit untouched sections/fields. Missing before_id appends; remove+add moves a child.
+Do not replace all children, bindings or events. Omitted values and siblings survive.
+Only UI phase creates/deletes UI or changes containment; data updates bindings/repeat;
+interaction updates events/bindings and behavioral spec. Only interaction changes events.
+Do not set requirement_ids: implements_ids establishes new direct responsibilities.
+Other tables continue to use complete records in upserts. Return ui_updates:[] when unchanged.
 Preserve existing embedded events during UI/layout/data edits; only interaction changes event behavior.
-If you need a UI absent from existing/structural_ui, return load_ui_ids with exact catalog/children IDs
+existing.ui is a NESTED forest of loaded full records; children are embedded records in INPUT ONLY.
+loaded_ui_ids defines the editable UI nodes. ui_tree_summary preserves the entire tree's topology;
+omitted descendants are not deletions. All OUTPUT child references use IDs.
+If you need a UI absent from loaded_ui_ids, return load_ui_ids with exact tree-summary/children IDs
 and an otherwise empty delta. List all existing UI records you need for the next attempt; this
 replaces the prior explicit selection to allow switching regions. The compiler loads records and asks
 again. Otherwise use []. At most four context requests are allowed per phase; work on a small region.
@@ -102,7 +130,7 @@ Never copy ancestor requirement IDs onto all descendants, or current IDs onto ev
 Existing shared responsibilities must survive changes. Read supplied related requirement scenarios.
 Do not invent product behaviors. Parent requirements describe shared composition; do not duplicate
 child-specific UI and behavior. Backend-only requirements may return an entirely empty delta.
-The compiler maintains root_ui_id; preserve that root. children are ordered IDs, not embedded nodes.
+The compiler maintains root_ui_id; preserve that root. New-node OUTPUT children are ordered IDs.
 UI containment follows application layout and navigation, not the requirement tree. Reuse existing
 application shell, screens and regions; one screen may implement several requirements and one
 requirement may affect several screens. Ancestors supply context, not additional feature tasks.
@@ -120,7 +148,7 @@ Do not create login/search/booking surfaces just because an ancestor mentions th
 When building shared shell structure, add only the regions needed to host the current leaf surface.
 structural_ui contains compact ancestor summaries for discovery only. Before updating an ancestor,
 request its full record with load_ui_ids, then preserve all sibling IDs and events.
-ui_catalog is discovery only; absent subtrees are not implicitly editable.
+ui_tree_summary is discovery only; absent subtrees are not implicitly editable.
 Every non-root UI has ONE parent. Reusing the same surface means referencing/updating its existing
 node at its existing position, never attaching it to a second parent. Similar controls at different
 locations are distinct UI instances; reuse their data/functions where appropriate. Repeated items
@@ -160,24 +188,22 @@ visual analysis; behavior passes receive visible controls and should rely on the
 """
 
 PROMPTS = {
-    "topology": COMMON + """
-Pass 1: plan the current requirement topology, using ancestors as scope context and completed child designs as composition inputs. Create only screens and shared
-structural groups. Give screens logical routes when required. Compose them under the existing root.
-Identify common navigation/header/footer regions once, at the appropriate shared ancestor.
-Attribute new behavior to the current requirement. For NON_LEAF tasks, reuse completed child surfaces and add only parent-level composition or behavior; do not duplicate child designs.
-Do not enumerate leaf controls, data, events or functions. If a surface already exists, refine/reuse it.
-This is a design pass, not a review. Use a minimal hierarchy that later requirements can expand.
-""",
     "ui": COMMON + """
-Pass 2: discover/refine the current requirement's UI subtree using existing topology and reuse
-candidates. Add semantic regions, text, controls, list containers and feedback as required.
-Place all new nodes into the tree by returning updated parent records, including shared ancestors.
+Pass 1: plan page topology AND design the current requirement UI in one call.
+Each page is a screen-rooted subtree of the application UI tree. When page_ids is populated,
+inspect and update the loaded corresponding page subtree, preserving unrelated controls.
+When no page matches, inspect ui_tree_summary: load an existing matching page if its route and
+responsibility match; otherwise create a new screen subtree and attach it via ui_updates.children.
+Give screens logical routes when needed. Establish shared navigation/header/footer regions once.
+For NON_LEAF tasks reuse completed child pages and add only parent-level composition.
+Add semantic regions, text, controls, list containers and feedback as required.
+Place all new nodes into the tree by adding child IDs to existing parents with ui_updates.
 Reuse the existing screen/surface rather than creating a new screen for every requirement.
 Define visual composition and static bindings now; leave dynamic bindings for the next pass.
 Do not create data/events/functions. Preserve already established shared layouts and sibling nodes.
 """,
     "data": COMMON + """
-Pass 3: define typed frontend data and UI bindings for this requirement's committed UI.
+Pass 2: define typed frontend data and UI bindings for this requirement's committed UI.
 Reuse existing state when its meaning, lifecycle and type match. Use local subtree scope by default;
 promote genuinely shared state to the nearest shared ancestor or application scope.
 Cover user input, display results, loading, empty/error/selection states as requirements need them.
@@ -189,7 +215,7 @@ content; store derived values only when their lifecycle requires persistence. De
 derivation in UI spec for implementation, rather than adding an executable expression language. Never insert code or expression strings. Do not create events or functions yet.
 """,
     "interaction": COMMON + """
-Pass 4: update events arrays embedded in existing UI nodes and connect ordered frontend function calls.
+Pass 3: update events through ui_updates.events and connect ordered frontend function calls.
 Complete the full interaction: payload -> function arguments -> state reads -> backend API calls ->
 result/state writes -> bound UI, including initialization/enter, derived state recomputation,
 local-only actions, navigation and applicable success/failure/loading/empty behavior.
@@ -209,23 +235,3 @@ functions while still designing the local UI/interaction. Do not invent an API o
 This pass generates behavior; do not audit or reject the existing design.
 """,
 }
-
-
-DISCOVERY_PROMPT = """Discover existing UI surfaces for one requirement before designing any changes.
-This is a read-only navigation step, not UI generation. The catalog is a page of a semantic UI tree.
-Choose select_ids for existing surfaces/controls that should be reused or refined.
-Choose expand_ids for containers whose children you need to inspect. Use exact supplied IDs.
-A page may implement many requirements; match responsibility, route and position, not requirement ID.
-Different locations are distinct UI instances. Prefer existing screens, shared navigation and regions.
-Prioritize preferred_screen_matches: shared image paths identify the same screen in this project.
-Inspect relevant children of matched screens before exploring unrelated regions. Reuse matching
-surfaces while leaving unrelated sibling features unchanged; ambiguous matches need inspection.
-Directory nodes are summaries, not editable full records. The compiler paginates children automatically.
-Return empty lists when no existing region is relevant. Do not invent IDs.
-"""
-
-def discovery_schema() -> dict[str, Any]:
-    return {"type": "object", "additionalProperties": False,
-            "properties": {key: {"type": "array", "items": {"type": "string"}}
-                           for key in ("select_ids", "expand_ids")},
-            "required": ["select_ids", "expand_ids"], "x-arc-output-mode": "json_object"}

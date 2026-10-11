@@ -126,53 +126,46 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
                   related_ids: set[str], requested_ui_ids: set[str] | None = None,
                   max_chars: int = 48000, *,
                   screen_matches: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Load requirement pages only; expose other pages through a tree summary."""
     rows = {row["id"]: row for table in TABLES for row in ir[table]}
     events = frontend_events(ir)
     rows.update({event["id"]: event for event in events})
     ui = {row["id"]: row for row in ir["ui"]}
-    parents = {child: row["id"] for row in ui.values() for child in row.get("children", [])}
-    matches = screen_matches or []
-    preferred_screens = {row["screen_id"] for row in matches}
-    preferred = preferred_screens | {key for row in matches for key in row["matched_ui_ids"]}
-    # Offer a bounded preview of the matched subtree, including unrelated
-    # siblings only as summaries/IDs once the preview budget is exhausted.
-    preview, pending = set(), sorted(preferred_screens)
-    while pending and len(preview) < 24:
-        key = pending.pop(0)
-        if key in preview or key not in ui:
-            continue
-        preview.add(key)
-        pending.extend(child for child in ui[key].get("children", []) if ui.get(child, {}).get("kind") != "screen")
-    preferred.update(preview)
-    # Direct ownership is never inherited through a requirement or UI ancestor.
+    parents = {child: row["id"] for row in ui.values() for child in row["children"]}
     owned = {key for key, row in rows.items() if rid in row.get("requirement_ids", [])}
     used = set(ir.get("requirement_links", {}).get(rid, {}).get("uses", []))
-    related = [row for row in ui.values() if related_ids & set(row.get("requirement_ids", []))
-               and row["id"] != ir["root_ui_id"]]
-    candidates = ranked(related, requirement, 4)
-    candidates += ranked([row for row in ui.values() if row["id"] != ir["root_ui_id"]], requirement, 8)
-    shared_functions = ranked(ir["functions"], requirement, 4)
-    shared_data = ranked(ir["data"], requirement, 4)
     requested = (requested_ui_ids or set()) & ui.keys()
-    if len(ui) <= 64 and sum(len(json.dumps(row, ensure_ascii=False)) for row in ui.values()) <= 24000:
-        requested = set(ui)
-    selected = owned | (used & rows.keys()) | requested | preferred
-    selected.update(event["ui_id"] for event in events if event["id"] in selected)
-    selected.update(row["id"] for row in [*candidates, *shared_functions, *shared_data])
-    # Candidate screen/group records expose children IDs, never all sibling features.
-    # Expand a small non-screen region only; owned controls are already complete.
-    pending = [row["id"] for row in candidates if row.get("kind") not in {"screen", "group"}]
-    expanded: set[str] = set()
-    while pending and len(expanded) < 24:
-        key = pending.pop(0)
-        if key in expanded or key not in ui:
+    matches = screen_matches or []
+    screens = {row["screen_id"] for row in matches}
+    anchors = (owned | used | requested) & ui.keys()
+    anchors.update(event["ui_id"] for event in events if event["id"] in owned | used)
+    scoped_data = (owned | used) & {row["id"] for row in ir["data"]}
+    scoped_data.update(key for row in ir["functions"] if row["id"] in owned | used
+                       for key in [*row.get("reads", []), *row.get("writes", [])])
+    anchors.update(row["scope_ui_id"] for row in ir["data"] if row["id"] in scoped_data
+                   and row["scope_ui_id"] in ui)
+    for key in anchors:
+        seen = set()
+        while key in ui and key not in seen:
+            seen.add(key)
+            if ui[key]["kind"] == "screen":
+                screens.add(key)
+                break
+            key = parents.get(key)
+    region = set(anchors)
+    pending, walked = sorted(screens), set()
+    while pending:
+        key = pending.pop()
+        if key in walked or key not in ui:
             continue
-        expanded.add(key)
-        selected.add(key)
-        pending.extend(child for child in ui[key].get("children", [])
-                       if ui.get(child, {}).get("kind") != "screen")
-    # Events follow the selected semantic controls, not attachment ancestors.
-    selected.update(event["id"] for event in events if event.get("ui_id") in selected)
+        walked.add(key)
+        region.add(key)
+        pending.extend(child for child in ui[key]["children"] if child not in walked
+                       and ui[child]["kind"] != "screen")
+    # The root is needed for attaching a new page, never for loading all pages.
+    selected = owned | (used & rows.keys()) | region | requested | {ir["root_ui_id"]}
+    selected.update(row["id"] for row in ir["data"] if row["scope_ui_id"] in region)
+    selected.update(event["id"] for event in events if event["ui_id"] in selected)
     pending, visited = list(selected), set()
     while pending:
         key = pending.pop()
@@ -189,26 +182,20 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
         fresh = (references & rows.keys()) - selected
         selected.update(fresh)
         pending.extend(fresh)
-    # Keep attachment ancestors separate. Their ordered child IDs are sufficient
-    # to preserve unrelated siblings during full-record parent updates.
     structural = {ir["root_ui_id"]}
-    for key in list(selected):
+    for key in selected & ui.keys():
         seen = set()
         while key in parents and key not in seen:
             seen.add(key)
             key = parents[key]
             if key not in selected:
                 structural.add(key)
-    # Fit full records to a serialized context budget. Requested UI records are
-    # mandatory; other candidates remain discoverable by ID when omitted.
-    records = {table: [] for table in TABLES if table != "types"}
+    records = {table: [] for table in ("ui", "data", "functions")}
     size, loaded = 0, set()
-    candidates = [(table, row) for table in records for row in ir[table]
-                  if row["id"] in selected]
+    candidates = [(table, row) for table in records for row in ir[table] if row["id"] in selected]
     candidates.sort(key=lambda pair: (pair[1]["id"] not in requested,
-                                      pair[1]["id"] not in preferred_screens,
-                                      pair[1]["id"] not in owned,
-                                      pair[1]["id"] not in preferred, pair[1]["id"]))
+                                      pair[1]["id"] not in screens | {ir["root_ui_id"]},
+                                      pair[1]["id"] not in owned, pair[1]["id"]))
     for table, row in candidates:
         cost = len(json.dumps(row, ensure_ascii=False))
         if size + cost > max_chars:
@@ -218,22 +205,47 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
         records[table].append(copy.deepcopy(row))
         loaded.add(row["id"])
         size += cost
-    # Structural attachment records are compact, not permission to replace
-    # unloaded behavior. Full sibling/event data is fetched before any edit.
-    structural_records = [ui_summary(ui[key], parents) for key in sorted(structural - loaded)]
+    loaded_ui = loaded & ui.keys()
+
+    def tree(key: str, summary: bool) -> dict[str, Any]:
+        source = ui[key]
+        if summary:
+            row = {name: copy.deepcopy(source[name]) for name in ("id", "name", "kind", "route") if name in source}
+            row["spec"] = source.get("spec", "")[:120]
+            children = source["children"]
+        else:
+            row = copy.deepcopy(source)
+            children = [child for child in source["children"] if child in loaded_ui]
+        row["children"] = [tree(child, summary) for child in children]
+        return row
+
+    # Nested page records show actual containment; the separate summary retains
+    # unloaded edges. Edits use stable IDs, never reconstruct a partial subtree.
+    roots = [row["id"] for row in records["ui"] if parents.get(row["id"]) not in loaded_ui]
+    records["ui"] = [tree(key, False) for key in roots]
     return {
         "root_ui_id": ir["root_ui_id"], "existing": records,
-        "structural_ui": structural_records,
+        "loaded_ui_ids": sorted(loaded_ui), "page_ids": sorted(screens),
+        "page_context_mode": "EXISTING_PAGE" if screens else "NEW_PAGE_OR_SELECT_EXISTING",
+        "ui_tree_summary": tree(ir["root_ui_id"], True),
+        "structural_ui": [ui_summary(ui[key], parents) for key in sorted(structural - loaded)],
         "requirement_links": copy.deepcopy(ir.get("requirement_links", {}).get(rid, {"implements": [], "uses": []})),
-        "ui_catalog": [ui_summary(row, parents) for row in
-                       [*[ui[key] for key in sorted(preferred_screens)],
-                        *ranked([row for row in ui.values() if row["id"] not in preferred_screens], requirement, 24)]],
         "preferred_screen_matches": copy.deepcopy(matches),
         "omitted_ids": sorted((selected & rows.keys()) - loaded - {event["id"] for event in events}),
         "context_budget_chars": max_chars,
         "function_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}
-                             for row in shared_functions],
+                             for row in ranked(ir["functions"], requirement, 4)],
     }
+
+
+def context_ui_nodes(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Iterate full records in the nested model context, excluding summaries."""
+    result, pending = [], list(context["existing"]["ui"])
+    while pending:
+        row = pending.pop()
+        result.append(row)
+        pending.extend(row["children"])
+    return result
 
 
 def ui_summary(row: dict[str, Any], parents: dict[str, str]) -> dict[str, Any]:

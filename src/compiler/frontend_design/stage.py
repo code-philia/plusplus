@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from ..ir.backend import module_fields
 
-import base64
 import copy
 import json
 import hashlib
@@ -19,10 +18,8 @@ from model.contracts import StructuredModel
 from model.client import describe_model_error
 from compiler.preprocessing.traversal import children_by_id, postorder
 from compiler.preprocessing.visual import ResolvedVisualReference
-from model.vision import VisualModel
-from model.contracts import VisualStructuredModel
-from .contracts import PHASE_TABLES, PROMPTS, patch_schema, DISCOVERY_PROMPT, discovery_schema
-from .context import TABLES, frontend_ir_traceability, local_context, ranked, required_types, ui_summary, visual_screen_matches
+from .contracts import PHASE_TABLES, PROMPTS, patch_schema
+from .context import TABLES, frontend_ir_traceability, local_context, ranked, required_types, visual_screen_matches, context_ui_nodes
 from compiler.ir.frontend import frontend_events
 from compiler.ir.frontend_storage import read_frontend_ir, write_frontend_ir
 
@@ -40,9 +37,8 @@ class FrontendIRGenerationResult:
 
 
 class FrontendIRGenerationPass:
-    def __init__(self, model: StructuredModel, artifact_root: Path,
-                 visual_model: VisualStructuredModel | None = None) -> None:
-        self.model, self.visual_model = model, visual_model
+    def __init__(self, model: StructuredModel, artifact_root: Path) -> None:
+        self.model = model
         self.root = artifact_root / "design" / "frontend"
         self.artifact_root = artifact_root
         self.log = SynchronousLog("FrontendDesignPass", workspace_root=artifact_root.resolve().parent)
@@ -63,15 +59,22 @@ class FrontendIRGenerationPass:
         self.api_owners = {rid: [row["id"] for row in self.apis if rid in row["requirement_ids"]]
                            for rid in self.nodes}
         self.visuals = []
-        self.visual_objects = {}
-        analyses = {row.get("id", row.get("reference_id")): row for row in visual_analyses or []}
+        cache_path = self.root / "visual_cache.json"
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.is_file() else {}
+        except (OSError, ValueError):
+            cached = {}
+            self.warnings.append("Visual analysis cache could not be read; using supplied analyses.")
+        if not isinstance(cached, dict):
+            cached = {}
+        analyses = {row.get("id", row.get("reference_id")): row for row in
+                    [*cached.values(), *(visual_analyses or [])] if isinstance(row, dict)}
         for visual in visual_references:
             row = visual if isinstance(visual, dict) else visual.analysis_payload()
             key = row.get("id", row.get("reference_id"))
-            self.visual_objects[key] = visual
             self.visuals.append({"id": key, "path": row.get("path", row.get("source_path")),
                                  "requirement_ids": row.get("requirement_ids", []),
-                                 "analysis": row.get("analysis", analyses.get(key, {}).get("analysis", {}))})
+                                 "analysis": row.get("analysis") or analyses.get(key, {}).get("analysis", {})})
         self.ir = {"ir_kind": "frontend_design", "backend_ref": "../backend/backend_ir.json",
                    "types": [], "root_ui_id": "ui.app", "ui": [{
                        "id": "ui.app", "name": "application_shell", "kind": "group", "spec": "Application UI composition root.",
@@ -104,8 +107,7 @@ class FrontendIRGenerationPass:
             self.ir["visual_references"] = list(visuals.values())
         # Design children before their parent; schedule every requirement once.
         for rid in order:
-            self._discover(rid)
-            phases = ("topology", "ui", "data", "interaction")
+            phases = ("ui", "data", "interaction")
             for phase in phases:
                 self._call(phase, [rid], self._payload(rid, phase))
         self.warnings.extend(f"{gap['id']}: pending integration: {gap['capability']} ({gap['reason']})"
@@ -131,56 +133,6 @@ class FrontendIRGenerationPass:
         write_json_atomic(self.root / "report.json", report)
         write_json_atomic(self.root / "pending_capabilities.json", {"pending_capabilities": self.ir["pending_capabilities"]})
         return FrontendIRGenerationResult(self.ir, report, self.batches, traceability)
-
-    def _discover(self, rid: str) -> None:
-        if len(self.ir["ui"]) <= 64 and sum(len(json.dumps(row, ensure_ascii=False)) for row in self.ir["ui"]) <= 24000:
-            return
-        ui = {row["id"]: row for row in self.ir["ui"]}
-        parents = {child: row["id"] for row in ui.values() for child in row.get("children", [])}
-        matches = visual_screen_matches(self.ir, rid, self.nodes)
-        screens = list(dict.fromkeys(row["screen_id"] for row in matches))
-        pending, visited = [*screens, self.ir["root_ui_id"]], set()
-        selected = self.requested_ui.setdefault(rid, set())
-        for key in screens:
-            if sum(len(json.dumps(ui[item], ensure_ascii=False)) for item in selected | {key}) <= 24000:
-                selected.add(key)
-        while pending:
-            owner = pending.pop(0)
-            if owner in visited or owner not in ui:
-                continue
-            visited.add(owner)
-            children = [ui[key] for key in ui[owner].get("children", []) if key in ui]
-            # All siblings are discoverable. Each request is bounded separately.
-            for offset in range(0, len(children), 48):
-                catalog = [ui_summary(row, parents) for row in children[offset:offset + 48]]
-                for row in catalog:
-                    row.pop("children", None)
-                    row.pop("children_truncated", None)
-                payload = {"requirement": self._requirement(rid),
-                           "parent": {key: value for key, value in ui_summary(ui[owner], parents).items() if key != "children"},
-                           "catalog": catalog, "offset": offset, "total_children": len(children),
-                           "selected_ids": sorted(selected), "preferred_screen_matches": matches}
-                task_id = f"discovery-{len(self.batches) + 1:05d}"
-                record = {"task_id": task_id, "phase": "discovery", "requirement_ids": [rid], "input": payload}
-                try:
-                    output = self.model.generate_json(schema_name="frontend_discovery",
-                        instructions=DISCOVERY_PROMPT, input_payload=payload, output_schema=discovery_schema())
-                    allowed = {row["id"] for row in catalog}
-                    wanted = set(output["select_ids"]) | set(output["expand_ids"])
-                    if wanted - allowed:
-                        raise ValueError("Discovery returned IDs outside the directory page")
-                    # Select full records within budget; omitted selections remain
-                    # reachable through directory IDs and explicit load requests.
-                    for key in output["select_ids"]:
-                        if sum(len(json.dumps(ui[item], ensure_ascii=False)) for item in selected | {key}) <= 24000:
-                            selected.add(key)
-                    pending.extend(output["expand_ids"])
-                    record.update(output=output, status="DISCOVERED")
-                except Exception as exc:
-                    record.update(status="FAILED", error=describe_model_error(exc))
-                    self.failures.append({"task_id": task_id, "phase": "discovery", "requirement_ids": [rid], "message": record["error"]})
-                self.batches.append(record)
-                write_json_atomic(self.root / "passes" / f"{task_id}.json", record)
 
     def _payload(self, rid: str, phase: str) -> dict[str, Any]:
         requirement = self._requirement(rid)
@@ -214,16 +166,14 @@ class FrontendIRGenerationPass:
                    "child_requirements": ranked([self._requirement(key, compact=True) for key in self.children[rid]], requirement, 12),
                    "child_requirement_count": len(self.children[rid]),
                    "related_requirements": related_rows,
-                   "api_contracts": [self._api(row) for row in apis] if phase not in {"topology", "ui"} else [],
+                   "api_contracts": [self._api(row) for row in apis] if phase != "ui" else [],
                    "api_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}
-                                   for row in ranked(self.apis, requirement, 24)] if phase not in {"topology", "ui"} else [],
+                                   for row in ranked(self.apis, requirement, 24)] if phase != "ui" else [],
                    "visual_references": [self._visual_context(row, phase) for row in self.visuals
                                          if owners & set(row["requirement_ids"])],
                    "pending_capabilities": [copy.deepcopy(row) for row in self.ir["pending_capabilities"]
                                             if owners & set(row["requirement_ids"])],
                    "prior_task_failures": [row for row in self.failures if owners & set(row["requirement_ids"])]}
-        if phase == "topology":
-            payload["requirement_catalog"] = [requirement]
         payload["types"] = required_types(payload, [*self.backend_types, *self.ir["types"]])
         return payload
 
@@ -231,7 +181,7 @@ class FrontendIRGenerationPass:
     def _visual_context(row: dict[str, Any], phase: str) -> dict[str, Any]:
         if phase == "ui":
             return copy.deepcopy(row)
-        keys = ("regions", "layout_cues") if phase == "topology" else ("visible_controls",)
+        keys = ("visible_controls",)
         analysis = row.get("analysis", {})
         return {"id": row["id"], "requirement_ids": row["requirement_ids"],
                 "analysis": {key: copy.deepcopy(analysis[key]) for key in keys if key in analysis}}
@@ -254,12 +204,12 @@ class FrontendIRGenerationPass:
         ids.extend(self.dependencies.get(rid, []))
         ids.extend(self.children[rid])
         # Shared objects bring the requirements whose behavior must be preserved.
-        context = local_context(self.ir, rid, self._requirement(rid), set(ids), self.requested_ui.get(rid, set()))
-        ids.extend(owner for table, rows in context["existing"].items() for row in rows
-                   if table != "ui" or row["id"] in self.requested_ui.get(rid, set())
-                   or rid in row.get("requirement_ids", [])
+        context = local_context(self.ir, rid, self._requirement(rid), set(ids), self.requested_ui.get(rid, set()),
+                                screen_matches=visual_screen_matches(self.ir, rid, self.nodes))
+        ids.extend(owner for row in [*context_ui_nodes(context), *context["existing"]["data"],
+                                    *context["existing"]["functions"]]
                    for owner in row.get("requirement_ids", []))
-        ids.extend(owner for row in context["existing"]["ui"] for event in row.get("events", [])
+        ids.extend(owner for row in context_ui_nodes(context) for event in row.get("events", [])
                    for owner in event.get("requirement_ids", []))
         return [key for key in dict.fromkeys(ids) if key in self.nodes and key != rid]
 
@@ -290,7 +240,7 @@ class FrontendIRGenerationPass:
                     else:
                         owners = previous.get("requirement_ids", [])
                         # Structural maintenance never establishes direct ownership.
-                        semantic_keys = set(row) - {"name", "requirement_ids", "children", "events", "presentation", "visual_reference_ids"}
+                        semantic_keys = (set(row) | set(previous)) - {"name", "requirement_ids", "children", "events", "presentation", "visual_reference_ids"}
                         semantic_change = any(row.get(key) != previous.get(key) for key in semantic_keys)
                         if semantic_change and row['id'] in direct_updates:
                             owners = [*owners, *requirements]
@@ -321,8 +271,7 @@ class FrontendIRGenerationPass:
         touched = set(output.get("reuse_ids", [])) | {
             row["id"] for table in PHASE_TABLES[phase] if table not in {"types", "pending_capabilities"}
             for row in output.get("upserts", {}).get(table, [])}
-        touched.update(event["id"] for row in output.get("upserts", {}).get("ui", [])
-                       for event in row.get("events", []) if phase == "interaction")
+        touched.update(output.get("changed_event_ids", []))
         links = trial.setdefault("requirement_links", {})
         for rid in requirements:
             direct = {key for key, row in records.items() if rid in row.get("requirement_ids", [])}
@@ -346,32 +295,17 @@ class FrontendIRGenerationPass:
         try:
             kwargs = {"schema_name": f"frontend_{phase}", "instructions": PROMPTS[phase],
                       "input_payload": payload, "output_schema": schema}
-            image = None
-            if phase == "ui":
-                for row in payload.get("visual_references", []):
-                    visual = self.visual_objects.get(row["id"])
-                    if isinstance(visual, ResolvedVisualReference):
-                        try:
-                            image = f"data:{visual.media_type};base64," + base64.b64encode(visual.absolute_path.read_bytes()).decode("ascii")
-                            break
-                        except OSError as exc:
-                            self.warnings.append(f"{row['id']}: image unavailable: {exc}; using analysis.")
-            if image:
-                if self.visual_model is None:
-                    self.visual_model = VisualModel.from_env()
-                    if hasattr(self.visual_model, "set_usage_path"):
-                        self.visual_model.set_usage_path(self.artifact_root / "model_usage.jsonl")
-                try:
-                    output = self.visual_model.generate_visual_json(**kwargs, image_data_url=image)
-                except Exception as exc:
-                    self.warnings.append(f"{task_id}: visual generation failed: {describe_model_error(exc)}; using image analysis.")
-                    output = self.model.generate_json(**kwargs)
-            else:
-                output = self.model.generate_json(**kwargs)
+            output = self.model.generate_json(**kwargs)
             for _ in range(4):
+                from compiler.backend_design.validation import shape_errors
+                errors = shape_errors(output, schema)
+                if errors:
+                    raise ValueError("Invalid frontend delta: " + "; ".join(errors))
                 requested = output.get("load_ui_ids", [])
                 if not requested:
                     break
+                if any(output["upserts"].values()) or any(output["deletes"].values()) or output["ui_updates"] or output["implements_ids"] or output["reuse_ids"]:
+                    raise ValueError("UI context requests must contain an otherwise empty delta")
                 known = {row["id"] for row in self.ir["ui"]}
                 if set(requested) - known:
                     raise ValueError("Context request contains unknown UI IDs")
@@ -382,14 +316,17 @@ class FrontendIRGenerationPass:
                 output = self.model.generate_json(**kwargs)
             if output.get("load_ui_ids"):
                 raise ValueError("UI context request limit exceeded; design a smaller region")
-            loaded = {row["id"] for row in payload["existing"]["ui"]}
+            loaded = set(payload["loaded_ui_ids"])
             known = {row["id"] for row in self.ir["ui"]}
             changed = {row["id"] for row in output.get("upserts", {}).get("ui", [])}
             changed.update(output.get("deletes", {}).get("ui", []))
+            changed.update(row["id"] for row in output.get("ui_updates", []))
             if (changed & known) - loaded:
                 raise ValueError("Cannot edit unloaded existing UI; request load_ui_ids first")
             record["output"] = output
             record["final_input"] = payload
+            from .delta import materialize_ui_updates
+            output = materialize_ui_updates(self.ir, phase, output, loaded, requirements)
             self._merge(phase, output, requirements)
             record["status"] = "APPLIED"
             self.log.info(f"MODEL_APPLIED phase=frontend_{phase} task={task_id}")
