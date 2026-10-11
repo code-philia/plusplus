@@ -50,6 +50,9 @@ class UINode(TypedDict):
     ]
     spec: str
     requirement_ids: list[str]
+    # Requirement excerpt explaining the part implemented by this UI.
+    # The UI binding operation replaces this text while preserving prior owners.
+    description: NotRequired[str]
     # In-memory/model delta index; JSON storage nests complete child records.
     children: list[str]
     # Semantic properties: label, value, options, visible, enabled, etc.

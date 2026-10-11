@@ -61,9 +61,9 @@ def patch_schema(phase: str) -> dict[str, Any]:
     strings = {"type": "array", "items": {"type": "string"}}
     tables = PHASE_TABLES[phase]
     ui_fields = {key: convert(value) for key, value in get_type_hints(UINode, include_extras=True).items()
-                 if key not in {"id", "children", "bindings", "events", "requirement_ids"}}
+                 if key not in {"id", "children", "bindings", "events", "requirement_ids", "description"}}
     optional_fields = [key for key, value in get_type_hints(UINode, include_extras=True).items()
-                       if get_origin(value) is NotRequired]
+                       if get_origin(value) is NotRequired and key != "description"]
     if phase == "data":
         ui_fields = {"repeat": ui_fields["repeat"]}
         optional_fields = ["repeat"]
@@ -100,11 +100,13 @@ def patch_schema(phase: str) -> dict[str, Any]:
         "ui_updates": {"type": "array", "items": update},
         "deletes": obj(table_deletes),
         "reuse_ids": strings,
-        "implements_ids": strings,
+        "implements_ids": empty_array if phase == "ui" else strings,
         "load_ui_ids": strings,
         **({"page_assignments": {"type": "array", "items": obj({
             "name": {"type": "string"}, "ui_id": {"type": "string"}})},
-            "requirement_ui_ids": strings} if phase == "ui" else {}),
+            "ui_requirement_updates": {"type": "array", "items": obj({
+                "id": {"type": "string"}, "requirement_id": {"type": "string"},
+                "description": {"type": "string", "minLength": 1}})}} if phase == "ui" else {}),
     })
     return {**schema, "$defs": defs, "x-arc-output-mode": "json_object"}
 
@@ -129,7 +131,8 @@ Omit untouched sections/fields. Missing before_id appends; remove+add moves a ch
 Do not replace all children, bindings or events. Omitted values and siblings survive.
 Only UI phase creates/deletes UI or changes containment; data updates bindings/repeat;
 interaction updates events/bindings and behavioral spec. Only interaction changes events.
-Do not set requirement_ids in ui_updates: implements_ids establishes new direct responsibilities.
+Do not set requirement_ids in ui_updates. UI phase uses ui_requirement_updates exclusively and
+returns implements_ids:[]. Behavior phases use implements_ids for new direct responsibilities.
 Other tables continue to use complete records in upserts. Return ui_updates:[] when unchanged.
 existing.ui is a NESTED forest of loaded full records; children are embedded records in INPUT ONLY.
 loaded_ui_ids defines the editable UI nodes. When supplied, ui_tree_summary contains only app,
@@ -144,9 +147,15 @@ For large trees work on the current semantic region; ask to load another region 
 For unchanged reused objects return their IDs in reuse_ids, not duplicate records.
 deletes contains only IDs intentionally superseded by your design changes. Otherwise use empty lists.
 requirement_ids means DIRECT implementation, not use, tree containment or scheduling history.
-In UI phase, requirement_ui_ids explicitly lists ONLY UI directly involved in the current requirement;
-the compiler adds direct ownership even if the node's visual structure did not change. UI discovered
-from an image alone has requirement_ids=[] and is not automatically owned by the current requirement.
+In UI phase, ui_requirement_updates explicitly binds ONLY UI directly involved in the current requirement.
+Each operation is {id:UI_ID,requirement_id:CURRENT_REQUIREMENT_ID,description:REQUIREMENT_EXCERPT}.
+Extract the relevant text from requirement.description and/or requirement.scenarios[].steps[].content
+to explain precisely WHICH PART of the requirement this UI implements. Use the requirement's language;
+do not substitute a generic visual label or invent behavior. Select only text pertinent to this node.
+The compiler adds the requirement ID while preserving previous owners, and REPLACES the UI node's
+description with the supplied text if a description already exists. It leaves spec and structure intact.
+This operation works on loaded existing UI and newly created UI, even without structural changes.
+UI discovered from an image alone has requirement_ids=[] and is not automatically owned by the current requirement.
 In behavior phases, new data/functions/events implement the current requirement by default. Preserve existing direct owners
 when updating objects. Add an owner only for a new semantic responsibility explicitly implementing
 that requirement. Editing children to attach UI, moving nodes or changing shared layout does not
@@ -224,17 +233,20 @@ Inspect ALL regions, headings, text, images, navigation, forms, fields, labels, 
 feedback and overlays, including UI unrelated to this requirement's description or scenarios.
 Organize every visible meaningful UI into the page's full semantic hierarchy; do not stop once
 the current requirement's controls are covered. Avoid decorative DOM wrappers and invented behavior.
-Set requirement_ids=[] on visual-only nodes; requirement_ui_ids identifies only nodes involved in
+Set requirement_ids=[] on new UI; ui_requirement_updates identifies only nodes involved in
 the current requirement. Structural ancestors are uses, not automatic direct owners.
 NEW_PAGE without evidence: derive the necessary UI from requirements; do not invent unseen screens.
 BIND_ONLY: this page/reference pair has already been parsed. Return no UI creations, updates,
-deletions or page assignments. Only identify requirement_ui_ids and reuse_ids in the existing tree.
+deletions or page assignments. Return ui_requirement_updates with descriptions and reuse_ids for
+the relevant nodes of the existing tree, including replacements for earlier descriptions.
 NEW_PAGE_STATE: a new reference for the SAME page represents another state. Compare its full
 visual evidence with baseline_reference/baseline_ui (the first parsed reference) AND the current
 page tree. Identify additions, reuse already-added controls, and insert only missing nodes under
 existing parents. Preserve baseline controls absent from the new state: absence is not deletion.
 Describe state-dependent visibility/selection in presentation/spec; behavior is designed later.
-After every mode, map the current description/scenarios to requirement_ui_ids without assigning
+After every mode, including first-time page creation and new-state parsing, return
+ui_requirement_updates for the affected nodes using excerpts from the current description/scenario
+steps. Apply these bindings after constructing the subtree, without assigning
 the whole page tree to the requirement. Use load_ui_ids before binding unloaded nodes.
 Existing UI updates may use set/unset for schema-listed fields, children and bindings.
 New UI records must include events:[]; ui_updates.events is absent from this pass's schema.
@@ -304,15 +316,19 @@ for _phase, _tables in PHASE_TABLES.items():
         "upserts": {table: [] for table in _tables},
         "ui_updates": [], "deletes": {table: [] for table in _tables},
         "reuse_ids": [], "implements_ids": [], "load_ui_ids": [],
-        **({"page_assignments": [], "requirement_ui_ids": []} if _phase == "ui" else {}),
+        **({"page_assignments": [], "ui_requirement_updates": []} if _phase == "ui" else {}),
     }
 EXAMPLES["ui"]["upserts"]["ui"] = [{
     "id": "REQ-1.ui.heading", "name": "page_heading", "kind": "heading",
-    "spec": "Page heading.", "requirement_ids": ["REQ-1"], "children": [],
+    "spec": "Page heading.", "requirement_ids": [], "children": [],
     "bindings": {"label": {"kind": "literal", "value": "Settings"}}, "events": [],
 }]
 EXAMPLES["ui"]["ui_updates"] = [{"id": "ui.settings", "children": {
     "remove": [], "add": [{"id": "REQ-1.ui.heading", "before_id": None}]}}]
+EXAMPLES["ui"]["ui_requirement_updates"] = [{
+    "id": "REQ-1.ui.heading", "requirement_id": "REQ-1",
+    "description": "The Settings page displays the Settings heading.",
+}]
 EXAMPLES["data"]["upserts"]["data"] = [{
     "id": "REQ-1.data.email", "name": "email", "type": {"kind": "scalar", "name": "string"},
     "nullable": False, "spec": "Editable email input, initially empty.",

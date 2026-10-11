@@ -288,7 +288,7 @@ class FrontendIRGenerationPass:
                         # Structural maintenance never establishes direct ownership.
                         semantic_keys = (set(row) | set(previous)) - {"name", "requirement_ids", "children", "events", "presentation", "visual_reference_ids"}
                         semantic_change = any(row.get(key) != previous.get(key) for key in semantic_keys)
-                        if semantic_change and row['id'] in direct_updates:
+                        if phase != "ui" and semantic_change and row['id'] in direct_updates:
                             owners = [*owners, *requirements]
                     row["requirement_ids"] = list(dict.fromkeys(owners))
                 if table == "pending_capabilities":
@@ -352,10 +352,16 @@ class FrontendIRGenerationPass:
             for rid in requirements:
                 links[rid]["uses"] = sorted((set(links[rid]["uses"]) |
                     {page_roots[name] for name in declared}) - set(links[rid]["implements"]))
-            for key in output["requirement_ui_ids"]:
+            bound = set()
+            for binding in output["ui_requirement_updates"]:
+                key, owner, description = binding["id"], binding["requirement_id"], binding["description"]
                 if key not in ui:
                     raise ValueError(f"Cannot bind an unknown UI node: {key}")
-                ui[key]["requirement_ids"] = list(dict.fromkeys([*ui[key]["requirement_ids"], *requirements]))
+                if key in bound or owner not in requirements or not description.strip():
+                    raise ValueError("UI bindings need a unique UI ID, current requirement ID and nonempty description")
+                bound.add(key)
+                ui[key]["requirement_ids"] = list(dict.fromkeys([*ui[key]["requirement_ids"], owner]))
+                ui[key]["description"] = description
             for rid in requirements:
                 links[rid]["implements"] = sorted(key for key, row in records.items() if rid in row.get("requirement_ids", []))
                 links[rid]["uses"] = sorted(set(links[rid]["uses"]) - set(links[rid]["implements"]))
@@ -411,7 +417,7 @@ class FrontendIRGenerationPass:
                 requested = output.get("load_ui_ids", [])
                 if not requested:
                     break
-                if any(output["upserts"].values()) or any(output["deletes"].values()) or output["ui_updates"] or output["implements_ids"] or output["reuse_ids"] or output.get("page_assignments") or output.get("requirement_ui_ids"):
+                if any(output["upserts"].values()) or any(output["deletes"].values()) or output["ui_updates"] or output["implements_ids"] or output["reuse_ids"] or output.get("page_assignments") or output.get("ui_requirement_updates"):
                     raise ValueError("UI context requests must contain an otherwise empty delta")
                 known = {row["id"] for row in self.ir["ui"]}
                 if set(requested) - known:
@@ -442,7 +448,7 @@ class FrontendIRGenerationPass:
             if (changed & known) - loaded:
                 raise ValueError("Cannot edit unloaded existing UI; request load_ui_ids first")
             if phase == "ui":
-                if set(output["requirement_ui_ids"]) - (loaded | {row["id"] for row in output["upserts"]["ui"]}):
+                if {row["id"] for row in output["ui_requirement_updates"]} - (loaded | {row["id"] for row in output["upserts"]["ui"]}):
                     raise ValueError("Requirement binding must target loaded or newly created UI")
                 if payload["page_operations"] and all(row["mode"] == "BIND_ONLY" for row in payload["page_operations"]):
                     if output["upserts"]["ui"] or output["deletes"]["ui"] or output["ui_updates"] or output["page_assignments"]:
