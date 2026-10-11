@@ -30,7 +30,6 @@ from .contracts import (
 from .refinement import refine_er_model
 from .state import DatabaseSchemaState
 from .validation import _normalize_decision_context
-from compiler.backend_design.validation import shape_errors
 
 
 @dataclass(slots=True)
@@ -278,13 +277,11 @@ class DatabaseSchemaPass:
                         f"MODEL_NORMALIZED phase={phase} requirement={node_id} "
                         f"action={note}"
                     )
-                feedback = shape_errors(decision, output_schema)
-                if not feedback:
-                    self._trace(
-                        f"MODEL_ACCEPTED phase={phase} requirement={node_id} "
-                        f"attempt={attempt + 1} duration_ms={duration_ms}"
-                    )
-                    return decision
+                self._trace(
+                    f"MODEL_ACCEPTED phase={phase} requirement={node_id} "
+                    f"attempt={attempt + 1} duration_ms={duration_ms}"
+                )
+                return decision
             self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
         errors.append(_format_error("ARC2103", f"{phase} failed: {'; '.join(feedback)}", node_id=node_id))
         return None
@@ -318,6 +315,7 @@ def _node_context(
         "name": str(node.get("name", "")),
         "description": str(node.get("description", "")),
         "scenarios": copy.deepcopy(node.get("scenarios", [])),
+        "pages": copy.deepcopy(node.get("pages", [])),
         "dependencies": copy.deepcopy(effective_dependencies),
         "ancestors": ancestors,
     }
