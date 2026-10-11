@@ -207,11 +207,25 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
     # unloaded edges. Edits use stable IDs, never reconstruct a partial subtree.
     roots = [row["id"] for row in records["ui"] if parents.get(row["id"]) not in loaded_ui]
     records["ui"] = [tree(key, False) for key in roots]
+    def summary_node(key: str) -> dict[str, Any]:
+        return {name: copy.deepcopy(ui[key][name]) for name in ("id", "name", "kind", "route") if name in ui[key]}
+
+    def subtree_size(key: str) -> int:
+        return 1 + sum(subtree_size(child) for child in ui[key]["children"])
+
+    summary = summary_node(ir["root_ui_id"])
+    summary["children"] = []
+    for name, key in ir.get("page_roots", {}).items():
+        page = {**summary_node(key), "page_name": name}
+        major = sorted(ui[key]["children"], key=lambda child: (-subtree_size(child), child))[:3]
+        page["children"] = [{**summary_node(child), "subtree_size": subtree_size(child)} for child in major]
+        summary["children"].append(page)
     return {
         "root_ui_id": ir["root_ui_id"], "existing": records,
         "loaded_ui_ids": sorted(loaded_ui), "page_ids": sorted(screens),
         "page_context_mode": "EXISTING_PAGE" if screens else "NEW_PAGE_OR_SELECT_EXISTING",
-        "ui_tree_summary": tree(ir["root_ui_id"], True),
+        **({"ui_tree_summary": summary} if any(page["name"] not in
+             {match["page_name"] for match in matches} for page in requirement.get("pages", [])) else {}),
         "structural_ui": [ui_summary(ui[key], parents) for key in sorted(structural - loaded)],
         "requirement_links": copy.deepcopy(ir.get("requirement_links", {}).get(rid, {"implements": [], "uses": []})),
         "page_matches": copy.deepcopy(matches),

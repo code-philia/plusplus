@@ -103,7 +103,8 @@ def patch_schema(phase: str) -> dict[str, Any]:
         "implements_ids": strings,
         "load_ui_ids": strings,
         **({"page_assignments": {"type": "array", "items": obj({
-            "name": {"type": "string"}, "ui_id": {"type": "string"}})}} if phase == "ui" else {}),
+            "name": {"type": "string"}, "ui_id": {"type": "string"}})},
+            "requirement_ui_ids": strings} if phase == "ui" else {}),
     })
     return {**schema, "$defs": defs, "x-arc-output-mode": "json_object"}
 
@@ -131,7 +132,8 @@ interaction updates events/bindings and behavioral spec. Only interaction change
 Do not set requirement_ids in ui_updates: implements_ids establishes new direct responsibilities.
 Other tables continue to use complete records in upserts. Return ui_updates:[] when unchanged.
 existing.ui is a NESTED forest of loaded full records; children are embedded records in INPUT ONLY.
-loaded_ui_ids defines the editable UI nodes. ui_tree_summary preserves the entire tree's topology;
+loaded_ui_ids defines the editable UI nodes. When supplied, ui_tree_summary contains only app,
+all pages and the three largest direct subtree roots per page; it does not contain the whole tree.
 omitted descendants are not deletions. All OUTPUT child references use IDs.
 If you need a UI absent from loaded_ui_ids, return load_ui_ids with exact tree-summary/children IDs
 and an otherwise empty delta. List all existing UI records you need for the next attempt; this
@@ -142,7 +144,10 @@ For large trees work on the current semantic region; ask to load another region 
 For unchanged reused objects return their IDs in reuse_ids, not duplicate records.
 deletes contains only IDs intentionally superseded by your design changes. Otherwise use empty lists.
 requirement_ids means DIRECT implementation, not use, tree containment or scheduling history.
-New objects directly implement the current requirement by default. Preserve existing direct owners
+In UI phase, requirement_ui_ids explicitly lists ONLY UI directly involved in the current requirement;
+the compiler adds direct ownership even if the node's visual structure did not change. UI discovered
+from an image alone has requirement_ids=[] and is not automatically owned by the current requirement.
+In behavior phases, new data/functions/events implement the current requirement by default. Preserve existing direct owners
 when updating objects. Add an owner only for a new semantic responsibility explicitly implementing
 that requirement. Editing children to attach UI, moving nodes or changing shared layout does not
 make the parent/container implement the attached requirement. reuse_ids records use only.
@@ -150,7 +155,7 @@ implements_ids lists changed existing objects whose NEW semantic responsibility 
 the current requirement. Use [] for structural maintenance and pure reuse. To create only shared
 shell structure, set requirement_ids=[]; it is used by the current task, not directly owned by it.
 Never copy ancestor requirement IDs onto all descendants, or current IDs onto every reused object.
-Existing shared responsibilities must survive changes. Read supplied related requirement scenarios.
+Existing shared responsibilities must survive changes. Preserve loaded UI, state and event contracts.
 Do not invent product behaviors. Parent requirements describe shared composition; do not duplicate
 child-specific UI and behavior. Backend-only requirements may return an entirely empty delta.
 The compiler maintains root_ui_id; preserve that root. New-node OUTPUT children are ordered IDs.
@@ -182,8 +187,9 @@ Additional semantic attributes: heading level, link destination, tab selected, p
 cell header, action submits_form. A table contains rows, rows contain cells.
 Do not use DOM/CSS properties or framework lifecycle names.
 presentation is optional natural-language layout/visual intent. Reference images are optional;
-use only supplied visual_reference_ids and preserve their relevant layout and visual cues.
-Pictures supply visual evidence, not additional functional scope.
+requirement.pages[].analysis supplies visual evidence beside the exact page name and reference path.
+Use that analysis in every design phase and preserve its relevant layout and visual cues.
+Pictures define complete visible UI structure; requirements define ownership and functional behavior.
 """
 
 STATE_CONTRACT = """scope_ui_id=null means shared application data; otherwise local to that UI subtree instance.
@@ -212,7 +218,24 @@ Do not invent API IDs or claim unsupported server effects. Local-only behavior n
 
 PROMPTS = {
     "ui": COMMON + """
-Pass 1: plan page topology AND design the current requirement UI in one call.
+Pass 1: execute the supplied page_operations, one declared page per call, then bind requirement UI.
+NEW_PAGE with visual evidence: the image is authoritative for the COMPLETE visible component tree.
+Inspect ALL regions, headings, text, images, navigation, forms, fields, labels, actions, lists/tables,
+feedback and overlays, including UI unrelated to this requirement's description or scenarios.
+Organize every visible meaningful UI into the page's full semantic hierarchy; do not stop once
+the current requirement's controls are covered. Avoid decorative DOM wrappers and invented behavior.
+Set requirement_ids=[] on visual-only nodes; requirement_ui_ids identifies only nodes involved in
+the current requirement. Structural ancestors are uses, not automatic direct owners.
+NEW_PAGE without evidence: derive the necessary UI from requirements; do not invent unseen screens.
+BIND_ONLY: this page/reference pair has already been parsed. Return no UI creations, updates,
+deletions or page assignments. Only identify requirement_ui_ids and reuse_ids in the existing tree.
+NEW_PAGE_STATE: a new reference for the SAME page represents another state. Compare its full
+visual evidence with baseline_reference/baseline_ui (the first parsed reference) AND the current
+page tree. Identify additions, reuse already-added controls, and insert only missing nodes under
+existing parents. Preserve baseline controls absent from the new state: absence is not deletion.
+Describe state-dependent visibility/selection in presentation/spec; behavior is designed later.
+After every mode, map the current description/scenarios to requirement_ui_ids without assigning
+the whole page tree to the requirement. Use load_ui_ids before binding unloaded nodes.
 Existing UI updates may use set/unset for schema-listed fields, children and bindings.
 New UI records must include events:[]; ui_updates.events is absent from this pass's schema.
 Each page is a screen-rooted subtree of the application UI tree. When page_ids is populated,
@@ -221,10 +244,10 @@ For each missing_pages name, create a new screen subtree and attach it via ui_up
 then return its page_assignments entry with the exact declared page name. Use ui_tree_summary
 to locate shared application structure; never substitute an undeclared page by semantic similarity.
 Give screens logical routes when needed. Establish shared navigation/header/footer regions once.
-For NON_LEAF tasks reuse completed child pages and add only parent-level composition.
+NON_LEAF requirements obey the same page_operations; bind their shared responsibilities precisely.
 Screen routes and UI presentation are optional prose/locations; the prohibition on HTTP routes
 means backend endpoints, not the screen's route field.
-Add semantic regions, text, controls, list containers and feedback as required.
+For visual parsing, include every visible semantic region, text, control, list and feedback.
 Place all new nodes into the tree by adding child IDs to existing parents with ui_updates.
 Reuse the existing screen/surface rather than creating a new screen for every requirement.
 Define visual composition and static bindings now; leave dynamic bindings for the next pass.
@@ -281,7 +304,7 @@ for _phase, _tables in PHASE_TABLES.items():
         "upserts": {table: [] for table in _tables},
         "ui_updates": [], "deletes": {table: [] for table in _tables},
         "reuse_ids": [], "implements_ids": [], "load_ui_ids": [],
-        **({"page_assignments": []} if _phase == "ui" else {}),
+        **({"page_assignments": [], "requirement_ui_ids": []} if _phase == "ui" else {}),
     }
 EXAMPLES["ui"]["upserts"]["ui"] = [{
     "id": "REQ-1.ui.heading", "name": "page_heading", "kind": "heading",

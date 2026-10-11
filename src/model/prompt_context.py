@@ -38,9 +38,10 @@ STAGE_GROUPS = {
         "Reference and discovery": ("Reusable modules and dependency context", "reuse_context.modules/types are loaded reusable contracts; module_catalog/type_catalog entries are discovery summaries. Request missing records before relying on their detailed contracts."),
     },
     "frontend": {
+        "Current task": ("Current task", "requirement.pages presents each page name, image path and cached analysis together. Page operations determine full visual parsing, existing-tree binding or new-state comparison. Requirements define behavior and node ownership."),
         "Established contracts": ("Backend API and frontend type contracts", "Use these exact API IDs and named types at the backend boundary. Report missing capabilities rather than inventing APIs."),
         "Current working region": ("Selected page subtree and frontend state", "existing.ui contains nested loaded UI records. Work within the selected page; preserve stable node IDs, unrelated sibling controls and existing events. Keep state scope consistent with the UI tree."),
-        "Reference and discovery": ("UI tree summary, shared requirements and visual analysis", "The whole-tree summary is for locating pages, not replacing unloaded nodes. Exact declared page names identify the same screen; images are optional visual evidence. Cached image analysis informs presentation; requirements define behavior."),
+        "Reference and discovery": ("UI tree summary and discovery", "The compact app/page summary is supplied only when a declared page has no existing subtree. Catalogs locate records and do not grant edit permission. Page visual analysis is supplied with the requirement in Current task."),
         "Read and edit scope": ("Loaded UI IDs and incremental update scope", "Modify existing UI only when its ID is in loaded_ui_ids. Use ui_updates for existing nodes and complete records for new UI. Request omitted records through load_ui_ids before editing."),
     },
     "tests": {
@@ -89,7 +90,7 @@ GROUPS = (
     ("Established contracts", "These records define existing interfaces and types. Preserve them according to the stage instructions.",
      {"schema_slice", "api_contracts", "types", "source_targets", "layers", "database_schema", "schema_ref", "backend_ref"}),
     ("Current task", "Implement or design only the current requirement. Parent/related requirements supply context rather than extra tasks.",
-     {"requirement", "requirement_id", "scenario_ids", "node_role", "implementation_mode", "test_layer", "iteration", "focus_entity", "reference_id"}),
+     {"requirement", "requirement_id", "scenario_ids", "node_role", "implementation_mode", "test_layer", "iteration", "focus_entity", "reference_id", "page_operations"}),
     ("Current working region", "Use these existing records as the starting point; preserve unrelated behavior and stable IDs.",
      {"existing", "existing_entities", "related_entities", "own_field_contributions", "related_data", "analysis", "root_ui_id", "requirement_links", "page_ids", "page_context_mode", "page_matches", "declared_pages", "missing_pages", "backend_subgraph", "frontend_subgraph"}),
     ("Reference and discovery", "Summaries/catalogs locate records; they do not grant edit permission. Visual evidence informs presentation, not additional business scope.",
