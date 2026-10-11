@@ -137,7 +137,7 @@ class VisualReferenceResolver:
             node = nodes[requirement_id]
             if not isinstance(node, dict):
                 continue
-            raw_references = node.get("visual_references", [])
+            raw_references = [page["reference"] for page in node.get("pages", []) if page.get("reference")]
             if not isinstance(raw_references, list):
                 errors.append(
                     self._issue(

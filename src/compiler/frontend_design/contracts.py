@@ -80,6 +80,8 @@ def patch_schema(phase: str) -> dict[str, Any]:
         "reuse_ids": strings,
         "implements_ids": strings,
         "load_ui_ids": strings,
+        **({"page_assignments": {"type": "array", "items": obj({
+            "name": {"type": "string"}, "ui_id": {"type": "string"}})}} if phase == "ui" else {}),
     })
     return {**schema, "$defs": defs, "x-arc-output-mode": "json_object"}
 
@@ -134,16 +136,14 @@ The compiler maintains root_ui_id; preserve that root. New-node OUTPUT children 
 UI containment follows application layout and navigation, not the requirement tree. Reuse existing
 application shell, screens and regions; one screen may implement several requirements and one
 requirement may affect several screens. Ancestors supply context, not additional feature tasks.
-preferred_screen_matches is deterministic path-based reuse evidence: in this project, requirements
-sharing the same image PATH describe the SAME screen. visual_reference_path is the index key;
-image content hashes and analysis IDs do not establish screen identity. Use the matched existing screen for that
-image; refine/reuse its controls or add missing children there instead of creating a duplicate screen.
-This does not mean every control is identical. Match each control by responsibility and position.
-When ambiguous=true, inspect the listed screens with load_ui_ids to resolve existing associations;
-do not create another screen to bypass ambiguity. Different images may refer to different screens.
-Screen retrieval uses requirement image paths and their existing UI ownership/use links.
-An image match is discovery evidence, not permission to edit an
-unloaded UI record. Preserve other requirements and sibling controls within the matched subtree.
+declared_pages is the authoritative page scope. Page identity is the EXACT pages[].name,
+not an image path or image hash. page_matches maps those names to existing screen IDs.
+Use the same screen for every requirement sharing a page name, even with no image reference.
+missing_pages lists page names needing a new screen subtree. In UI output, page_assignments
+contains {name,ui_id} for new declared pages; unchanged existing assignments may be omitted.
+Never assign an undeclared page or duplicate an existing screen. Each screen corresponds to one
+page name. All UI/data/interaction calls for a requirement use the same declared page scope.
+The optional pages[].reference supplies cached visual evidence only and does not identify a page.
 Do not create login/search/booking surfaces just because an ancestor mentions them during a leaf task.
 When building shared shell structure, add only the regions needed to host the current leaf surface.
 structural_ui contains compact ancestor summaries for discovery only. Before updating an ancestor,
@@ -192,8 +192,9 @@ PROMPTS = {
 Pass 1: plan page topology AND design the current requirement UI in one call.
 Each page is a screen-rooted subtree of the application UI tree. When page_ids is populated,
 inspect and update the loaded corresponding page subtree, preserving unrelated controls.
-When no page matches, inspect ui_tree_summary: load an existing matching page if its route and
-responsibility match; otherwise create a new screen subtree and attach it via ui_updates.children.
+For each missing_pages name, create a new screen subtree and attach it via ui_updates.children,
+then return its page_assignments entry with the exact declared page name. Use ui_tree_summary
+to locate shared application structure; never substitute an undeclared page by semantic similarity.
 Give screens logical routes when needed. Establish shared navigation/header/footer regions once.
 For NON_LEAF tasks reuse completed child pages and add only parent-level composition.
 Add semantic regions, text, controls, list containers and feedback as required.
@@ -204,6 +205,7 @@ Do not create data/events/functions. Preserve already established shared layouts
 """,
     "data": COMMON + """
 Pass 2: define typed frontend data and UI bindings for this requirement's committed UI.
+Use the same declared page subtree selected/created by UI; do not switch pages or reconstruct UI.
 Reuse existing state when its meaning, lifecycle and type match. Use local subtree scope by default;
 promote genuinely shared state to the nearest shared ancestor or application scope.
 Cover user input, display results, loading, empty/error/selection states as requirements need them.
@@ -216,6 +218,7 @@ derivation in UI spec for implementation, rather than adding an executable expre
 """,
     "interaction": COMMON + """
 Pass 3: update events through ui_updates.events and connect ordered frontend function calls.
+Use the same committed page subtree as UI and Data; preserve its node identities and containment.
 Complete the full interaction: payload -> function arguments -> state reads -> backend API calls ->
 result/state writes -> bound UI, including initialization/enter, derived state recomputation,
 local-only actions, navigation and applicable success/failure/loading/empty behavior.

@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
 
 SUPPORTED_NODE_TYPES = {"FOLDER", "ATOMIC"}
-IMAGE_REFERENCE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 
 
 @dataclass(slots=True)
@@ -130,7 +128,8 @@ class RequirementPreprocessor:
             errors.append(_format_error("ARC1106", "ATOMIC requirement cannot contain children.", node_id=node_id, source=source))
 
         description = str(raw.get("description") or "").strip()
-        visual_references = self._visual_references(raw.get("visual_reference"), description)
+        pages = self._normalize_pages(raw.get("pages", []), node_id, source, errors)
+        visual_references = sorted({page["reference"] for page in pages if page.get("reference")})
         scenarios = self._normalize_scenarios(raw.get("scenarios"), node_id, source, errors)
 
         node = {
@@ -141,6 +140,7 @@ class RequirementPreprocessor:
             "parent_id": parent_id,
             "children_ids": [],
             "dependencies": dependencies,
+            "pages": pages,
             "visual_references": visual_references,
             "scenarios": scenarios,
             "source": {"document": source_name, "pointer": pointer},
@@ -166,6 +166,31 @@ class RequirementPreprocessor:
             child_ids.append(child_id)
         node["children_ids"] = child_ids
         return node_id
+
+    @staticmethod
+    def _normalize_pages(value: Any, node_id: str, source: str, errors: list[str]) -> list[dict[str, str]]:
+        if not isinstance(value, list):
+            errors.append(_format_error("ARC1108", "pages must be a list.", node_id=node_id, source=source))
+            return []
+        pages, names = [], set()
+        for page in value:
+            if not isinstance(page, dict) or set(page) - {"name", "reference"} or not isinstance(page.get("name"), str) or not page["name"].strip():
+                errors.append(_format_error("ARC1108", "Each page needs a nonempty name and optional reference.", node_id=node_id, source=source))
+                continue
+            name = page["name"].strip()
+            if name in names:
+                errors.append(_format_error("ARC1108", f"Duplicate page name: {name}", node_id=node_id, source=source))
+                continue
+            row = {"name": name}
+            reference = page.get("reference")
+            if reference is not None:
+                if not isinstance(reference, str) or not reference.strip() or PurePosixPath(reference.replace(chr(92), "/")).is_absolute() or ":" in reference:
+                    errors.append(_format_error("ARC1108", "Page reference must be a relative image path.", node_id=node_id, source=source))
+                    continue
+                row["reference"] = reference.strip()
+            pages.append(row)
+            names.add(name)
+        return pages
 
     @staticmethod
     def _normalize_scenarios(value: Any, node_id: str, source: str, errors: list[str]) -> list[dict[str, Any]]:
@@ -199,13 +224,6 @@ class RequirementPreprocessor:
                 ],
             })
         return scenarios
-
-    @staticmethod
-    def _visual_references(explicit: Any, description: str) -> list[str]:
-        values = explicit if isinstance(explicit, list) else ([explicit] if isinstance(explicit, str) else [])
-        values = [str(item).strip() for item in values if str(item).strip()]
-        values.extend(match.strip() for match in IMAGE_REFERENCE_PATTERN.findall(description) if match.strip())
-        return sorted(set(values))
 
     @staticmethod
     def _validate_dependencies(nodes: dict[str, dict[str, Any]], errors: list[str]) -> None:

@@ -127,6 +127,7 @@ class FrontendIR(TypedDict):
     backend_ref: str
     types: list[BackendTypeDefinition]
     root_ui_id: str
+    page_roots: NotRequired[dict[str, str]]
     ui: list[UINode]
     data: list[FrontendState]
     functions: list[UIFunction]

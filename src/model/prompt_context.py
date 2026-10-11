@@ -40,7 +40,7 @@ STAGE_GROUPS = {
     "frontend": {
         "Established contracts": ("Backend API and frontend type contracts", "Use these exact API IDs and named types at the backend boundary. Report missing capabilities rather than inventing APIs."),
         "Current working region": ("Selected page subtree and frontend state", "existing.ui contains nested loaded UI records. Work within the selected page; preserve stable node IDs, unrelated sibling controls and existing events. Keep state scope consistent with the UI tree."),
-        "Reference and discovery": ("UI tree summary, shared requirements and visual analysis", "The whole-tree summary is for locating pages, not replacing unloaded nodes. Shared image paths identify the same screen. Cached image analysis informs presentation; requirements define behavior."),
+        "Reference and discovery": ("UI tree summary, shared requirements and visual analysis", "The whole-tree summary is for locating pages, not replacing unloaded nodes. Exact declared page names identify the same screen; images are optional visual evidence. Cached image analysis informs presentation; requirements define behavior."),
         "Read and edit scope": ("Loaded UI IDs and incremental update scope", "Modify existing UI only when its ID is in loaded_ui_ids. Use ui_updates for existing nodes and complete records for new UI. Request omitted records through load_ui_ids before editing."),
     },
     "tests": {
@@ -91,7 +91,7 @@ GROUPS = (
     ("Current task", "Implement or design only the current requirement. Parent/related requirements supply context rather than extra tasks.",
      {"requirement", "requirement_id", "scenario_ids", "node_role", "implementation_mode", "test_layer", "iteration", "focus_entity", "reference_id"}),
     ("Current working region", "Use these existing records as the starting point; preserve unrelated behavior and stable IDs.",
-     {"existing", "existing_entities", "related_entities", "own_field_contributions", "related_data", "analysis", "root_ui_id", "requirement_links", "page_ids", "page_context_mode", "preferred_screen_matches", "backend_subgraph", "frontend_subgraph"}),
+     {"existing", "existing_entities", "related_entities", "own_field_contributions", "related_data", "analysis", "root_ui_id", "requirement_links", "page_ids", "page_context_mode", "page_matches", "declared_pages", "missing_pages", "backend_subgraph", "frontend_subgraph"}),
     ("Reference and discovery", "Summaries/catalogs locate records; they do not grant edit permission. Visual evidence informs presentation, not additional business scope.",
      {"reuse_context", "schema_index", "er_graph", "ancestor_context", "dependency_requirements", "related_requirements", "child_requirements", "child_requirement_count", "requirement_catalog", "ui_tree_summary", "structural_ui", "function_catalog", "api_catalog", "visual_references", "shared_requirements", "preserve_requirements", "available_api_ids", "prerequisite_flows", "path", "source_path", "aliases", "sha256", "media_type", "byte_size", "requirement_ids"}),
     ("Read and edit scope", "The stage instructions and explicit allowlists control modifications. Discoverable files and summaries are not automatically editable; request unloaded records first.",

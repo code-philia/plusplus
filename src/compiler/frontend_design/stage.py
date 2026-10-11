@@ -19,7 +19,7 @@ from model.client import describe_model_error
 from compiler.preprocessing.traversal import children_by_id, postorder
 from compiler.preprocessing.visual import ResolvedVisualReference
 from .contracts import PHASE_TABLES, PROMPTS, patch_schema
-from .context import TABLES, frontend_ir_traceability, local_context, ranked, required_types, visual_screen_matches, context_ui_nodes
+from .context import TABLES, frontend_ir_traceability, local_context, ranked, required_types, page_screen_matches, context_ui_nodes
 from compiler.ir.frontend import frontend_events
 from compiler.ir.frontend_storage import read_frontend_ir, write_frontend_ir
 from compiler.preprocessing.visual_cache import cache_path, image_key, persist_records, read_cache, consolidate_cache
@@ -88,7 +88,7 @@ class FrontendIRGenerationPass:
                        "id": "ui.app", "name": "application_shell", "kind": "group", "spec": "Application UI composition root.",
                        "requirement_ids": [], "children": [], "bindings": {}, "events": [],
                    }], "data": [], "functions": [], "pending_capabilities": [],
-                   "requirement_links": {}}
+                   "requirement_links": {}, "page_roots": {}}
         self.requirement_hash = hashlib.sha256(json.dumps(requirement_ir, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         existing = self.root / "frontend_ir.json"
         previous_report = self.root / "report.json"
@@ -103,6 +103,7 @@ class FrontendIRGenerationPass:
                 raise ValueError("Frontend IR must embed events in UI nodes; regenerate the old design")
             self.ir = previous
         self.requested_ui: dict[str, set[str]] = {}
+        self.page_ui_scope: dict[str, set[str]] = {}
         report_path = self.artifact_root / "design" / "backend" / "report.json"
         backend_report = json.loads(report_path.read_text()) if report_path.is_file() else {}
         gaps = {row["id"]: row for row in self.ir.get("pending_capabilities", [])}
@@ -120,6 +121,9 @@ class FrontendIRGenerationPass:
             phases = ("ui", "data", "interaction")
             for phase in phases:
                 self._call(phase, [rid], self._payload(rid, phase))
+                if phase == "ui":
+                    # Freeze the committed UI selection for both behavior passes.
+                    self.page_ui_scope[rid] = set(self._payload(rid, "data")["loaded_ui_ids"])
         self.warnings.extend(f"{gap['id']}: pending integration: {gap['capability']} ({gap['reason']})"
                              for gap in self.ir["pending_capabilities"])
         status = "GENERATED_WITH_WARNINGS" if self.failures or self.warnings else "GENERATED"
@@ -155,9 +159,13 @@ class FrontendIRGenerationPass:
             descendants.add(key)
             pending.extend(self.children[key])
         related = list(dict.fromkeys([*related, *sorted(descendants)]))
-        matches = visual_screen_matches(self.ir, rid, self.nodes)
-        context = local_context(self.ir, rid, requirement, set(related), self.requested_ui.get(rid, set()),
-                                screen_matches=matches)
+        matches = page_screen_matches(self.ir, self.nodes[rid]["pages"])
+        context = local_context(self.ir, rid, requirement, set(related),
+                                self.requested_ui.get(rid, set()) | self.page_ui_scope.get(rid, set()),
+                                screen_matches=matches, page_root_ids={row["screen_id"] for row in matches})
+        page_names = {page["name"] for page in self.nodes[rid]["pages"]}
+        reference_paths = {image_key(page["reference"]) for node in self.nodes.values()
+                           for page in node["pages"] if page["name"] in page_names and page.get("reference")}
         owners = set(related) | {rid}
         attached = {key for owner in owners for key in self.api_owners.get(owner, [])}
         primary = [row for row in self.apis if row["id"] in attached
@@ -179,8 +187,11 @@ class FrontendIRGenerationPass:
                    "api_contracts": [self._api(row) for row in apis] if phase != "ui" else [],
                    "api_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}
                                    for row in ranked(self.apis, requirement, 24)] if phase != "ui" else [],
+                   "declared_pages": copy.deepcopy(self.nodes[rid]["pages"]),
+                   "missing_pages": [page["name"] for page in self.nodes[rid]["pages"]
+                                     if page["name"] not in self.ir.get("page_roots", {})],
                    "visual_references": [self._visual_context(row, phase) for row in self.visuals
-                                         if owners & set(row["requirement_ids"])],
+                                         if image_key(row["path"]) in reference_paths],
                    "pending_capabilities": [copy.deepcopy(row) for row in self.ir["pending_capabilities"]
                                             if owners & set(row["requirement_ids"])],
                    "prior_task_failures": [row for row in self.failures if owners & set(row["requirement_ids"])]}
@@ -199,7 +210,7 @@ class FrontendIRGenerationPass:
     def _requirement(self, rid: str, compact: bool = False) -> dict[str, Any]:
         row = self.nodes[rid]
         result = {"id": rid, **{key: copy.deepcopy(row[key]) for key in
-                  ("name", "type", "parent_id", "description", "scenarios", "visual_reference_ids", "visual_references") if key in row}}
+                  ("name", "type", "parent_id", "description", "scenarios", "visual_reference_ids", "visual_references", "pages") if key in row}}
         if compact:
             result["description"] = str(result.get("description", ""))[:900]
             result.pop("scenarios", None)
@@ -215,7 +226,8 @@ class FrontendIRGenerationPass:
         ids.extend(self.children[rid])
         # Shared objects bring the requirements whose behavior must be preserved.
         context = local_context(self.ir, rid, self._requirement(rid), set(ids), self.requested_ui.get(rid, set()),
-                                screen_matches=visual_screen_matches(self.ir, rid, self.nodes))
+                                screen_matches=page_screen_matches(self.ir, self.nodes[rid]["pages"]),
+                                page_root_ids={row["screen_id"] for row in page_screen_matches(self.ir, self.nodes[rid]["pages"])})
         ids.extend(owner for row in [*context_ui_nodes(context), *context["existing"]["data"],
                                     *context["existing"]["functions"]]
                    for owner in row.get("requirement_ids", []))
@@ -291,6 +303,30 @@ class FrontendIRGenerationPass:
         for rid, link in links.items():
             link["implements"] = sorted(key for key, row in records.items() if rid in row.get("requirement_ids", []))
             link["uses"] = sorted((set(link["uses"]) & records.keys()) - set(link["implements"]))
+        if phase == "ui":
+            ui = {row["id"]: row for row in trial["ui"]}
+            page_roots = trial.setdefault("page_roots", {})
+            declared = {page["name"] for rid in requirements for page in self.nodes[rid]["pages"]}
+            seen = set()
+            for assignment in output["page_assignments"]:
+                name, key = assignment["name"], assignment["ui_id"]
+                if name not in declared or name in seen or ui.get(key, {}).get("kind") != "screen":
+                    raise ValueError("Page assignments must uniquely map declared page names to screen nodes")
+                if name in page_roots and page_roots[name] != key:
+                    raise ValueError(f"Existing page must retain its screen ID: {name}")
+                if any(other != name and root == key for other, root in page_roots.items()):
+                    raise ValueError("Each page name must have its own screen subtree")
+                page_roots[name] = key
+                seen.add(name)
+            if declared - page_roots.keys():
+                raise ValueError(f"UI design must assign the declared pages: {sorted(declared - page_roots.keys())}")
+            if any(ui.get(key, {}).get("kind") != "screen" for key in page_roots.values()):
+                raise ValueError("Cannot delete a registered page screen")
+            if {row["id"] for row in ui.values() if row["kind"] == "screen"} != set(page_roots.values()):
+                raise ValueError("Every screen must be registered by a declared page name")
+            for rid in requirements:
+                links[rid]["uses"] = sorted((set(links[rid]["uses"]) |
+                    {page_roots[page["name"]] for page in self.nodes[rid]["pages"]}) - set(links[rid]["implements"]))
         write_frontend_ir(self.root / "frontend_ir.json", trial)
         self.ir = trial
 
@@ -314,11 +350,21 @@ class FrontendIRGenerationPass:
                 requested = output.get("load_ui_ids", [])
                 if not requested:
                     break
-                if any(output["upserts"].values()) or any(output["deletes"].values()) or output["ui_updates"] or output["implements_ids"] or output["reuse_ids"]:
+                if any(output["upserts"].values()) or any(output["deletes"].values()) or output["ui_updates"] or output["implements_ids"] or output["reuse_ids"] or output.get("page_assignments"):
                     raise ValueError("UI context requests must contain an otherwise empty delta")
                 known = {row["id"] for row in self.ir["ui"]}
                 if set(requested) - known:
                     raise ValueError("Context request contains unknown UI IDs")
+                page_ids = {row["screen_id"] for row in page_screen_matches(self.ir, self.nodes[requirements[0]]["pages"])}
+                ui = {row["id"]: row for row in self.ir["ui"]}
+                parents = {child: row["id"] for row in ui.values() for child in row["children"]}
+                for key in requested:
+                    while key in ui:
+                        if ui[key]["kind"] == "screen":
+                            if key not in page_ids:
+                                raise ValueError("Cannot load a page outside this requirement's declared pages")
+                            break
+                        key = parents.get(key)
                 record["context_requests"].append({"ids": requested, "output": output})
                 self.requested_ui[requirements[0]] = set(requested)
                 payload = self._payload(requirements[0], phase)

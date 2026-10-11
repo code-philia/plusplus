@@ -86,7 +86,7 @@ class CompilerArtifactStore:
             paths[f"frontend_{table}"] = str(path)
         metadata_path = self.frontend_design_root / "metadata.json"
         write_json_atomic(metadata_path, {key: frontend_ir[key] for key in
-            ("ir_kind", "backend_ref", "root_ui_id") if key in frontend_ir})
+            ("ir_kind", "backend_ref", "root_ui_id", "page_roots") if key in frontend_ir})
         paths["frontend_metadata"] = str(metadata_path)
         visual_path = self.frontend_design_root / "visual_references.json"
         write_json_atomic(visual_path, {"analysis_ref": "../visual_cache.json",

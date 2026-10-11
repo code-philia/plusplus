@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import copy
 import json
-import posixpath
 import re
 
 from compiler.ir.frontend import frontend_events
@@ -79,53 +78,21 @@ def frontend_ir_traceability(ir: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return links
 
 
-def visual_screen_matches(ir: dict[str, Any], rid: str,
-                          requirements: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """Index requirement image paths to existing screens without loading images."""
+def page_screen_matches(ir: dict[str, Any], pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Exact declared page-name lookup; image paths do not define page identity."""
     ui = {row["id"]: row for row in ir["ui"]}
-    parents = {child: row["id"] for row in ui.values() for child in row.get("children", [])}
-    def normalize(path: str) -> str:
-        return posixpath.normpath(path.replace(chr(92), "/"))
-
-    owners_by_path: dict[str, set[str]] = {}
-    for owner, row in requirements.items():
-        for path in row.get("visual_references", []):
-            owners_by_path.setdefault(normalize(path), set()).add(owner)
-    references = {normalize(path) for path in requirements.get(rid, {}).get("visual_references", [])}
-    events = frontend_events(ir)
-
-    def screen_for(key: str) -> str | None:
-        seen = set()
-        while key in ui and key not in seen:
-            seen.add(key)
-            if ui[key]["kind"] == "screen":
-                return key
-            key = parents.get(key)
-        return None
-
-    result = []
-    for reference in sorted(references):
-        owners = owners_by_path[reference]
-        anchors = {row["id"] for row in ui.values() if owners & set(row.get("requirement_ids", []))}
-        linked = {key for owner in owners for field in ("implements", "uses")
-                  for key in ir.get("requirement_links", {}).get(owner, {}).get(field, [])}
-        anchors.update(linked & ui.keys())
-        anchors.update(event["ui_id"] for event in events if event["id"] in linked
-                       or owners & set(event.get("requirement_ids", [])))
-        screens = sorted({screen for key in anchors if (screen := screen_for(key)) is not None})
-        for screen in screens:
-            result.append({"screen_id": screen, "visual_reference_path": reference,
-                           "reason": "shared_visual_path", "association": "requirement_reference",
-                           "ambiguous": len(screens) > 1,
-                           "matched_ui_ids": sorted(key for key in anchors if screen_for(key) == screen),
-                           "matched_requirement_ids": sorted(owners)})
-    return result
+    roots = ir.get("page_roots", {})
+    return [{"screen_id": roots[page["name"]], "page_name": page["name"],
+             "reason": "declared_page_name", "matched_ui_ids": [roots[page["name"]]]}
+            for page in pages if page["name"] in roots
+            and ui.get(roots[page["name"]], {}).get("kind") == "screen"]
 
 
 def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
                   related_ids: set[str], requested_ui_ids: set[str] | None = None,
                   max_chars: int = 48000, *,
-                  screen_matches: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                  screen_matches: list[dict[str, Any]] | None = None,
+                  page_root_ids: set[str] | None = None) -> dict[str, Any]:
     """Load requirement pages only; expose other pages through a tree summary."""
     rows = {row["id"]: row for table in TABLES for row in ir[table]}
     events = frontend_events(ir)
@@ -136,7 +103,7 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
     used = set(ir.get("requirement_links", {}).get(rid, {}).get("uses", []))
     requested = (requested_ui_ids or set()) & ui.keys()
     matches = screen_matches or []
-    screens = {row["screen_id"] for row in matches}
+    screens = set(page_root_ids) if page_root_ids is not None else {row["screen_id"] for row in matches}
     anchors = (owned | used | requested) & ui.keys()
     anchors.update(event["ui_id"] for event in events if event["id"] in owned | used)
     scoped_data = (owned | used) & {row["id"] for row in ir["data"]}
@@ -149,9 +116,23 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
         while key in ui and key not in seen:
             seen.add(key)
             if ui[key]["kind"] == "screen":
-                screens.add(key)
+                if page_root_ids is None:
+                    screens.add(key)
                 break
             key = parents.get(key)
+    if page_root_ids is not None:
+        def permitted(key: str) -> bool:
+            seen = set()
+            while key in ui and key not in seen:
+                seen.add(key)
+                if ui[key]["kind"] == "screen":
+                    return key in screens
+                key = parents.get(key)
+            return True  # Shared application structure has no screen ancestor.
+        anchors = {key for key in anchors if permitted(key)}
+        owned = {key for key in owned if key not in ui or permitted(key)}
+        used = {key for key in used if key not in ui or permitted(key)}
+        requested = {key for key in requested if permitted(key)}
     region = set(anchors)
     pending, walked = sorted(screens), set()
     while pending:
@@ -180,6 +161,8 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
                           *[call for event in row.get("events", []) for call in event.get("handlers", [])]]
                           if call.get("kind") == "FUNC")
         fresh = (references & rows.keys()) - selected
+        if page_root_ids is not None:
+            fresh = {key for key in fresh if key not in ui or permitted(key)}
         selected.update(fresh)
         pending.extend(fresh)
     structural = {ir["root_ui_id"]}
@@ -194,6 +177,7 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
     size, loaded = 0, set()
     candidates = [(table, row) for table in records for row in ir[table] if row["id"] in selected]
     candidates.sort(key=lambda pair: (pair[1]["id"] not in requested,
+                                      pair[0] != "ui",
                                       pair[1]["id"] not in screens | {ir["root_ui_id"]},
                                       pair[1]["id"] not in owned, pair[1]["id"]))
     for table, row in candidates:
@@ -230,7 +214,7 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
         "ui_tree_summary": tree(ir["root_ui_id"], True),
         "structural_ui": [ui_summary(ui[key], parents) for key in sorted(structural - loaded)],
         "requirement_links": copy.deepcopy(ir.get("requirement_links", {}).get(rid, {"implements": [], "uses": []})),
-        "preferred_screen_matches": copy.deepcopy(matches),
+        "page_matches": copy.deepcopy(matches),
         "omitted_ids": sorted((selected & rows.keys()) - loaded - {event["id"] for event in events}),
         "context_budget_chars": max_chars,
         "function_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}

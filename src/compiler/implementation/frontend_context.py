@@ -28,6 +28,8 @@ def implementation_requirement(
             return [project(item) for item in value]
         if not isinstance(value, dict):
             return copy.deepcopy(value)
+        if "pages" in value and "visual_references" not in value:
+            value = {**value, "visual_references": [page["reference"] for page in value["pages"] if page.get("reference")]}
         result = {}
         for key, item in value.items():
             if key != "visual_references":

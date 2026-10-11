@@ -934,6 +934,7 @@ def _build_context_pack(
             "scenarios",
             "examples",
             "visual_references",
+            "pages",
             "dependencies",
             "children",
         )
