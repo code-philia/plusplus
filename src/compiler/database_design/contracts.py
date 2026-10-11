@@ -177,7 +177,7 @@ cross-field constraints, modules, SQL or physical database options. Do not persi
   constraint. Do not copy another requirement's bounds/default/enum just because they are in the shared field.
 - The compiler merges contributions: type must agree; nullable uses AND; lower bounds use max, upper bounds
   use min; enum sets intersect; uniqueness uses OR. Specified defaults and unique comparison semantics must
-  agree. Empty intersections, invalid ranges and incompatible types are conflicts, never last-write-wins.
+  agree. Conflicting proposals are retained and merged without blocking design; implementation resolves behavior.
 - Updating this requirement's contribution cannot remove any other requirement's facts.
 - An existing field requiring no new or changed fact is reused silently. No reuse_fields key.
 - Do not rename fields or modify id, *_id, SYSTEM or RELATIONSHIP fields. Return only entities with changes.

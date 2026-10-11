@@ -4,7 +4,7 @@ from __future__ import annotations
 import types
 from typing import Any, Literal, NotRequired, Required, Union, get_args, get_origin, get_type_hints, is_typeddict
 
-from ..ir.backend import BackendIR, BackendModule, BackendField, BackendTypeDefinition, AcceptanceCriterion, DataAccess
+from ..ir.backend import BackendIR, BackendModule, BackendTypeDefinition
 
 FIELD_NAME_PATTERN = r'^[a-z][a-z0-9_]*$'
 SEMANTIC_ID_PATTERN = r'^[a-z][a-z0-9_.]*$'
@@ -65,25 +65,23 @@ def schema_for(annotation: Any) -> dict[str, Any]:
 IR_SCHEMA = schema_for(BackendIR)
 MODULE_SCHEMA = schema_for(BackendModule)
 ANALYSIS_SCHEMA = object_schema({
-    "spec": {"type": "string"}, "server_state": {"type": "boolean"},
-    "inputs": schema_for(list[BackendField]), "context": schema_for(list[BackendField]),
-    "outputs": schema_for(list[BackendField]),
-    "acceptance_criteria": schema_for(list[AcceptanceCriterion]),
-    "data_operations": schema_for(list[DataAccess]),
-    "types": schema_for(list[BackendTypeDefinition]),
-    "requested_tables": {"type": "array", "items": {"type": "string"}},
-    "api_capabilities": {"type": "array", "items": object_schema({
-        "operation": {"type": "string"}, "purpose": {"type": "string"},
-        "inputs": {"type": "array", "items": {"type": "string"}},
-        "context": {"type": "array", "items": {"type": "string"}},
-        "outputs": {"type": "array", "items": {"type": "string"}},
-        "scenario_ids": {"type": "array", "items": {"type": "string"}},
+    "intent": {"type": "string"}, "server_state": {"type": "boolean"},
+    "capabilities": {"type": "array", "items": object_schema({
+        "purpose": {"type": "string"},
+        "role": {"enum": ["setup", "action", "observation"]},
+        "scenario_ids": schema_for(list[str]),
+        "reuse_module_ids": schema_for(list[str]),
+        "missing_behavior": {"type": "string"},
     })},
+    "requested_tables": schema_for(list[str]),
+    "requested_module_ids": schema_for(list[str]),
+    "requested_type_ids": schema_for(list[str]),
 })
 ARCHITECTURE_SCHEMA = object_schema({
     "new_modules": {"type": "array", "items": MODULE_SCHEMA},
-    "reuse_module_ids": {"type": "array", "items": {"type": "string"}},
-    "api_ids": {"type": "array", "items": {"type": "string"}},
+    "new_types": schema_for(list[BackendTypeDefinition]),
+    "reuse_module_ids": schema_for(list[str]),
+    "api_ids": schema_for(list[str]),
 })
 
 COMMON = """Design complete backend modules from the supplied requirement and accepted Schema IR.
@@ -109,75 +107,50 @@ Describe all required validation, authorization, atomicity and observable failur
 Optional acceptance_criteria use id/given/when/then/scenario_ids, referring only to supplied scenarios.
 Runtime identity/time values belong to context, never to untrusted request fields.
 """
-ANALYSIS_PROMPT = COMMON + """Analyze the current requirement before allocating modules.
-Return behavior, inputs/context/outputs, criteria, logical data_operations, and new shared types.
-Discover api_capabilities from each scenario's COMPLETE observable operation chain, including
-Given setup and Then observations after reload, navigation, a later request or another visitor.
-Do not limit a requirement to one API or infer capabilities only from its name or When action.
-Each capability has operation, purpose, scenario_ids and inputs/context/outputs containing exact
-semantic_ids from the corresponding analysis field catalogs. Different APIs may use different
-subsets of those catalogs; do not require registration fields for a session-read capability.
-Example: registration -> establish a server session -> browser reload -> read the current session
--> display the username needs registration AND current-session retrieval capabilities. Describe
-how the browser retains a server-issued credential and supplies it on later requests, how trusted
-identity is resolved, and the signed-out result. Persisting a session row alone does not restore UI
-state after reload. Include all necessary account/session reads in data_operations. Reuse supplied
-capabilities when compatible; do not invent unrelated login/logout features merely from this example.
-Criteria must cover later observations through these capabilities, not just assert a successful write.
-Pure presentation/client-local requirements have server_state=false and no data_operations.
-Inspect supporting reads as well as writes. related_data is a candidate scope, not a closed list.
-If a needed table is listed in schema_index but absent from schema_slice, put it in requested_tables;
-do not fabricate its columns. Do not output unresolved_questions or audit database design.
-For every scenario include a criterion. Reuse existing semantic identities and type definitions.
+ANALYSIS_PROMPT = """Analyze requirement intent AFTER inspecting the supplied reuse_context.
+Return JSON only using the supplied schema. This is discovery, not a second interface design.
+The requirement and its scenarios define behavior; existing module contracts define their actual
+interfaces, types, routes, authentication and storage effects. Read those contracts before planning.
+Return intent, server_state, capabilities and optional context requests (empty lists when unnecessary).
+For each relevant scenario operation distinguish setup (Given/preparation), action (current feature),
+and observation (Then/reload/navigation/later visitor). Identify supporting capabilities without
+assigning all setup behavior to the current feature or inventing unrelated features.
+Each capability records purpose, role, supplied scenario_ids, reuse_module_ids and missing_behavior.
+Use exact existing module IDs when their full behavior is suitable. missing_behavior is empty when
+reuse suffices; otherwise describe only the behavior still needed. Client-local behavior needs no
+backend capability. Do not invent input/output catalogs, type definitions, acceptance criteria or
+DB operation lists here. Do not rewrap an existing API response or redefine its semantic fields.
+reuse_context contains complete selected modules and types plus module/type catalogs. If an ID in
+a catalog looks relevant but its contract is not loaded, request it through requested_module_ids or
+requested_type_ids before deciding reuse. Requests load additional contracts and trigger reanalysis.
+Request exact table names from schema_index through requested_tables when schema_slice lacks them.
+Existing records are referenced by ID, not copied or regenerated. Missing backend behavior is design
+work for the next phase, not a validation failure. Do not audit database enforcement.
 """
-ANALYSIS_PROMPT += '''Analysis-specific checks:
-Cover ALL own scenario IDs; additional references may only come from ancestor_context criteria.
-server_state=false requires data_operations=[] AND context=[]. Example: client-local accordion
-expansion has no server data/context; loading stored banners has server_state=true.
-requested_tables must contain exact names from schema_index; operations may reference only tables
-already in schema_slice or requested_tables. Example: request ["home_banner"] before using its
-absent schema; never guess columns. Missing database enforcement is not a generation failure.
-spec/criteria must be nonempty.
-All field/type/criterion naming rules above apply now, before architecture generation.
-'''
-ARCHITECTURE_PROMPT = COMMON + """Turn the fixed analysis into a small module architecture.
-Return new_modules, reuse_module_ids, api_ids only. New module ids are local KIND.Name
+ARCHITECTURE_PROMPT = COMMON + """Design the final authoritative modules using requirement intent
+and reuse_context. Analysis provides behavior/reuse guidance, not fixed interfaces or storage lists.
+Return new_modules, new_types, reuse_module_ids and api_ids. New module IDs are local KIND.Name
 (e.g. API.CancelOrder, FUNC.CancelOwnedOrder, DB.TryCancelOrder); the compiler qualifies them.
-Calls refer to local new ids or exact existing ids. Reuse only when full behavior and interfaces
-are compatible; reading the same table does not establish equivalence. Existing modules are immutable.
-If extension changes behavior, design a new module rather than modifying an existing shared interface.
-API calls FUNC only, FUNC calls FUNC/DB, DB is a leaf; do not add pass-through layers without responsibility.
-Only DB modules have direct data_access. API includes its concrete REST contract.
-Each call specifies purpose, optional business condition, and optional predecessor local call IDs.
-Each new module is a COMPLETE final contract using its kind-specific interface. There is no later module refinement pass.
-Use the original requirement to retain exact validation rules and bounds, not just analysis summaries.
-Describe observable success, failure, absence and side effects consistently with declared output types.
-Do not prescribe source paths, SQL/ORM choices or internal implementation algorithms.
-Distribute responsibility by layer; do not copy the entire requirement criteria onto every module.
-API criteria cover boundary behavior; FUNC criteria cover its business responsibility; DB criteria cover
-its declared storage effects. Criteria may use only supplied own/inherited scenario IDs.
-All new modules must be reachable from api_ids. Non-server requirements return three empty lists.
-Materialize EVERY analysis.api_capabilities entry as an API reachable from this requirement's
-api_ids, reusing compatible APIs where available. Use its purpose to choose a REST resource path and method; use exactly its input/context/output semantic_ids. Multiple API entry points per requirement
-are expected when its complete scenario needs them. Describe session establishment and credential
-transport in specs in a technology-neutral way, including the current-session read after reload.
+Use exact existing IDs for reused modules and named types. Never reproduce an existing record in
+new_modules/new_types. Emit new_types only for genuinely new named types referenced by new modules,
+including nested type dependencies; choose distinct descriptive IDs for genuinely different types.
+Preserve existing semantic field identities and their actual types, including optionality/nullability.
+Reuse APIs with their actual response shape (flat fields or wrapped object), method, path and auth;
+do not redesign an existing API to match an independently imagined interface. Prefer the existing
+API for an already supported REST endpoint. Reading the same table alone does not establish reuse.
+For each analysis capability, reuse supplied behavior where sufficient and design only missing
+behavior. Setup and observation capabilities can use existing API entry points unchanged.
+Calls refer to local new IDs or exact existing IDs. Include reused API entries/direct callees in
+reuse_module_ids; api_ids is the requirement's entry set. Every new module should be reachable.
+API -> FUNC, FUNC -> FUNC/DB, DB leaves. DB data_access comes from the FINAL complete module
+behavior, including supporting reads and writes; there is no analysis operation list to match.
+Decide request/response, ordered parameters/returns, trusted context, named types and layer-specific
+acceptance criteria here ONCE. Existing contracts and new_modules/new_types are the source of truth.
+Retain exact original requirement rules, bounds and scenario observations, not just the intent summary.
+Describe session transport, authorization, atomicity, errors and absence where relevant in specs.
+Distribute guarantees by layer. Do not prescribe source paths, SQL/ORM algorithms or implementation.
+Client-local requirements return empty new_modules/new_types/reuse_module_ids/api_ids.
 """
-ARCHITECTURE_PROMPT += '''Architecture-specific checks:
-new_modules local ids must be unique and match kind: API.GetHomeBanners, FUNC.ListHomeBanners,
-DB.ReadHomeBanners. INVALID: REQ-1.1::API.GetHomeBanners for a NEW draft, API.read-banners,
-or id=FUNC.ReadBanners with kind=DB. Existing ids are copied fully qualified.
-Every existing direct callee and reused API entry must appear in reuse_module_ids, and EVERY
-listed reused module must actually be reachable from api_ids. Reuse only supplied candidates.
-Example: api_ids=["API.GetHomeBanners"], with a new FUNC calling existing
-"REQ-0.1::DB.ReadHomeBanners", requires reuse_module_ids=["REQ-0.1::DB.ReadHomeBanners"].
-New API request/context/response fields must come from the corresponding fixed analysis list: copy
-semantic_id/type/required/nullable exactly. Local name may differ but must remain snake_case.
-The union of reachable DB operations must EXACTLY match analysis.data_operations by table,
-operation and column: no missing read, extra update or hidden delete. Example: analysis read
-["id","image_source"] permits splitting these reads across DB leaves, but not adding create.
-Do not redefine an existing shared type; exact identical definitions may be reused.
-Return complete modules including final spec and acceptance_criteria; no draft-only records.
-'''
 from ..ir.integration import PendingCapability
 PARENT_DESIGN_SCHEMA = object_schema({
     'api_ids': schema_for(list[str]),

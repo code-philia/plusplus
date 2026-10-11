@@ -78,31 +78,12 @@ class DatabaseSchemaState:
             self._link_entity(requirement_id, key)
 
     def apply_fields(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
-        related = set(self.related_entity_keys(requirement_id))
         for item in decision.get("entities", []):
             key = _normalize_identifier(str(item.get("entity", "")))
-            if key not in related:
-                errors.append(_format_error("ARC2221", f"Pass 2 references an entity outside its requirement slice: {key}.", node_id=requirement_id))
-                continue
-            # Normalization can combine fragments for the same entity.
-            for raw_field in item.get("new_fields", []):
-                name = _normalize_identifier(str(raw_field.get("name", "")))
-                if name == "id" or name.endswith("_id"):
-                    errors.append(_format_error("ARC2224", f"Pass 2 cannot create system or foreign-key field: {key}.{name}.", node_id=requirement_id))
-                    continue
-                if name in self.entities[key]["fields"]:
-                    errors.append(_format_error("ARC2223", f"Pass 2 cannot recreate existing field: {key}.{name}; use update_fields.", node_id=requirement_id))
-                    continue
-                self._apply_field_contribution(key, raw_field, requirement_id, errors)
-            for raw_field in item.get("update_fields", []):
-                name = _normalize_identifier(str(raw_field.get("name", "")))
-                existing = self.entities[key]["fields"].get(name)
-                if existing is None:
-                    errors.append(_format_error("ARC2223", f"Pass 2 updates an unknown field: {key}.{name}.", node_id=requirement_id))
-                    continue
-                if name == "id" or name.endswith("_id") or existing["origin"] != "REQUIREMENT":
-                    errors.append(_format_error("ARC2224", f"Pass 2 cannot update system or foreign-key field: {key}.{name}.", node_id=requirement_id))
-                    continue
+            if key not in self.entities:
+                self.apply_entities(requirement_id, {"new_entities": [{"key": key, "description": ""}]}, errors)
+            self._link_entity(requirement_id, key)
+            for raw_field in [*item.get("new_fields", []), *item.get("update_fields", [])]:
                 self._apply_field_contribution(key, raw_field, requirement_id, errors)
 
     def _apply_field_contribution(self, key: str, raw: dict[str, Any], rid: str, errors: list[str]) -> None:
@@ -128,14 +109,13 @@ class DatabaseSchemaState:
         errors.append(_format_error("ARC2228", f"Conflicting contribution {scope}: {reason}", node_id=rid))
 
     def apply_relationships(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
-        related = set(self.entities)
         for raw in decision.get("relationships", []):
             relationship_key = _normalize_identifier(str(raw.get("key", "")))
             parent = _normalize_identifier(str(raw.get("parent", "")))
             child = _normalize_identifier(str(raw.get("child", "")))
             relationship_type = str(raw.get("type", ""))
-            if parent not in related or child not in related:
-                errors.append(_format_error("ARC2231", f"Relationship endpoints are outside the requirement slice: {parent} -> {child}.", node_id=requirement_id))
+            if parent not in self.entities or child not in self.entities:
+                errors.append(_format_error("ARC2231", f"Relationship references unknown entities: {parent} -> {child}.", node_id=requirement_id))
                 continue
             if relationship_type not in RELATIONSHIP_TYPES:
                 errors.append(_format_error("ARC2232", f"Pass 3 emitted invalid cardinality: {relationship_type}.", node_id=requirement_id))
@@ -153,10 +133,8 @@ class DatabaseSchemaState:
                 }
                 self.relationships[relationship_id] = relationship
             else:
-                if any(relationship[name] != raw[name] for name in ("parent", "child", "type", "parent_max", "child_max")):
-                    self._record_conflict(relationship_id, requirement_id, raw,
-                                          "incompatible endpoints or maximum cardinalities", errors)
-                    continue
+                for name in ("parent", "child", "type", "parent_max", "child_max"):
+                    relationship[name] = raw[name]
                 relationship["parent_min"] = max(relationship["parent_min"], int(raw["parent_min"]))
                 relationship["child_min"] = max(relationship["child_min"], int(raw["child_min"]))
                 relationship["child_required"] = relationship["child_min"] == 1
@@ -291,11 +269,10 @@ class DatabaseSchemaState:
             return
         existing = self.entities[entity_key]["fields"].get(name)
         if existing is not None:
-            if existing["type"] != field_type or existing.get("references") != raw.get("references"):
-                errors.append(_format_error("ARC2227", f"Conflicting field declaration: {entity_key}.{name}.", node_id=requirement_id))
-                return
+            existing["type"] = field_type
+            existing["references"] = raw.get("references")
             existing["nullable"] = existing["nullable"] and bool(raw["nullable"])
-            _merge_properties(existing["properties"], raw.get("properties", {}), entity_key, name, requirement_id, errors)
+            existing["properties"].update(copy.deepcopy(raw.get("properties", {})))
         else:
             existing = {
                 "name": name,

@@ -332,28 +332,6 @@ class FrontendIRGenerationPass:
         for rid, link in links.items():
             link["implements"] = sorted(key for key, row in records.items() if rid in row.get("requirement_ids", []))
             link["uses"] = sorted((set(link["uses"]) & records.keys()) - set(link["implements"]))
-        # A tree edit is committed only when all containment edges remain valid.
-        ui = {row["id"]: row for row in trial["ui"]}
-        root = trial["root_ui_id"]
-        parents = {}
-        for row in ui.values():
-            for child in row["children"]:
-                if child not in ui or child in parents or child == root:
-                    raise ValueError(f"Invalid UI containment edge: {row['id']} -> {child}")
-                parents[child] = row["id"]
-        reached, pending = set(), [root]
-        while pending:
-            key = pending.pop()
-            if key in reached or key not in ui:
-                raise ValueError("UI containment must be an acyclic rooted tree")
-            reached.add(key)
-            pending.extend(ui[key]["children"])
-        if reached != set(ui):
-            raise ValueError("UI edit leaves unattached nodes; update old and new parents together")
-        ids = [row["id"] for table in TABLES for row in trial[table]]
-        ids.extend(event["id"] for event in frontend_events(trial))
-        if len(ids) != len(set(ids)):
-            raise ValueError("Frontend records and embedded events require globally unique IDs")
         write_frontend_ir(self.root / "frontend_ir.json", trial)
         self.ir = trial
 

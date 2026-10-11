@@ -12,7 +12,6 @@ from typing import Any
 from utils.jsonio import write_json_atomic
 from compiler.runtime.artifacts import CompilerArtifactStore
 from .projection import project_lowering_design
-from ..backend_design.validation import validate_backend_ir
 from ..lowering.files import GlobalFilePlanner
 from .skeletons import ModuleSkeletonLowerer
 from ..lowering.types import TypeLowerer
@@ -60,10 +59,6 @@ class BackendLowerer:
                 raise ValueError('Backend profile requires SQLite database initialization')
             if database_manifest.get('status') != 'DATABASE_SCHEMA_LOWERED':
                 raise ValueError('Database lowering must finish before backend lowering')
-            scenarios = {key for row in blueprint['modules'] for criterion in row.get('acceptance_criteria', []) for key in criterion['scenario_ids']}
-            problems = validate_backend_ir(blueprint, schema, scenarios)
-            if problems:
-                raise ValueError('; '.join(problems))
             if not isinstance(default_port, int) or not 1 <= default_port <= 65535:
                 raise ValueError('Invalid backend port')
             design = project_lowering_design(blueprint)

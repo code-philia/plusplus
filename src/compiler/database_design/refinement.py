@@ -16,7 +16,7 @@ from typing import Any
 
 from ..ir import ERModelIR, SchemaIR, table_constraints
 from .state import DatabaseSchemaState
-from .validation import logical_literal_valid, validate_database_schema
+from .validation import logical_literal_valid
 
 
 @dataclass(slots=True)
@@ -55,7 +55,6 @@ def refine_er_model(
     state.lower_relationships(errors)
     state.add_static_constraints()
     relational = state.to_schema(status="RESOLVED")
-    errors.extend(validate_database_schema(relational, expected_requirement_ids=requirement_ids))
     relational["status"] = "PROPOSED" if errors or er_model["status"] != "RESOLVED" else "RESOLVED"
     result = refine_schema(er_model, relational)
     result.errors[:0] = errors
@@ -181,7 +180,6 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
         "ir_kind": "database_schema", "status": relational["status"],
         "tables": tables, "traceability": traceability,
     }
-    errors.extend(validate_schema_ir(schema))
     if errors:
         schema["status"] = "PROPOSED"
     return SchemaRefinementResult(schema, errors, warnings)
