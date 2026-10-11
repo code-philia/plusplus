@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from cli.commands import _ensure_dotenv_loaded, _resolve_web_port
 from compiler.frontend_lowering import FrontendReactLowerer
 from compiler.runtime.artifacts import CompilerArtifactStore
+from compiler.ir.frontend_storage import read_frontend_ir
 
 
 def _read_object(path: Path) -> dict[str, Any]:
@@ -48,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         if not (output / "frontend/package.json").is_file():
             raise ValueError("Initialized frontend/package.json is missing")
 
-        ir = _read_object(store.frontend_design_root / "frontend_ir.json")
+        ir = read_frontend_ir(store.frontend_design_root / "frontend_ir.json")
         backend = _read_object(store.backend_design_root / "backend_ir.json")
         if backend.get("ir_kind") != "backend_design":
             raise ValueError("Expected current Backend IR")

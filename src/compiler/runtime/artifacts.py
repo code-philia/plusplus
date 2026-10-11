@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from utils.jsonio import write_json_atomic
+from compiler.ir.frontend_storage import write_frontend_ir
 
 
 class CompilerArtifactStore:
@@ -72,12 +73,13 @@ class CompilerArtifactStore:
         from compiler.frontend_design import ui_data_associations
         paths: dict[str, str] = {}
         canonical_path = self.frontend_design_root / "frontend_ir.json"
-        write_json_atomic(canonical_path, frontend_ir)
+        write_frontend_ir(canonical_path, frontend_ir)
         paths["frontend_ir"] = str(canonical_path)
         associations_path = self.frontend_design_root / 'requirement_links.json'
         write_json_atomic(associations_path, {'requirement_links': frontend_ir.get('requirement_links', {})})
         paths['frontend_requirement_links'] = str(associations_path)
-        tables = ("ui", "data", "functions", "types", "pending_capabilities")
+        paths["frontend_ui"] = str(self.frontend_design_root / "ui.json")
+        tables = ("data", "functions", "types", "pending_capabilities")
         for table in tables:
             path = self.frontend_design_root / f"{table}.json"
             write_json_atomic(path, {table: frontend_ir.get(table, [])})

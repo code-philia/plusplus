@@ -50,6 +50,7 @@ class UINode(TypedDict):
     ]
     spec: str
     requirement_ids: list[str]
+    # In-memory/model delta index; JSON storage nests complete child records.
     children: list[str]
     # Semantic properties: label, value, options, visible, enabled, etc.
     bindings: dict[str, ValueSource]

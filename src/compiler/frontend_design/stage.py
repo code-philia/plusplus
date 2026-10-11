@@ -24,6 +24,7 @@ from model.contracts import VisualStructuredModel
 from .contracts import PHASE_TABLES, PROMPTS, patch_schema, DISCOVERY_PROMPT, discovery_schema
 from .context import TABLES, frontend_ir_traceability, local_context, ranked, required_types, ui_summary, visual_screen_matches
 from compiler.ir.frontend import frontend_events
+from compiler.ir.frontend_storage import read_frontend_ir, write_frontend_ir
 
 
 @dataclass
@@ -81,7 +82,7 @@ class FrontendIRGenerationPass:
         existing = self.root / "frontend_ir.json"
         previous_report = self.root / "report.json"
         if existing.is_file():
-            previous = json.loads(existing.read_text(encoding="utf-8"))
+            previous = read_frontend_ir(existing)
             report = json.loads(previous_report.read_text(encoding="utf-8")) if previous_report.is_file() else {}
             if report.get("requirement_sha256") not in (None, self.requirement_hash):
                 raise ValueError("Existing frontend design belongs to changed requirements; use a new workspace")
@@ -125,7 +126,7 @@ class FrontendIRGenerationPass:
                   "requirement_entities": {rid: [key for name, values in traceability[rid].items()
                                                 if name.endswith("_ids") and name != "api_ids" for key in values]
                                            for rid in order}}
-        write_json_atomic(self.root / "frontend_ir.json", self.ir)
+        write_frontend_ir(self.root / "frontend_ir.json", self.ir)
         write_json_atomic(self.root / "requirements.json", {"requirements": traceability})
         write_json_atomic(self.root / "report.json", report)
         write_json_atomic(self.root / "pending_capabilities.json", {"pending_capabilities": self.ir["pending_capabilities"]})
@@ -353,7 +354,7 @@ class FrontendIRGenerationPass:
         ids.extend(event["id"] for event in frontend_events(trial))
         if len(ids) != len(set(ids)):
             raise ValueError("Frontend records and embedded events require globally unique IDs")
-        write_json_atomic(self.root / "frontend_ir.json", trial)
+        write_frontend_ir(self.root / "frontend_ir.json", trial)
         self.ir = trial
 
     def _call(self, phase: str, requirements: list[str], payload: dict[str, Any]) -> None:

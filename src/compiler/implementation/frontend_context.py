@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from compiler.ir.frontend import frontend_events
+from compiler.ir.frontend_storage import read_frontend_ir
 
 import copy
 import json
@@ -147,9 +148,9 @@ def visual_context(project_root: Path, requirement_id: str) -> list[dict[str, An
     frontend_path = root / "frontend_ir.json"
     if frontend_path.is_file():
         try:
-            loaded = json.loads(frontend_path.read_text(encoding="utf-8"))
+            loaded = read_frontend_ir(frontend_path)
             frontend = loaded if isinstance(loaded, dict) else {}
-        except (OSError, UnicodeError, json.JSONDecodeError):
+        except (OSError, UnicodeError, ValueError):
             frontend = {}
     for table_rows in frontend.values():
         if not isinstance(table_rows, list):
