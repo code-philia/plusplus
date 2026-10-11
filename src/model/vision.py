@@ -83,7 +83,7 @@ class VisualModel:
         output_schema = dict(output_schema)
         force_json = output_schema.pop("x-arc-output-mode", None) == "json_object"
         self._last_output_mode = "json_object" if force_json else self._structured_output_mode
-        messages = _visual_messages(instructions, input_payload, image_data_url)
+        messages = _visual_messages(instructions, input_payload, image_data_url, schema_name=schema_name)
         response = None
         if not force_json and self._structured_output_mode == "json_schema":
             try:
@@ -123,6 +123,7 @@ class VisualModel:
             fallback_instructions,
             input_payload,
             image_data_url,
+            schema_name=schema_name,
         )
         if response is None and (force_json or self._structured_output_mode == "json_object"):
             try:
@@ -165,19 +166,19 @@ def _visual_messages(
     instructions: str,
     input_payload: dict[str, Any],
     image_data_url: str,
+    *, schema_name: str | None = None,
 ) -> list[dict[str, Any]]:
+    from .messages import user_messages
+
     return [
         {"role": "system", "content": instructions},
+        *user_messages(input_payload, schema_name=schema_name),
         {
             "role": "user",
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps(
-                        input_payload,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
+                    "text": "## Reference image\nVisual evidence for this task. Follow the analysis instructions; do not infer additional business requirements.",
                 },
                 {
                     "type": "image_url",
@@ -201,5 +202,4 @@ def _nonnegative_env_int(name: str, default: int) -> int:
         return max(0, int(os.environ.get(name, str(default))))
     except ValueError:
         return default
-
 

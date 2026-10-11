@@ -141,7 +141,7 @@ class Model:
         output_schema = dict(output_schema)
         force_json = output_schema.pop("x-arc-output-mode", None) == "json_object"
         self._last_output_mode = "json_object" if force_json else self._structured_output_mode
-        user_inputs = user_messages(input_payload)
+        user_inputs = user_messages(input_payload, schema_name=schema_name)
         messages = [
             {"role": "system", "content": instructions},
             *user_inputs,

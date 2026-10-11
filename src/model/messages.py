@@ -4,18 +4,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .prompt_context import render_section, stage_sections
+
 CONTEXT_SEGMENTS_KEY = "context_segments"
 
 
-def user_messages(input_payload: dict[str, Any]) -> list[dict[str, str]]:
-    """Render one user message per context segment, stable prefix first.
-
-    A layered payload carries ``context_segments`` as an ordered list of
-    ``{"name": str, "payload": dict}`` rows. Each row becomes its own user
-    message so the provider can reuse the prefix cache for every segment that
-    did not change between iterations. Any other payload keeps the historic
-    single-message shape.
-    """
+def user_messages(input_payload: dict[str, Any], *, schema_name: str | None = None) -> list[dict[str, str]]:
+    """Render named sections, preserving compiler payloads and explicit segments."""
 
     segments = input_payload.get(CONTEXT_SEGMENTS_KEY)
     rendered: list[dict[str, str]] = []
@@ -37,25 +32,18 @@ def user_messages(input_payload: dict[str, Any]) -> list[dict[str, str]]:
             rendered.append(
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        {
-                            "context_segment": str(segment.get("name", f"segment_{index}")),
-                            "context": payload,
-                        },
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
+                    "content": render_section(str(segment.get("name", f"segment_{index}")),
+                                              str(segment.get("purpose", "")), payload),
                 }
             )
     if rendered:
         return rendered
 
     markdown_context = input_payload.get("context_markdown")
-    user_input = (
-        markdown_context
-        if set(input_payload) == {"context_markdown"} and isinstance(markdown_context, str)
-        else json.dumps(input_payload, ensure_ascii=False, separators=(",", ":"))
-    )
+    if set(input_payload) == {"context_markdown"} and isinstance(markdown_context, str):
+        return [{"role": "user", "content": markdown_context}]
+    if schema_name:
+        return [{"role": "user", "content": render_section(section["name"], section["purpose"], section["payload"])}
+                for section in stage_sections(schema_name, input_payload)]
+    user_input = json.dumps(input_payload, ensure_ascii=False, separators=(",", ":"))
     return [{"role": "user", "content": user_input}]
-
-
