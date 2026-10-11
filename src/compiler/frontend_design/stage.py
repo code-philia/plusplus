@@ -6,6 +6,7 @@ from ..ir.backend import module_fields
 import copy
 import json
 import hashlib
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,10 @@ class FrontendIRGenerationPass:
         self.root = artifact_root / "design" / "frontend"
         self.artifact_root = artifact_root
         self.log = SynchronousLog("FrontendDesignPass", workspace_root=artifact_root.resolve().parent)
+        try:
+            self.output_retries = max(0, min(10, int(os.getenv("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", "2"))))
+        except ValueError:
+            self.output_retries = 2
         if hasattr(model, "set_usage_path"):
             model.set_usage_path(artifact_root / "model_usage.jsonl")
 
@@ -330,6 +335,39 @@ class FrontendIRGenerationPass:
         write_frontend_ir(self.root / "frontend_ir.json", trial)
         self.ir = trial
 
+    def _generate(self, kwargs: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+        """Retry malformed JSON or output shapes before applying any design delta."""
+        from compiler.backend_design.validation import shape_errors
+
+        feedback: list[str] = []
+        for attempt in range(self.output_retries + 1):
+            request = {**kwargs, "input_payload": copy.deepcopy(kwargs["input_payload"])}
+            if feedback:
+                request["input_payload"]["output_format_feedback"] = feedback
+            trace = {"attempt": attempt + 1}
+            try:
+                output = self.model.generate_json(**request)
+            except json.JSONDecodeError as exc:
+                feedback = [
+                    f"Invalid JSON: {exc.msg} at line {exc.lineno}, column {exc.colno}, character {exc.pos}.",
+                    "Regenerate the complete JSON object. Check commas, matching brackets and escaped quotes "
+                    "inside strings. Return JSON only, without Markdown or code fences; keep prose concise.",
+                ]
+                trace.update(error=describe_model_error(exc), raw_output=exc.doc,
+                             error_position=exc.pos, error_excerpt=exc.doc[max(0, exc.pos - 120):exc.pos + 120])
+            else:
+                feedback = shape_errors(output, kwargs["output_schema"])
+                trace["output"] = output
+                if not feedback:
+                    trace["status"] = "ACCEPTED"
+                    record.setdefault("generation_attempts", []).append(trace)
+                    return output
+            trace.update(status="REJECTED", errors=feedback)
+            record.setdefault("generation_attempts", []).append(trace)
+            self.log.info(f"OUTPUT_FORMAT_REJECTED task={record['task_id']} "
+                          f"attempt={attempt + 1}/{self.output_retries + 1} errors={feedback}")
+        raise ValueError("Frontend output format retries exhausted: " + "; ".join(feedback))
+
     def _call(self, phase: str, requirements: list[str], payload: dict[str, Any]) -> None:
         task_id = f"{phase}-{len(self.batches) + 1:05d}"
         schema = patch_schema(phase)
@@ -341,12 +379,8 @@ class FrontendIRGenerationPass:
         try:
             kwargs = {"schema_name": f"frontend_{phase}", "instructions": PROMPTS[phase],
                       "input_payload": payload, "output_schema": schema}
-            output = self.model.generate_json(**kwargs)
+            output = self._generate(kwargs, record)
             for _ in range(4):
-                from compiler.backend_design.validation import shape_errors
-                errors = shape_errors(output, schema)
-                if errors:
-                    raise ValueError("Invalid frontend delta: " + "; ".join(errors))
                 requested = output.get("load_ui_ids", [])
                 if not requested:
                     break
@@ -369,7 +403,7 @@ class FrontendIRGenerationPass:
                 self.requested_ui[requirements[0]] = set(requested)
                 payload = self._payload(requirements[0], phase)
                 kwargs["input_payload"] = payload
-                output = self.model.generate_json(**kwargs)
+                output = self._generate(kwargs, record)
             if output.get("load_ui_ids"):
                 raise ValueError("UI context request limit exceeded; design a smaller region")
             loaded = set(payload["loaded_ui_ids"])

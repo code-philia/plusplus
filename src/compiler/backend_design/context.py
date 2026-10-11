@@ -37,23 +37,26 @@ def module_contract(module: dict[str, Any]) -> dict[str, Any]:
 
 
 def reuse_context(ir: dict[str, Any], modules: list[dict[str, Any]], query: Any,
-                  requested_type_ids: set[str] | None = None) -> dict[str, Any]:
-    """Expose loaded contracts and discoverable IDs before inventing new contracts."""
+                  requested_type_ids: set[str] | None = None, *,
+                  kinds: set[str], upstream: list[dict[str, Any]]) -> dict[str, Any]:
+    """Layer-local contracts; load only referenced or explicitly requested types."""
     terms = lambda value: set(re.findall(r'[a-z0-9_]+|[\u4e00-\u9fff]',
                                         json.dumps(value, ensure_ascii=False).lower()))
     wanted = terms(query)
-    ranked = sorted(ir['types'], key=lambda row: (-len(wanted & terms(row)), row['id']))[:12]
-    seeds = [*modules, *[{'kind': 'named', 'type_id': row['id']} for row in ranked],
+    loaded = {row['id'] for row in modules}
+    catalog = sorted([row for row in ir['modules'] if row['kind'] in kinds and row['id'] not in loaded],
+                     key=lambda row: (-len(wanted & terms(row)), row['id']))[:32]
+    seeds = [*modules, *upstream,
              *[{'kind': 'named', 'type_id': key} for key in sorted(requested_type_ids or set())]]
+    types = required_types(seeds, ir['types'])
+    loaded_types = {row['id'] for row in types}
+    type_catalog = sorted([row for row in ir['types'] if row['id'] not in loaded_types],
+                          key=lambda row: (-len(wanted & terms(row)), row['id']))[:16]
     return {
-        'modules': copy.deepcopy(modules),
-        'types': required_types(seeds, ir['types']),
+        'modules': copy.deepcopy(modules), 'types': types,
         'module_catalog': [{key: copy.deepcopy(row[key]) for key in ('id', 'kind', 'path', 'method') if key in row}
-                           | {'spec': row['spec'][:240]} for row in ir['modules']],
-        'type_catalog': [{'id': row['id'], 'kind': row['kind'],
-                         'semantic_ids': [field['semantic_id'] for field in row.get('fields', [])]}
-                        for row in ir['types']],
-        'reuse_policy': 'Reference loaded records by ID; design only missing responsibilities.',
+                           | {'spec': row['spec'][:240]} for row in catalog],
+        'type_catalog': [{'id': row['id'], 'kind': row['kind']} for row in type_catalog],
     }
 
 

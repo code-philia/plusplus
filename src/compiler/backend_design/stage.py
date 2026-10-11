@@ -1,4 +1,4 @@
-"""Postorder leaf design and single-pass parent integration using existing APIs."""
+"""Postorder API/FUNC/DB design with layer-local context and parent integration."""
 from __future__ import annotations
 
 from ..ir import table_constraints
@@ -19,8 +19,7 @@ from model.contracts import StructuredModel
 from model.client import describe_model_error
 from compiler.preprocessing.traversal import children_by_id, postorder
 from .contracts import (
-    ANALYSIS_SCHEMA, ARCHITECTURE_SCHEMA,
-    ANALYSIS_PROMPT, ARCHITECTURE_PROMPT,
+    LAYER_SCHEMAS, LAYER_PROMPTS,
     PARENT_DESIGN_SCHEMA, PARENT_DESIGN_PROMPT,
 )
 from .validation import shape_errors, reachable
@@ -106,21 +105,21 @@ def _related_data(schema: dict[str, Any], rid: str) -> dict[str, list[str]]:
     return {name: sorted(columns) for name, columns in result.items()}
 
 
-def _candidates(ir: dict[str, Any], rid: str, dependencies: dict[str, Any], tables: set[str], spec: str) -> list[dict[str, Any]]:
+def _candidates(ir: dict[str, Any], rid: str, dependencies: dict[str, Any], tables: set[str], spec: str, kinds: set[str]) -> list[dict[str, Any]]:
     modules = {row['id']: row for row in ir['modules']}
     tokens = set(re.findall(r'\w+', spec.lower()))
     ancestors = _closure(rid, dependencies)
     scored = []
     for module in modules.values():
+        if module["kind"] not in kinds:
+            continue
         graph = reachable([module['id']], modules)
         data = {access['table'] for key in graph for access in modules[key].get('data_access', [])}
         overlap = len(tokens & set(re.findall(r'\w+', json.dumps(module, ensure_ascii=False).lower())))
         score = 20 * len(data & tables) + 30 * bool(set(module['requirement_ids']) & ancestors) + overlap
         if score:
             scored.append((score, module['id']))
-    selected = [key for _, key in sorted(scored, key=lambda row: (-row[0], row[1]))[:24]]
-    # Include full descendant interfaces for selected shared API/FUNC modules.
-    selected = reachable(selected, modules)
+    selected = [key for _, key in sorted(scored, key=lambda row: (-row[0], row[1]))[:8]]
     return [copy.deepcopy(modules[key]) for key in sorted(selected)]
 
 
@@ -133,7 +132,6 @@ class BackendDesignPass:
         self.log = SynchronousLog('BackendDesignPass', workspace_root=Path(artifact_root).resolve().parent)
         self.started_at = time.perf_counter()
         self.retries = _budget('ARC_STRUCTURED_OUTPUT_RETRY_COUNT', 2, 10)
-        self.reopen_budget = _budget('ARC_DESIGN_REOPEN_COUNT', 2, 6)
         self.sequence = 0
 
     def _decision(self, phase: str, unit: str, prompt: str, schema: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -240,99 +238,123 @@ class BackendDesignPass:
                 self.log.info('REQUIREMENT_FAILED missing requirement node', node_id=rid)
                 continue
             try:
-                analysis, context = self._analyze(ir, rid, nodes[rid], database_schema, dependencies)
-                self.log.info(f'ANALYSIS_COMPLETED server_state={analysis["server_state"]} '
-                              f'capabilities={len(analysis["capabilities"])}', node_id=rid)
-                feedback = []
-                for reopen in range(self.reopen_budget + 1):
-                    try:
-                        trial = self._architecture(ir, rid, analysis, context, database_schema, dependencies, scenarios, feedback)
-                        self.log.info(f'ARCHITECTURE_COMPLETED new_modules={len(trial["modules"]) - len(ir["modules"])} '
-                                      f'total_modules={len(trial["modules"])}', node_id=rid)
-                        ir = trial
-                        states[rid] = 'DESIGN_VALIDATED'
-                        write_json_atomic(self.root / 'backend_ir.json', ir)
-                        self.log.info(f'REQUIREMENT_VALIDATED progress={index}/{len(order)} '
-                                      f'total_modules={len(ir["modules"])}', node_id=rid)
-                        break
-                    except ValueError as exc:
-                        feedback = [str(exc)]
-                        self.log.info(f'ARCHITECTURE_REJECTED round={reopen + 1}/{self.reopen_budget + 1} '
-                                      f'feedback={exc}', node_id=rid)
-                        if reopen == self.reopen_budget:
-                            raise
-                        self.log.info('ARCHITECTURE_REOPEN retrying module design', node_id=rid)
+                ir = self._design_layers(ir, rid, database_schema, dependencies, scenarios)
+                states[rid] = 'DESIGN_VALIDATED'
+                write_json_atomic(self.root / 'backend_ir.json', ir)
+                self.log.info(f'REQUIREMENT_VALIDATED progress={index}/{len(order)} '
+                              f'total_modules={len(ir["modules"])}', node_id=rid)
             except ValueError as exc:
                 states[rid] = 'FAILED'
                 errors.append(f'{rid}: {exc}')
                 self.log.info(f'REQUIREMENT_FAILED {exc}', node_id=rid)
         return self._finish(ir, states, errors)
 
-    def _analyze(self, ir: dict[str, Any], rid: str, requirement: dict[str, Any], schema: dict[str, Any], dependencies: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        context = project_design_context(schema, rid, dependencies)
-        related = _related_data(schema, rid)
-        candidates = _candidates(ir, rid, dependencies, set(related), str(requirement))
-        requested_types: set[str] = set()
-        modules = {row['id']: row for row in ir['modules']}
-        payload = {'requirement_id': rid, 'requirement': requirement,
-                   'scenario_ids': sorted(_scenario_ids(requirement, rid)), 'related_data': related,
-                   'ancestor_context': self.inherited_context,
-                   'schema_index': [{'name': row['name'], 'description': row['description']} for row in schema['tables']],
-                   'dependency_requirements': [copy.deepcopy(node) for key, node in self.requirement_nodes.items()
-                                               if key in _closure(rid, dependencies)]}
-        for expansion in range(4):
-            reuse = reuse_context(ir, candidates, requirement, requested_types)
-            self.log.info(f'ANALYSIS_CONTEXT tables={len(context["tables"])} '
-                          f'existing_modules={len(candidates)} types={len(reuse["types"])}', node_id=rid)
-            analysis = self._decision('analysis', rid, ANALYSIS_PROMPT, ANALYSIS_SCHEMA,
-                                      {**payload, 'reuse_context': reuse, 'schema_slice': context,
-                                       'context_requests_remaining': 3 - expansion})
-            tables = (set(analysis['requested_tables']) & {row['name'] for row in schema['tables']}) - {row['name'] for row in context['tables']}
-            selected = {row['id'] for row in candidates}
-            requested = (set(analysis['requested_module_ids']) |
-                         {key for capability in analysis['capabilities'] for key in capability['reuse_module_ids']}) & modules.keys()
-            fresh_modules = reachable(requested, modules) - selected
-            fresh_types = (set(analysis['requested_type_ids']) & {row['id'] for row in ir['types']}) - {row['id'] for row in reuse['types']}
-            context['tables'] += [copy.deepcopy(row) for row in schema['tables'] if row['name'] in tables]
-            candidates += [copy.deepcopy(modules[key]) for key in sorted(fresh_modules)]
-            requested_types.update(fresh_types)
-            if not (tables or fresh_modules or fresh_types) or expansion == 3:
-                context['reuse_context'] = reuse_context(ir, candidates, requirement, requested_types)
-                return analysis, context
-            self.log.info(f'DESIGN_CONTEXT_EXPANDED tables={sorted(tables)} '
-                          f'modules={sorted(fresh_modules)} types={sorted(fresh_types)}', node_id=rid)
-        raise RuntimeError('Unreachable analysis expansion state')
+    def _design_layers(self, base: dict[str, Any], rid: str, schema: dict[str, Any],
+                       dependencies: dict[str, Any], scenarios: set[str]) -> dict[str, Any]:
+        trial = copy.deepcopy(base)
+        api_ids: list[str] = []
+        for kind in ('API', 'FUNC', 'DB'):
+            if kind != 'API' and not api_ids:
+                break
+            trial, selected = self._design_layer(trial, rid, kind, api_ids, schema, dependencies, scenarios)
+            if kind == 'API':
+                api_ids = selected
+        modules = {row['id']: row for row in trial['modules']}
+        for key in reachable(api_ids, modules):
+            modules[key]['requirement_ids'] = sorted(set(modules[key]['requirement_ids']) | {rid})
+        return trial
 
-    def _architecture(self, base: dict[str, Any], rid: str, analysis: dict[str, Any], context: dict[str, Any], schema: dict[str, Any], dependencies: dict[str, Any], scenarios: set[str], feedback: list[str]) -> dict[str, Any]:
-        reuse = context['reuse_context']
-        def materialize(value: dict[str, Any]) -> dict[str, Any]:
-            trial = copy.deepcopy(base)
-            types = {row['id']: row for row in trial['types']}
-            for row in value['new_types']:
-                types.setdefault(row['id'], row)
-            trial['types'] = list(types.values())
-            mapping = {}
-            for row in value['new_modules']:
-                mapping[row['id']] = f'{rid}::{row["id"]}'
-            for draft in value['new_modules']:
-                module = copy.deepcopy(draft)
-                module['id'] = mapping[module['id']]
-                module['requirement_ids'] = [rid]
-                for call in module.get('calls', []):
-                    call['module_id'] = mapping.get(call['module_id'], call['module_id'])
-                trial['modules'].append(module)
-            api_ids = [mapping.get(key, key) for key in value['api_ids']]
-            modules = {row['id']: row for row in trial['modules']}
-            used = reachable(api_ids, modules)
-            for key in used:
-                modules[key]['requirement_ids'] = sorted(set(modules[key]['requirement_ids']) | {rid})
-            return trial
-        decision = self._decision('architecture', rid, ARCHITECTURE_PROMPT, ARCHITECTURE_SCHEMA,
-                                  {'requirement_id': rid, 'requirement': self.requirement_nodes[rid],
-                                   'analysis': analysis, 'schema_slice': {'tables': context['tables']},
-                                   'reuse_context': reuse, 'architecture_feedback': feedback,
-                                   'ancestor_context': self.inherited_context})
-        return materialize(decision)
+    def _design_layer(self, base: dict[str, Any], rid: str, kind: str, api_ids: list[str],
+                      schema: dict[str, Any], dependencies: dict[str, Any],
+                      scenarios: set[str]) -> tuple[dict[str, Any], list[str]]:
+        kinds = {'API': {'API', 'FUNC'}, 'FUNC': {'FUNC', 'DB'}, 'DB': {'DB'}}[kind]
+        requirement = {key: copy.deepcopy(value) for key, value in self.requirement_nodes[rid].items()
+                       if key in {'id', 'name', 'description', 'scenarios'}}
+        for index, row in enumerate(requirement.get('scenarios', [])):
+            if isinstance(row, dict):
+                row.setdefault('id', row.get('scenario_id') or f'{rid}:scenario:{index + 1}')
+        modules = {row['id']: row for row in base['modules']}
+        current = reachable(api_ids, modules)
+        pending = [{'caller_id': key, **copy.deepcopy(call)} for key in sorted(current)
+                   for call in modules[key].get('calls', []) if call['module_id'] not in modules]
+        if kind != 'API' and not pending:
+            return base, api_ids
+        upstream_ids = {row['caller_id'] for row in pending}
+        upstream = [copy.deepcopy(modules[key]) for key in sorted(upstream_ids)]
+        related = _related_data(schema, rid) if kind == 'DB' else {}
+        candidates = _candidates(base, rid, dependencies, set(related), str(requirement), kinds)
+        # Accepted upper-layer modules occur once in upstream_modules, never again in reuse_context.
+        candidates = [row for row in candidates if row['id'] not in upstream_ids]
+        tables = project_design_context(schema, rid, dependencies)['tables'] if kind == 'DB' else []
+        requested_types: set[str] = set()
+        for expansion in range(4):
+            reuse = reuse_context(base, candidates, requirement, requested_types, kinds=kinds, upstream=upstream)
+            payload = {'requirement_id': rid, 'requirement': requirement,
+                       'ancestor_rules': [{'requirement_id': row['requirement_id'],
+                                           'description': row['requirement'].get('description', ''),
+                                           'scenarios': [dict(scenario, id=scenario.get('id') or scenario.get('scenario_id')
+                                                              or f'{row["requirement_id"]}:scenario:{index + 1}')
+                                                         for index, scenario in enumerate(row['requirement'].get('scenarios', []))
+                                                         if isinstance(scenario, dict)]}
+                                          for row in self.inherited_context],
+                       'upstream_modules': upstream,
+                       'pending_module_ids': sorted({row['module_id'] for row in pending}),
+                       'reuse_context': reuse, 'context_requests_remaining': 3 - expansion}
+            if kind == 'DB':
+                payload['schema_slice'] = {'tables': tables}
+                loaded_tables = {row['name'] for row in tables}
+                payload['schema_index'] = [{'name': row['name'], 'description': row.get('description', '')}
+                                           for row in schema['tables'] if row['name'] not in loaded_tables]
+
+            decision = self._decision('design_' + kind.lower(), rid, LAYER_PROMPTS[kind],
+                                      LAYER_SCHEMAS[kind], payload)
+            # Context expansion is orchestration, not a semantic validation pass.
+            has_design = any(decision.get(key) for key in
+                             ('new_modules', 'new_types', 'reuse_module_ids', 'resolved_calls', 'api_ids'))
+            loaded_modules = {row['id'] for row in candidates}
+            fresh_modules = set(decision['requested_module_ids']) & modules.keys() - loaded_modules
+            fresh_types = set(decision['requested_type_ids']) & {row['id'] for row in base['types']} - {row['id'] for row in reuse['types']}
+            fresh_tables = set(decision.get('requested_tables', [])) & {row['name'] for row in schema['tables']} - {row['name'] for row in tables}
+            if has_design or not (fresh_modules or fresh_types or fresh_tables) or expansion == 3:
+                return self._materialize_layer(base, rid, decision, api_ids)
+            requested_types.update(fresh_types)
+            requested_modules = fresh_modules
+            candidates.extend(copy.deepcopy(modules[key]) for key in sorted(requested_modules))
+            requested_tables = fresh_tables
+            tables.extend(copy.deepcopy(row) for row in schema['tables'] if row['name'] in requested_tables)
+        raise ValueError('Layer context expansion budget exceeded')
+
+    @staticmethod
+    def _materialize_layer(base: dict[str, Any], rid: str, value: dict[str, Any],
+                           api_ids: list[str]) -> tuple[dict[str, Any], list[str]]:
+        """Merge shaped JSON and qualify local IDs without enforcing design policy."""
+        trial = copy.deepcopy(base)
+        modules = {row['id']: row for row in trial['modules']}
+        types = {row['id']: row for row in trial['types']}
+        new_ids = {row['id'] for row in value['new_modules']}
+
+        def qualify(key: str) -> str:
+            return key if '::' in key or key in modules and key not in new_ids else f'{rid}::{key}'
+
+        mapping = {key: qualify(key) for key in new_ids}
+        for row in value['new_types']:
+            types.setdefault(row['id'], copy.deepcopy(row))
+        for source in value['new_modules']:
+            module = copy.deepcopy(source)
+            module['id'] = mapping[source['id']]
+            previous = modules.get(module['id'], {})
+            module['requirement_ids'] = sorted(set(previous.get('requirement_ids', [])) | {rid})
+            for call in module.get('calls', []):
+                call['module_id'] = mapping.get(call['module_id'], qualify(call['module_id']))
+            modules[module['id']] = module
+        resolutions = {qualify(source): mapping.get(target, qualify(target))
+                       for source, target in value['resolved_calls'].items()}
+        for module in modules.values():
+            for call in module.get('calls', []):
+                call['module_id'] = resolutions.get(call['module_id'], call['module_id'])
+        entries = [mapping.get(key, qualify(key)) for key in value.get('api_ids', api_ids)]
+        trial['types'], trial['modules'] = list(types.values()), list(modules.values())
+        return trial, entries
 
     def _compose_parent(self, base: dict[str, Any], rid: str, nodes: dict[str, Any], schema: dict[str, Any], scenarios: set[str]) -> dict[str, Any]:
         self.log.info('PARENT_INTEGRATION_STARTED', node_id=rid)

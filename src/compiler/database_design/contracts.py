@@ -40,7 +40,7 @@ ENTITY_DECISION_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {
                 "type": "object", "additionalProperties": False, "required": ["key", "description"],
-                "properties": {"key": {"type": "string"}, "description": {"type": "string"}},
+                "properties": {"key": {"type": "string", "pattern": IDENTIFIER_PATTERN.pattern}, "description": {"type": "string"}},
             },
         },
     },
@@ -144,7 +144,7 @@ choose the existing entity whose persistent meaning best matches the requirement
 concise entity. Do not emit alternatives or unresolved decisions.
 
 Return exactly one JSON object with these keys and no others:
-- requirement_id: copy the supplied requirement.requirement_id exactly.
+- requirement_id: copy the supplied requirement.requirement_id exactly; example IDs below are illustrative.
 - reuse_entities: array of existing entity keys; use [] when none.
 - new_entities: array of {"key": singular_snake_case, "description": string}; use [] when none.
 
@@ -177,8 +177,11 @@ cross-field constraints, modules, SQL or physical database options. Do not persi
   constraint. Do not copy another requirement's bounds/default/enum just because they are in the shared field.
 - The compiler merges contributions: type must agree; nullable uses AND; lower bounds use max, upper bounds
   use min; enum sets intersect; uniqueness uses OR. Specified defaults and unique comparison semantics must
-  agree. Conflicting proposals are retained and merged without blocking design; implementation resolves behavior.
+  agree. Conflicting proposals are recorded separately; do not assume incompatible contributions replace
+  the accepted shared field definition.
 - Updating this requirement's contribution cannot remove any other requirement's facts.
+  own_field_contributions contains this requirement's earlier declarations: preserve its still-applicable
+  invariants when revising a complete contribution. Do not copy facts owned only by other requirements.
 - An existing field requiring no new or changed fact is reused silently. No reuse_fields key.
 - Do not rename fields or modify id, *_id, SYSTEM or RELATIONSHIP fields. Return only entities with changes.
 
@@ -203,12 +206,15 @@ Return {"requirement_id": supplied requirement.requirement_id, "entities": [
 ]}. Empty list when unchanged; omit entities with both lists empty.
 Example:
 {"requirement_id":"REQ-1.2","entities":[{"entity":"user","new_fields":[],"update_fields":[{"name":"username","type":"string","nullable":true,"description":"Account username.","properties":{"min_length":null,"max_length":20,"enum":null,"minimum":null,"maximum":null,"default":null,"unique":null,"comparison":null}}]}]}
+Example assumes user.username already exists in related_entities and this requirement contributes
+the storage bound. For a missing field use new_fields with the same declaration shape.
+Unchanged output example: {"requirement_id":"REQ-1.2","entities":[]}
 """
 ENTITY_INSTRUCTIONS = ER_SCOPE + ENTITY_INSTRUCTIONS
 
 
 RELATIONSHIP_INSTRUCTIONS = ER_SCOPE + """You are an ER-modeling specialist discovering relationships from an existing shared ER graph.
-The analysis unit is focus_entity, not a single requirement. Read its complete fields and all associated
+The analysis unit is focus_entity, not a single requirement. Read its complete fields and associated
 related_requirements together; they describe the domain meaning of this entity across the application.
 The er_graph contains every entity's name, description, attribute headers and requirement IDs, plus existing
 relationships. requirement_catalog contains bounded excerpts for all requirements; related_requirements
@@ -243,5 +249,6 @@ key, parent, child, type, parent_min, parent_max, child_min, child_max, descript
 
 Example:
 {"entity_key":"traveler","relationships":[{"key":"traveler_bookings","parent":"traveler","child":"booking","type":"ONE_TO_MANY","parent_min":0,"parent_max":"many","child_min":1,"child_max":"one","description":"A traveler may own many bookings; every booking belongs to one traveler.","evidence_requirement_ids":["REQ-3.2"]}]}
+Example assumes both entities exist in er_graph and REQ-3.2 explicitly supports the relationship.
 No-relationship example: {"entity_key":"traveler","relationships":[]}
 """
