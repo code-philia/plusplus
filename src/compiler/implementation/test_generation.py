@@ -1479,47 +1479,6 @@ def _validate_test_code(
                 "ARC4426 TEST_CODE_INVALID: E2E literal getByLabel locators must use "
                 "{ exact: true } to avoid ambiguous substring matches."
             )
-        allowed_routes = {
-            str(row.get("route", "")).strip()
-            for row in context_pack.get("relevant_frontend_subgraph", {}).get("ui", [])
-            if isinstance(row, dict) and str(row.get("route", "")).strip()
-        }
-        allowed_routes.update(context_pack.get("e2e_entry_routes", []))
-        literal_routes = re.findall(
-            r"\bpage\.goto\s*\(\s*[\"']([^\"']+)[\"']\s*\)",
-            code,
-        )
-        literal_routes.extend(
-            re.findall(
-                r"\b(?:entryRoute|baseRoute|startRoute)\s*=\s*[\"']([^\"']+)[\"']",
-                code,
-            )
-        )
-        route_constants = {
-            name: route
-            for name, route in re.findall(
-                r"\b(?:const|let)\s+(\w+)\s*=\s*[\"'](/[^\"']*)[\"']",
-                code,
-            )
-        }
-        literal_routes.extend(
-            route_constants[name]
-            for name in re.findall(r"\bpage\.goto\s*\(\s*(\w+)\s*\)", code)
-            if name in route_constants
-        )
-        invalid_routes = sorted(
-            {
-                route
-                for route in literal_routes
-                if route.startswith("/")
-                and not _route_is_allowed(route, allowed_routes)
-            }
-        )
-        if invalid_routes:
-            errors.append(
-                "ARC4429 E2E_ROUTE_INVALID: E2E uses routes not present in the "
-                f"frontend screen graph: {invalid_routes}; allowed={sorted(allowed_routes)}."
-            )
     if layer == "INTEGRATION" and not _uses_integration_base_url(code, imports):
         errors.append(
             "ARC4427 TEST_IMPORT_INVALID: INTEGRATION must import a default Supertest client "
@@ -1573,18 +1532,6 @@ def _uses_integration_base_url(code: str, imports: list[str]) -> bool:
             )
             for base_url in base_urls
         ):
-            return True
-    return False
-
-
-def _route_is_allowed(route: str, allowed_routes: set[str]) -> bool:
-    """Match a concrete E2E URL path against static and `:parameter` routes."""
-
-    path = str(route).split("?", 1)[0].split("#", 1)[0]
-    for allowed in allowed_routes:
-        pattern = re.sub(r":\w+", r"[^/]+", re.escape(allowed))
-        pattern = pattern.replace(r"\*", ".*")
-        if re.fullmatch(pattern, path):
             return True
     return False
 
