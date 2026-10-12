@@ -167,7 +167,9 @@ Task: build/refine the page's semantic UI tree and bind relevant nodes to this r
 Page identity is requirement.pages[].name. Analysis appears next to its reference path.
 NEW_PAGE: with analysis, build ALL visible meaningful UI, including regions unrelated to this
 requirement. Without analysis, derive required UI from the description/scenarios.
-NEW_PAGE_STATE: compare analysis with baseline_page_states and the current page tree. Insert
+NEW_PAGE_STATE: compare requirement.pages[].analysis with baseline_page_states[].analysis to identify
+visual state differences. The current UI tree is supplied once in existing.ui; use it to locate
+existing controls and insertion parents, without treating it as the baseline image analysis. Insert
 missing state-specific nodes, preserving controls absent from this image and existing node IDs.
 BIND_ONLY: create/update/delete no visual structure; only bind relevant existing UI nodes.
 Use concise English snake_case UI names. Include meaningful regions, forms, fields, text,

@@ -224,9 +224,6 @@ class FrontendIRGenerationPass:
             mode = "NEW_PAGE" if not exists else "BIND_ONLY" if reference is None or reference in state.get("parsed_references", []) else "NEW_PAGE_STATE"
             operation = {"page_name": page["name"], "reference": reference, "mode": mode,
                          "baseline_reference": state.get("baseline_reference")}
-            if mode == "NEW_PAGE_STATE":
-                baseline = state.get("baseline_ui", [])
-                operation["baseline_ui"] = baseline
             operations.append(operation)
         return operations
 
@@ -432,8 +429,7 @@ class FrontendIRGenerationPass:
             instructions += "\nCurrent page: " + json.dumps(operation["page_name"], ensure_ascii=False) + "; mode: " + operation["mode"] + "."
         if phase == "ui":
             baselines = [{"name": row["page_name"], "reference": row["baseline_reference"],
-                          "analysis": self._page_context({"name": row["page_name"], "reference": row["baseline_reference"]})["analysis"],
-                          "ui": row.get("baseline_ui", [])}
+                          "analysis": self._page_context({"name": row["page_name"], "reference": row["baseline_reference"]})["analysis"]}
                          for row in operations if row["mode"] == "NEW_PAGE_STATE"]
             if baselines:
                 payload["baseline_page_states"] = baselines
@@ -511,19 +507,14 @@ class FrontendIRGenerationPass:
         write_json_atomic(self.root / "passes" / f"{task_id}.json", record)
 
     def _record_page_parse(self, operations: list[dict[str, Any]]) -> None:
-        ui = {row["id"]: row for row in self.ir["ui"]}
         for operation in operations:
             name, reference = operation["page_name"], operation["reference"]
             state = self.page_parse_state.setdefault(name, {"parsed_references": []})
+            state.pop("baseline_ui", None)
             state["screen_id"] = self.ir["page_roots"][name]
             evidence = bool(self._page_context({"name": name, "reference": reference})["analysis"])
             if reference and evidence and operation["mode"] != "BIND_ONLY":
                 if not state.get("baseline_reference"):
                     state["baseline_reference"] = reference
-                    def subtree(key):
-                        row = copy.deepcopy(ui[key])
-                        row["children"] = [subtree(child) for child in row["children"]]
-                        return row
-                    state["baseline_ui"] = [subtree(state["screen_id"])]
                 state["parsed_references"] = list(dict.fromkeys([*state["parsed_references"], reference]))
         write_json_atomic(self.root / "page_parse_state.json", self.page_parse_state)
