@@ -19,7 +19,7 @@ from model.contracts import StructuredModel
 from model.client import describe_model_error
 from compiler.preprocessing.traversal import children_by_id, postorder
 from compiler.preprocessing.visual import ResolvedVisualReference
-from .contracts import PHASE_TABLES, PROMPTS, patch_schema
+from .contracts import BIND_ONLY_PROMPT, PHASE_TABLES, PROMPTS, patch_schema
 from .context import TABLES, frontend_ir_traceability, local_context, ranked, required_types, page_screen_matches, context_ui_nodes
 from compiler.ir.frontend import frontend_events
 from compiler.ir.frontend_storage import read_frontend_ir, write_frontend_ir
@@ -411,6 +411,10 @@ class FrontendIRGenerationPass:
                 if not feedback:
                     trace["status"] = "ACCEPTED"
                     record.setdefault("generation_attempts", []).append(trace)
+                    if "upserts" not in kwargs["output_schema"]["properties"]:
+                        # Binding-only replies omit structural operations; expand internally.
+                        output = {**output, "upserts": {"ui": []}, "ui_updates": [],
+                                  "page_assignments": []}
                     return output
             trace.update(status="REJECTED", errors=feedback)
             record.setdefault("generation_attempts", []).append(trace)
@@ -420,9 +424,10 @@ class FrontendIRGenerationPass:
 
     def _call(self, phase: str, requirements: list[str], payload: dict[str, Any]) -> None:
         task_id = f"{phase}-{len(self.batches) + 1:05d}"
-        schema = patch_schema(phase)
         operations = self._page_operations(payload["requirement"]["pages"]) if phase == "ui" else []
-        instructions = PROMPTS[phase]
+        bind_only = bool(operations) and all(row["mode"] == "BIND_ONLY" for row in operations)
+        schema = patch_schema(phase, bind_only=bind_only)
+        instructions = BIND_ONLY_PROMPT if bind_only else PROMPTS[phase]
         for operation in operations:
             instructions += "\nCurrent page: " + json.dumps(operation["page_name"], ensure_ascii=False) + "; mode: " + operation["mode"] + "."
         if phase == "ui":

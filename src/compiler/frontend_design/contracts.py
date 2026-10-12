@@ -18,7 +18,7 @@ PHASE_TABLES = {
 }
 
 
-def patch_schema(phase: str) -> dict[str, Any]:
+def patch_schema(phase: str, *, bind_only: bool = False) -> dict[str, Any]:
     """New records are complete; existing UI uses typed, field-level deltas."""
     defs: dict[str, Any] = {
         "JSONValue": {"anyOf": [
@@ -107,6 +107,10 @@ def patch_schema(phase: str) -> dict[str, Any]:
     schema["properties"]["deletes"] = {"type": "object", "additionalProperties": False,
         "properties": {table: strings for table in tables}}
     schema["properties"]["load_ui_ids"] = strings
+    if phase == "ui" and bind_only:
+        schema["properties"] = {key: schema["properties"][key]
+                                for key in ("ui_requirement_updates", "load_ui_ids")}
+        schema["required"] = ["ui_requirement_updates"]
     # Intermediate annotation conversions may have populated unused definitions.
     # Supply only contracts reachable from this phase's output properties.
     def references(value: Any) -> set[str]:
@@ -133,12 +137,28 @@ Use ui_updates for existing nodes and complete upserts for new records. Omitted 
 Modify only nodes supplied in existing.ui. Summaries locate nodes but are not full editable records.
 To read omitted nodes, return load_ui_ids and otherwise empty operations; then continue after loading.
 Preserve unrelated sibling controls, data and events. Implement only the current requirement's behavior.
+Frozen upstream designs are authoritative: backend follows database; frontend follows backend.
+Visual analysis describes appearance, not additional business requirements. Image-only fields
+must not introduce mandatory validation, submission data, persistence or API capability gaps.
+NON_LEAF requirements integrate completed child designs; add only explicitly described shared
+navigation, page composition or small local interactions. Preserve child behavior and its scope;
+do not redesign child workflows or activate every control visible in the page analysis.
 """
 
 VALUES = """Bindings use {kind:literal,value:JSON} or {kind:data|item,id,path?:[string|integer]}.
 Types use scalar/array/named; named IDs must exist in supplied or newly defined types.
 scope_ui_id=null is application data; otherwise the state belongs to that UI subtree.
 Use state only inside its scope; pass typed inputs to functions reused outside it.
+"""
+
+BIND_ONLY_PROMPT = COMMON + """
+Task: bind relevant existing UI nodes to the current requirement. The page/reference has
+already been parsed; preserve its tree. Return ui_requirement_updates containing
+{id,requirement_id,description}. Extract description from the requirement/scenario steps
+to describe the node's responsibility. Binding adds the requirement ID, replaces description
+and preserves previous owners. Do not return UI upserts, updates, deletes or page assignments.
+To load omitted nodes, return load_ui_ids with ui_requirement_updates:[] first.
+Do not design state, dynamic bindings, mandatory-field checks, events or functions.
 """
 
 PROMPTS = {
@@ -153,6 +173,7 @@ BIND_ONLY: create/update/delete no visual structure; only bind relevant existing
 Use concise English snake_case UI names. Include meaningful regions, forms, fields, text,
 actions, navigation, lists and feedback; omit decorative wrappers. New UI has events:[] and
 requirement_ids:[]. Static bindings and presentation describe visual intent, not business logic.
+Required markers in the image are visual text; do not turn them into required bindings or checks.
 For a new page, return page_assignments {name,ui_id}; attach its screen via ui_updates.children.
 children updates use {remove:[IDs],add:[{id,before_id?:ID|null}]}; omitted before_id appends.
 Existing visual fields use set/unset; bindings use {set:{attribute:value},remove:[attributes]}.
@@ -169,6 +190,8 @@ UI updates may change bindings and repeat only. bindings uses {set:{attribute:va
 repeat defines a data source and stable item key. Cover input values, displayed results,
 loading/error/empty/selection states as needed. Keep static text literal.
 No UI topology, events, functions, API calls or server capability analysis in this phase.
+Do not create state merely because a control appears in an image. For NON_LEAF, reuse child
+state and add only state needed by explicit shared/local interactions.
 """,
     "interaction": COMMON + VALUES + """
 Task: connect UI events to frontend functions, state changes and supplied backend APIs.
@@ -176,12 +199,16 @@ Upsert functions and any required types. UI updates may change events, bindings 
 Event updates use {upserts:[complete events],deletes:[event IDs]}. Events are embedded in UI;
 each has its own requirement_ids and ordered FUNC handlers. Preserve unrelated events.
 Functions have typed inputs/outputs, reads/writes of data IDs and ordered FUNC/API calls.
-Function spec explains local computation, validation, call conditions, result-to-state updates,
+Function spec explains local computation, call conditions, result-to-state updates,
 navigation and failure/loading behavior. input/result values refer to input or earlier call IDs.
 Use exact supplied API IDs and request semantic_ids; never call backend FUNC/DB from the client.
+Keep submission fields within the frozen API contract. Do not design client-side mandatory-field
+checks or submission blockers; leave concrete validation implementation to later TDD.
+Display validation errors returned by the supplied API without inventing additional field rules.
 Reuse existing functions by ID when their responsibility and signature match.
-Emit pending_capabilities only for required server behavior unsupported by supplied APIs; include
+Emit pending_capabilities only for explicit requirement behavior unsupported by supplied APIs; include
 affected function IDs. Resolve a gap only after wiring a supporting API. Do not simulate server success.
+Never report gaps inferred solely from visual analysis or broaden a child function at NON_LEAF.
 Do not create UI nodes, change containment or remove another requirement's events.
 """,
 }
