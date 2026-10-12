@@ -90,7 +90,7 @@ def page_screen_matches(ir: dict[str, Any], pages: list[dict[str, Any]]) -> list
 
 def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
                   related_ids: set[str], requested_ui_ids: set[str] | None = None,
-                  max_chars: int = 48000, *,
+                  max_chars: int = 400_000, *,
                   screen_matches: list[dict[str, Any]] | None = None,
                   page_root_ids: set[str] | None = None) -> dict[str, Any]:
     """Load requirement pages only; expose other pages through a tree summary."""
