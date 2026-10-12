@@ -6,6 +6,31 @@ from typing import Any
 from .contracts import IR_SCHEMA
 
 
+def context_request_errors(value: dict[str, Any], *, known: dict[str, set[str]],
+                           loaded: dict[str, set[str]], expansions_remaining: int) -> list[str]:
+    """Validate discovery requests inside the same retry loop as JSON shapes."""
+    requests = {field: set(value.get(field, [])) for field in known}
+    if not any(requests.values()):
+        return []
+    errors = []
+    design_fields = [field for field in ('new_modules', 'new_types', 'resolved_calls', 'api_ids') if value.get(field)]
+    if design_fields:
+        errors.append(f"Context request cannot include nonempty {design_fields}. Choose a context-only reply "
+                      "with new_modules:[] and api_ids:[] (API), or a design-only reply without requested_* fields.")
+    for field, keys in requests.items():
+        unknown = sorted(keys - known[field])
+        already_loaded = sorted(keys & loaded[field])
+        if unknown:
+            errors.append(f"{field}: unknown or unavailable in this layer: {unknown}. Request exact catalog/index IDs only. "
+                          "New modules/types and forward calls must be designed in their proper layer, not requested. "
+                          "Tables must already exist in the schema.")
+        if already_loaded:
+            errors.append(f"{field}: already loaded: {already_loaded}. Use these contracts directly and remove the request.")
+    if not expansions_remaining:
+        errors.append("Context expansion limit reached. Return a design using the loaded contracts without requested_* fields.")
+    return errors
+
+
 def shape_errors(value: Any, schema: dict[str, Any], path: str = '$', definitions: dict[str, Any] | None = None) -> list[str]:
     definitions = {**(definitions or {}), **schema.get('$defs', {})}
     if '$ref' in schema:

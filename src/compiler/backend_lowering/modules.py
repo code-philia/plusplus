@@ -53,8 +53,6 @@ def render_blueprint_module(kind: str, module: dict[str, Any], symbol: dict[str,
         lines.append(' * Atomic writes use schemaTransaction with a synchronous callback; business validation belongs to repository and service implementations.')
     for line in blueprint['spec'].splitlines():
         lines.append(' * ' + line.replace('*/', '* /'))
-    for criterion in blueprint.get('acceptance_criteria', []):
-        lines.append(' * ' + f'[{criterion["id"]}] Given {criterion["given"]}; When {criterion["when"]}; Then {criterion["then"]}'.replace('*/', '* /').replace('\n', '\n * '))
     lines += [' */', *module['type_plan']['declarations'], '']
     parameters = module_fields(blueprint, 'inputs')
     signature, unused = [], []

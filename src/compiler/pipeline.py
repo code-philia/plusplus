@@ -402,7 +402,7 @@ class Compiler:
                     failed_nodes = list(preprocessing.requirement_ir.get("atomic_units", []))
                 await self._log(
                     "Compiler",
-                    "Backend blueprint validation failed; stopping before backend lowering.",
+                    "Backend design incomplete after correction attempts; stopping before backend lowering. See per-call feedback in .arc/design/backend/passes.",
                     "error",
                 )
                 return CompilationResult(ok=False, root_id=root_id, states=states,

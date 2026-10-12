@@ -53,16 +53,15 @@ def project_lowering_design(ir: dict[str, Any]) -> dict[str, Any]:
             callers[call['module_id']].append(key)
     projected = []
     for key, module in modules.items():
-        # Retain full collaboration/criteria/context for implementation prompts,
+        # Retain full collaboration/context for implementation prompts,
         # including consumers that read the serialized module spec downstream.
         blueprint = json.dumps({'context': module_fields(module, 'context'), 'calls': module.get('calls', []),
-                                'data_access': module.get('data_access', []), 'acceptance_criteria': module.get('acceptance_criteria', [])},
+                                'data_access': module.get('data_access', [])},
                                ensure_ascii=False, separators=(',', ':'))
         projected.append({**copy.deepcopy(module), 'owner_requirement': key.split('::', 1)[0],
                           'name': key.rsplit('.', 1)[-1],
                           'calls': copy.deepcopy(module.get('calls', [])),
                           'data_access': copy.deepcopy(module.get('data_access', [])),
-                          'acceptance_criteria': copy.deepcopy(module.get('acceptance_criteria', [])),
                           # Separate context contracts keep trusted values out
                           # of HTTP input and ordinary input interfaces.
                           'inputs': fields(module_fields(module, 'inputs')),

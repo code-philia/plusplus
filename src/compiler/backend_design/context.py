@@ -27,13 +27,10 @@ def required_types(payload: Any, definitions: list[dict[str, Any]]) -> list[dict
 
 
 def module_contract(module: dict[str, Any]) -> dict[str, Any]:
-    """One behavior representation: guarantees instead of duplicate full spec."""
+    """Project interfaces and their single authoritative behavior spec."""
     result = {key: copy.deepcopy(module[key]) for key in
               ('id', 'kind', 'path', 'method', 'authentication', 'request', 'response', 'status_code',
                'content_type', 'parameters', 'returns', 'context', 'spec') if key in module}
-    if module.get('acceptance_criteria'):
-        result['guarantees'] = [{key: row[key] for key in ('given', 'when', 'then')}
-                                for row in module['acceptance_criteria']]
     return result
 
 

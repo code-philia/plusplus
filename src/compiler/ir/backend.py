@@ -54,14 +54,6 @@ class EnumTypeDefinition(TypedDict):
 BackendTypeDefinition = ObjectTypeDefinition | EnumTypeDefinition
 
 
-class AcceptanceCriterion(TypedDict):
-    id: str
-    given: str
-    when: str
-    then: str
-    scenario_ids: list[str]
-
-
 class ModuleCall(TypedDict):
     id: str
     module_id: str
@@ -87,7 +79,6 @@ class ModuleBase(TypedDict):
     spec: str
     context: NotRequired[list[BackendField]]
     calls: NotRequired[list[ModuleCall]]
-    acceptance_criteria: NotRequired[list[AcceptanceCriterion]]
 
 
 class APIModule(ModuleBase):
@@ -132,7 +123,7 @@ class BackendIR(TypedDict):
 __all__ = [
     "BackendIR", "BackendModule", "APIModule",
     "FunctionModule", "DatabaseModule", "ModuleBase", "BackendField",
-    "BackendType", "BackendTypeDefinition", "AcceptanceCriterion",
+    "BackendType", "BackendTypeDefinition",
     "ModuleCall", "DataAccess", "APIRequestField", "module_fields",
 ]
 

@@ -13,7 +13,7 @@ from .database import (
 from .backend import (
     BackendIR, BackendModule, APIModule, FunctionModule,
     DatabaseModule, ModuleBase, BackendField, BackendType, BackendTypeDefinition,
-    AcceptanceCriterion, ModuleCall, DataAccess, APIRequestField, module_fields,
+    ModuleCall, DataAccess, APIRequestField, module_fields,
 )
 from .frontend import (
     FrontendIR, UINode, FrontendState, UIEvent, UIFunction, UICall, ValueSource,
@@ -27,7 +27,7 @@ __all__ = [
     "SchemaIR", "SchemaTable",
     "BackendIR", "BackendModule", "APIModule",
     "FunctionModule", "DatabaseModule", "ModuleBase", "BackendField",
-    "BackendType", "BackendTypeDefinition", "AcceptanceCriterion", "ModuleCall",
+    "BackendType", "BackendTypeDefinition", "ModuleCall",
     "DataAccess", "APIRequestField", "module_fields",
     "FrontendIR", "UINode", "FrontendState", "UIEvent", "UIFunction", "UICall",
     "ValueSource", "LiteralValue", "ReferenceValue", "UIRepeat", "UIVisualReference",

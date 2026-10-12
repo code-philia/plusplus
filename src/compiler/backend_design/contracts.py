@@ -79,9 +79,22 @@ New IDs use KIND.Name; the compiler qualifies them with the current requirement 
 Define new_types only for named types referenced by new modules; omit empty optional fields.
 Fields preserve semantic_id and compatible types. Use snake_case parameter names. Trusted identity/time
 belong in context. spec describes observable behavior, errors and guarantees, not implementation code.
+Put all validation, error, persistence and concurrency guarantees in spec. Do not return separate
+acceptance_criteria, guarantees, Given/When/Then records or duplicated scenario metadata.
 Calls use module_id and purpose describing responsibility, inputs, results and failure guarantees.
 Reuse loaded modules by referencing their IDs directly. Catalogs are summaries: request unloaded
 contracts with requested_module_ids/requested_type_ids and return no design until they are loaded.
+There are TWO mutually exclusive reply modes:
+1. Load existing context: new_modules:[], omit new_types/resolved_calls, and API uses api_ids:[].
+Request only exact unloaded IDs from the supplied catalogs/schema_index. Loaded modules, upstream
+contracts, unknown IDs and forward calls are not context requests. Omit empty request fields.
+2. Design: return new_modules/new_types and selected api_ids or resolved_calls as appropriate;
+omit all requested_* fields. A required module/type that does not exist must be newly designed.
+Forward FUNC/DB calls express work for a later layer; never request them as if they already exist.
+API layer creates API modules with forward FUNC.Name calls; FUNC layer implements those calls
+and may introduce forward DB.Name calls; DB layer implements those persistence leaves.
+If validation_feedback reports invalid requests, copy an exact catalog ID or remove the request
+and design the missing responsibility in its proper layer. Do not repeat an invented request ID.
 """
 LAYER_PROMPTS = {
     "API": LAYER_COMMON + """
@@ -93,6 +106,9 @@ GET has no body. Use :parameter path syntax and application/json; empty response
 New APIs delegate business work to loaded FUNC IDs or forward FUNC.Name calls. Do not design FUNC/DB
 modules or database columns. api_ids selects the new/existing API entrypoints used by this requirement,
 including relevant setup, action and observation interfaces. Return empty lists for client-only tasks.
+Static forms, navigation links, labels, layout and client-only controls do not require an API to
+describe their configuration. Inherited constraints apply only to the current behavior; they do
+not require implementing every ancestor feature in this leaf.
 """,
     "FUNC": LAYER_COMMON + """
 Task: fulfill the unresolved FUNC calls in upstream_modules. Their call purposes define the work.
@@ -110,6 +126,9 @@ atomicity and concurrency where needed. Use exact table/column names. DB modules
 Reuse only when complete behavior/interface matches; accessing the same table alone is insufficient.
 Define each pending DB ID or map it to a loaded DB contract through resolved_calls.
 Request missing schema tables through requested_tables. Do not redesign APIs or business orchestration.
+Only schema_slice/schema_index tables exist. A guessed session/authenticated_session table is not
+loadable. Never invent tables/columns or use another table as an unrelated substitute. Explain a
+missing storage responsibility in spec using the supported runtime/contracts where applicable.
 """,
 }
 
@@ -125,4 +144,13 @@ do not create modules, types or calls. Child requirements explain completed func
 Report missing parent server behavior through pending_capabilities; use requirement.id + '.capability.'
 for new gap IDs and function_ids:[]. Preserve existing gap IDs for matching capabilities.
 Omit pending_capabilities when there are no new gaps. Do not duplicate child APIs.
+Report a gap only for explicit parent server behavior requiring authoritative data, persistence,
+authentication or business operations that the supplied APIs cannot support. Client-rendered
+search inputs, navigation, headers, dashboard controls, labels and layouts do not need backend
+configuration APIs. Evaluate underlying server data/actions separately from those visual controls.
+The absence of an API returning a control does not establish a backend capability gap.
+Scope cross-cutting persistence statements to the completed child capabilities; do not claim that
+all metadata/preferences lack persistence when child CRUD/read APIs already provide it.
+A source explicitly leaving ordering, tie-breaking, eviction or another policy unspecified creates
+no new requirement and no missing capability. Do not invent policy or report its absence as a gap.
 """

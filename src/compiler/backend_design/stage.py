@@ -11,7 +11,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
@@ -22,7 +22,7 @@ from .contracts import (
     LAYER_SCHEMAS, LAYER_PROMPTS,
     PARENT_DESIGN_SCHEMA, PARENT_DESIGN_PROMPT,
 )
-from .validation import shape_errors, reachable
+from .validation import shape_errors, reachable, context_request_errors
 from .context import module_contract, required_types, reuse_context, requirement_contracts
 
 
@@ -134,9 +134,10 @@ class BackendDesignPass:
         self.retries = _budget('ARC_STRUCTURED_OUTPUT_RETRY_COUNT', 2, 10)
         self.sequence = 0
 
-    def _decision(self, phase: str, unit: str, prompt: str, schema: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    def _decision(self, phase: str, unit: str, prompt: str, schema: dict[str, Any], payload: dict[str, Any],
+                  *, validate: Callable[[dict[str, Any]], list[str]] | None = None) -> dict[str, Any]:
         feedback: list[str] = []
-        attempts = 1 if phase == "parent_composition" else self.retries + 1
+        attempts = self.retries + 1
         for attempt in range(attempts):
             request = copy.deepcopy(payload)
             if feedback:
@@ -155,6 +156,8 @@ class BackendDesignPass:
                                                  input_payload=request,
                                                  output_schema={**schema, 'x-arc-output-mode': 'json_object'})
                 feedback = shape_errors(value, schema)
+                if not feedback and validate is not None:
+                    feedback = validate(value)
                 trace.update(output=value, errors=feedback)
             except Exception as exc:
                 feedback = [describe_model_error(exc)]
@@ -310,26 +313,23 @@ class BackendDesignPass:
                 if schema_index:
                     payload['schema_index'] = schema_index
 
-            decision = self._decision('design_' + kind.lower(), rid, LAYER_PROMPTS[kind],
-                                      LAYER_SCHEMAS[kind], payload)
-            # Context expansion is orchestration, not a semantic validation pass.
-            has_design = any(decision.get(key) for key in
-                             ('new_modules', 'new_types', 'resolved_calls', 'api_ids'))
             loaded_modules = {row['id'] for row in candidates}
+            known = {'requested_module_ids': {key for key, row in modules.items() if row['kind'] in kinds},
+                     'requested_type_ids': {row['id'] for row in base['types']},
+                     'requested_tables': {row['name'] for row in schema['tables']}}
+            loaded = {'requested_module_ids': loaded_modules | upstream_ids,
+                      'requested_type_ids': {row['id'] for row in reuse['types']},
+                      'requested_tables': {row['name'] for row in tables}}
+            decision = self._decision('design_' + kind.lower(), rid, LAYER_PROMPTS[kind],
+                                      LAYER_SCHEMAS[kind], payload,
+                                      validate=lambda value: context_request_errors(value, known=known,
+                                          loaded=loaded, expansions_remaining=3 - expansion))
             requested_module_ids = set(decision.get('requested_module_ids', []))
             requested_type_ids = set(decision.get('requested_type_ids', []))
-            requested_table_names = set(decision.get('requested_tables', []))
             fresh_modules = requested_module_ids & {key for key, row in modules.items() if row['kind'] in kinds} - loaded_modules - upstream_ids
             fresh_types = set(decision.get('requested_type_ids', [])) & {row['id'] for row in base['types']} - {row['id'] for row in reuse['types']}
             fresh_tables = set(decision.get('requested_tables', [])) & {row['name'] for row in schema['tables']} - {row['name'] for row in tables}
             requests = any(decision.get(key) for key in ('requested_module_ids', 'requested_type_ids', 'requested_tables'))
-            if requests and has_design:
-                raise ValueError('Context requests must not be combined with module/type design')
-            if requests and (requested_module_ids != fresh_modules or requested_type_ids != fresh_types
-                             or requested_table_names != fresh_tables):
-                raise ValueError('Request unloaded existing modules, types or tables only')
-            if requests and expansion == 3:
-                raise ValueError('Backend context request limit exceeded (3 expansions)')
             if not requests:
                 return self._materialize_layer(base, rid, decision, api_ids)
             requested_types.update(fresh_types)
@@ -396,7 +396,11 @@ class BackendDesignPass:
         payload['types'] = required_types(payload, base['types'])
 
         decision = self._decision('parent_composition', rid, PARENT_DESIGN_PROMPT,
-                                  PARENT_DESIGN_SCHEMA, payload)
+                                  PARENT_DESIGN_SCHEMA, payload,
+                                  validate=lambda value: [f"api_ids contains unavailable descendant APIs: "
+                                      f"{sorted(set(value['api_ids']) - available)}. "
+                                      "Select exact IDs from api_contracts; report explicit missing server behavior separately."]
+                                      if set(value['api_ids']) - available else [])
         trial = copy.deepcopy(base)
         targets = {row['id']: row for row in trial['modules']}
         for key in reachable(decision['api_ids'], targets):
