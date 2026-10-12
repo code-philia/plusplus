@@ -138,7 +138,7 @@ class FrontendIRGenerationPass:
                 self._call("ui", [rid], self._payload(rid, "ui"))
             self.active_page = None
             self.requested_ui[rid] = set()
-            self.page_ui_scope[rid] = set(self._payload(rid, "data")["loaded_ui_ids"])
+            self.page_ui_scope[rid] = {row["id"] for row in context_ui_nodes(self._payload(rid, "data"))}
             for phase in ("data", "interaction"):
                 self._call(phase, [rid], self._payload(rid, phase))
         self.warnings.extend(f"{gap['id']}: pending integration: {gap['capability']} ({gap['reason']})"
@@ -190,16 +190,29 @@ class FrontendIRGenerationPass:
         apis = primary + ranked([row for row in self.apis if row["id"] not in primary_ids], requirement, 8)
         payload = {**context, "new_id_prefix": f"{rid}.", "requirement": requirement,
                    "node_role": "NON_LEAF" if self.children[rid] else "LEAF",
-                   "api_contracts": [self._api(row) for row in apis] if phase != "ui" else [],
-                   "api_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}
-                                   for row in ranked(self.apis, requirement, 24)] if phase != "ui" else [],
+                   **({"api_contracts": [self._api(row) for row in apis]} if phase == "interaction" else {}),
                    "declared_pages": copy.deepcopy(pages),
                    "missing_pages": [page["name"] for page in pages
                                      if page["name"] not in self.ir.get("page_roots", {})],
-                   "pending_capabilities": [copy.deepcopy(row) for row in self.ir["pending_capabilities"]
-                                            if owners & set(row["requirement_ids"])],
+                   **({"pending_capabilities": [copy.deepcopy(row) for row in self.ir["pending_capabilities"]
+                                            if owners & set(row["requirement_ids"])]} if phase == "interaction" else {}),
                    "prior_task_failures": [row for row in self.failures if owners & set(row["requirement_ids"])]}
-        payload["types"] = required_types(payload, [*self.backend_types, *self.ir["types"]])
+        if phase == "data":
+            payload["existing"].pop("functions", None)
+        if phase != "ui":
+            payload["types"] = required_types(payload, [*self.backend_types, *self.ir["types"]])
+        else:
+            payload["existing"] = {"ui": payload["existing"]["ui"]}
+        for key in ("loaded_ui_ids", "page_ids", "page_context_mode", "page_matches", "declared_pages",
+                    "missing_pages", "context_budget_chars", "new_id_prefix", "root_ui_id", "function_catalog",
+                    "requirement_links"):
+            payload.pop(key, None)
+        # Summaries remain discovery-only; omitted IDs stay next to the tree.
+        for key in ("omitted_ids", "structural_ui", "prior_task_failures"):
+            if not payload.get(key):
+                payload.pop(key, None)
+        if not payload.get("ui_tree_summary") and not self.requested_ui.get(rid):
+            payload.pop("structural_ui", None)
         return payload
 
     def _page_operations(self, pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -276,7 +289,6 @@ class FrontendIRGenerationPass:
     def _merge(self, phase: str, output: dict[str, Any], requirements: list[str]) -> None:
         """Merge a region atomically while preserving tree and independent event ownership."""
         trial = copy.deepcopy(self.ir)
-        direct_updates = set(output.get('implements_ids', []))
         for table in PHASE_TABLES[phase]:
             registry = {row["id"]: row for row in trial[table]}
             for key in output.get("deletes", {}).get(table, []):
@@ -293,7 +305,7 @@ class FrontendIRGenerationPass:
                         # Structural maintenance never establishes direct ownership.
                         semantic_keys = (set(row) | set(previous)) - {"name", "requirement_ids", "children", "events", "presentation", "visual_reference_ids"}
                         semantic_change = any(row.get(key) != previous.get(key) for key in semantic_keys)
-                        if phase != "ui" and semantic_change and row['id'] in direct_updates:
+                        if phase != "ui" and semantic_change and set(requirements) & set(supplied):
                             owners = [*owners, *requirements]
                     row["requirement_ids"] = list(dict.fromkeys(owners))
                 if table == "pending_capabilities":
@@ -306,7 +318,7 @@ class FrontendIRGenerationPass:
                         if old is not None:
                             event["requirement_ids"] = list(dict.fromkeys([
                                 *old.get("requirement_ids", []),
-                                *(requirements if event["id"] in direct_updates else [])]))
+                                *(requirements if set(requirements) & set(event.get("requirement_ids", [])) else [])]))
                         else:
                             event["requirement_ids"] = list(requirements) if event.get("requirement_ids") else []
                     supplied_ids = {event["id"] for event in row.get("events", [])}
@@ -319,7 +331,7 @@ class FrontendIRGenerationPass:
             trial[table] = list(registry.values())
         records = {row["id"]: row for table in TABLES if table != "types" for row in trial[table]}
         records.update({event["id"]: event for event in frontend_events(trial)})
-        touched = set(output.get("reuse_ids", [])) | {
+        touched = {
             row["id"] for table in PHASE_TABLES[phase] if table not in {"types", "pending_capabilities"}
             for row in output.get("upserts", {}).get(table, [])}
         touched.update(output.get("changed_event_ids", []))
@@ -433,7 +445,7 @@ class FrontendIRGenerationPass:
                 requested = output.get("load_ui_ids", [])
                 if not requested:
                     break
-                if any(output["upserts"].values()) or any(output["deletes"].values()) or output["ui_updates"] or output["implements_ids"] or output.get("reuse_ids") or output.get("page_assignments") or output.get("ui_requirement_updates"):
+                if any(output["upserts"].values()) or any(output.get("deletes", {}).values()) or output["ui_updates"] or output.get("page_assignments") or output.get("ui_requirement_updates"):
                     raise ValueError("UI context requests must contain an otherwise empty delta")
                 known = {row["id"] for row in self.ir["ui"]}
                 if set(requested) - known:
@@ -458,7 +470,7 @@ class FrontendIRGenerationPass:
                 output = self._generate(kwargs, record)
             if output.get("load_ui_ids"):
                 raise ValueError("UI context request limit exceeded; design a smaller region")
-            loaded = set(payload["loaded_ui_ids"])
+            loaded = {row["id"] for row in context_ui_nodes(payload)}
             known = {row["id"] for row in self.ir["ui"]}
             changed = {row["id"] for row in output.get("upserts", {}).get("ui", [])}
             changed.update(output.get("deletes", {}).get("ui", []))
@@ -469,10 +481,10 @@ class FrontendIRGenerationPass:
                 if {row["id"] for row in output["ui_requirement_updates"]} - (loaded | {row["id"] for row in output["upserts"]["ui"]}):
                     raise ValueError("Requirement binding must target loaded or newly created UI")
                 if operations and all(row["mode"] == "BIND_ONLY" for row in operations):
-                    if output["upserts"]["ui"] or output["deletes"]["ui"] or output["ui_updates"] or output["page_assignments"]:
+                    if output["upserts"]["ui"] or output.get("deletes", {}).get("ui") or output["ui_updates"] or output["page_assignments"]:
                         raise ValueError("Parsed page/reference permits requirement bindings only")
                 if any(row["mode"] == "NEW_PAGE_STATE" for row in operations):
-                    if output["deletes"]["ui"] or any(row.get("children", {}).get("remove") for row in output["ui_updates"]):
+                    if output.get("deletes", {}).get("ui") or any(row.get("children", {}).get("remove") for row in output["ui_updates"]):
                         raise ValueError("New page states must preserve previously parsed UI nodes")
             record["output"] = output
             record["final_input"] = payload

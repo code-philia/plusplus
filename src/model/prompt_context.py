@@ -133,6 +133,24 @@ def render_section(name: str, purpose: str, payload: dict[str, Any]) -> str:
 
 
 def stage_sections(schema_name: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if schema_name in {"frontend_ui", "frontend_data", "frontend_interaction"}:
+        remaining = dict(payload)
+        sections = []
+        groups = [
+            ("Current task", {"requirement", "node_role"}),
+            ("Selected page subtree and frontend state", {"existing", "baseline_page_states",
+                "structural_ui", "omitted_ids", "ui_tree_summary"}),
+            ("Backend API contracts" if schema_name == "frontend_interaction" else "Frontend types",
+                {"api_contracts", "types"}),
+            ("Failures and integration gaps", {"pending_capabilities", "prior_task_failures", "output_format_feedback"}),
+        ]
+        for name, keys in groups:
+            selected = {key: remaining.pop(key) for key in list(remaining) if key in keys}
+            if selected:
+                sections.append({"name": name, "purpose": "", "payload": selected})
+        if remaining:
+            sections.append({"name": "Additional context", "purpose": "", "payload": remaining})
+        return sections
     remaining = dict(payload)
     overrides = STAGE_GROUPS.get(_stage_family(schema_name), {})
     sections = [{"name": "Task and context interpretation", "purpose": STAGE_TASKS.get(schema_name, "Complete the task defined by the system instructions."),

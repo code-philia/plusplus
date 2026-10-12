@@ -144,7 +144,13 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
         pending.extend(child for child in ui[key]["children"] if child not in walked
                        and ui[child]["kind"] != "screen")
     # The root is needed for attaching a new page, never for loading all pages.
-    selected = owned | (used & rows.keys()) | region | requested | {ir["root_ui_id"]}
+    selected = owned | (used & rows.keys()) | region | requested
+    missing_page = any(page["name"] not in {match["page_name"] for match in matches}
+                       for page in requirement.get("pages", []))
+    if missing_page:
+        selected.add(ir["root_ui_id"])
+    elif ir["root_ui_id"] not in requested:
+        selected.discard(ir["root_ui_id"])
     selected.update(row["id"] for row in ir["data"] if row["scope_ui_id"] in region)
     selected.update(event["id"] for event in events if event["ui_id"] in selected)
     pending, visited = list(selected), set()
@@ -207,6 +213,16 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
     # unloaded edges. Edits use stable IDs, never reconstruct a partial subtree.
     roots = [row["id"] for row in records["ui"] if parents.get(row["id"]) not in loaded_ui]
     records["ui"] = [tree(key, False) for key in roots]
+    # Application structure stays separate from matched screen subtrees even
+    # when explicitly loaded to attach a new page.
+    if screens:
+        displayed_roots = (screens & loaded_ui) | set(roots)
+        def detached_tree(key: str) -> dict[str, Any]:
+            row = copy.deepcopy(ui[key])
+            row["children"] = [detached_tree(child) for child in row["children"]
+                               if child in loaded_ui and child not in screens]
+            return row
+        records["ui"] = [detached_tree(key) for key in sorted(displayed_roots, key=lambda key: (key not in screens, key))]
     def summary_node(key: str) -> dict[str, Any]:
         return {name: copy.deepcopy(ui[key][name]) for name in ("id", "name", "kind", "route") if name in ui[key]}
 

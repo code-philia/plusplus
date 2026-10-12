@@ -14,6 +14,11 @@ def materialize_ui_updates(ir: dict[str, Any], phase: str, output: dict[str, Any
     if errors:
         raise ValueError("Invalid frontend delta: " + "; ".join(errors))
     result = copy.deepcopy(output)
+    # Expand only inside the compiler; the model returns phase-relevant fields.
+    result.setdefault("deletes", {})
+    result.setdefault("load_ui_ids", [])
+    result.setdefault("upserts", {}).setdefault("ui", [])
+    result["deletes"].setdefault("ui", [])
     by_id = {row["id"]: row for row in ir["ui"]}
     new = result["upserts"]["ui"]
     if len({row["id"] for row in new}) != len(new):

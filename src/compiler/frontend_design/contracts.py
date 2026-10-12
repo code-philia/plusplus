@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import types
-import json
 from typing import Any, ForwardRef, Literal, NotRequired, Required, Union, get_args, get_origin, get_type_hints, is_typeddict
 
 from ..ir.frontend import UINode, UIEvent, FrontendState, UIFunction, ValueSource
@@ -59,7 +58,8 @@ def patch_schema(phase: str) -> dict[str, Any]:
                 "properties": properties, "required": list(properties)}
 
     strings = {"type": "array", "items": {"type": "string"}}
-    tables = PHASE_TABLES[phase]
+    tables = {"ui": ("ui",), "data": ("data", "types"),
+              "interaction": ("functions", "types", "pending_capabilities")}[phase]
     ui_fields = {key: convert(value) for key, value in get_type_hints(UINode, include_extras=True).items()
                  if key not in {"id", "children", "bindings", "events", "requirement_ids", "description"}}
     optional_fields = [key for key, value in get_type_hints(UINode, include_extras=True).items()
@@ -88,268 +88,100 @@ def patch_schema(phase: str) -> dict[str, Any]:
         update["properties"].pop("unset")
     empty_array = {"type": "array", "items": {"type": "string"}, "maxItems": 0}
     table_upserts = {table: {"type": "array", "items": convert(TABLE_TYPES[table])} for table in tables}
-    table_deletes = {table: strings for table in tables}
-    if phase != "ui":
-        table_upserts["ui"] = empty_array
-        table_deletes["ui"] = empty_array
-    else:
-        # Fresh UI has no interaction yet; existing events are preserved by omission.
+    if phase == "ui":
         defs["UINode"]["properties"]["events"] = empty_array
-    schema = obj({
+    properties = {
         "upserts": obj(table_upserts),
         "ui_updates": {"type": "array", "items": update},
-        "deletes": obj(table_deletes),
-        **({"reuse_ids": strings} if phase != "ui" else {}),
-        "implements_ids": empty_array if phase == "ui" else strings,
-        "load_ui_ids": strings,
-        **({"page_assignments": {"type": "array", "items": obj({
-            "name": {"type": "string"}, "ui_id": {"type": "string"}})},
+    }
+    if phase == "ui":
+        properties.update({
+            "page_assignments": {"type": "array", "items": obj({
+                "name": {"type": "string"}, "ui_id": {"type": "string"}})},
             "ui_requirement_updates": {"type": "array", "items": obj({
                 "id": {"type": "string"}, "requirement_id": {"type": "string"},
-                "description": {"type": "string", "minLength": 1}})}} if phase == "ui" else {}),
-    })
+                "description": {"type": "string", "minLength": 1}})},
+        })
+    schema = obj(properties)
+    # Optional operations need no repeated empty arrays in normal replies.
+    schema["properties"]["deletes"] = {"type": "object", "additionalProperties": False,
+        "properties": {table: strings for table in tables}}
+    schema["properties"]["load_ui_ids"] = strings
+    # Intermediate annotation conversions may have populated unused definitions.
+    # Supply only contracts reachable from this phase's output properties.
+    def references(value: Any) -> set[str]:
+        if isinstance(value, list):
+            return {key for item in value for key in references(item)}
+        if not isinstance(value, dict):
+            return set()
+        own = {value["$ref"].removeprefix("#/$defs/")} if "$ref" in value else set()
+        return own | {key for item in value.values() for key in references(item)}
+    pending, retained = list(references(schema)), set()
+    while pending:
+        key = pending.pop()
+        if key not in retained:
+            retained.add(key)
+            pending.extend(references(defs[key]) - retained)
+    defs = {key: value for key, value in defs.items() if key in retained}
     return {**schema, "$defs": defs, "x-arc-output-mode": "json_object"}
 
 
-COMMON = """Design a technology-neutral frontend blueprint from requirements and optional visual evidence.
-Return only the requested JSON delta. No components, React, JSX, DOM elements, CSS, HTTP routes,
-files, stores, handlers/effects tables, version, audit, scores or validation results.
-The UI tree is a semantic composition tree, not a framework component tree.
-Give every new UI a concise English snake_case name describing its semantic responsibility,
-e.g. registration, app_header, registration_form, email_field, submit_action.
-Names must not include requirement IDs, generated hashes or framework terminology. Preserve names
-of existing objects unless their responsibility changes. IDs remain stable when names change.
-Use supplied exact IDs for existing objects; use the supplied new_id_prefix plus meaningful suffixes
-for new objects (e.g. <prefix>ui.query, <prefix>fn.search, <prefix>data.query).
-For NEW UI only, return COMPLETE records in upserts.ui, with children as ordered IDs.
-For EXISTING UI, use ui_updates instead of regenerating the complete record.
-Each update has id plus only the sections permitted by the CURRENT phase's schema.
-bindings uses {set:{attribute:ValueSource},remove:[attributes]}; events uses
-{upserts:[complete changed/new events],deletes:[event IDs]}.
-UI-only children uses {remove:[IDs],add:[{id,before_id?:ID|null}]}.
-Omit untouched sections/fields. Missing before_id appends; remove+add moves a child.
-Do not replace all children, bindings or events. Omitted values and siblings survive.
-Only UI phase creates/deletes UI or changes containment; data updates bindings/repeat;
-interaction updates events/bindings and behavioral spec. Only interaction changes events.
-Do not set requirement_ids in ui_updates. UI phase uses ui_requirement_updates exclusively and
-returns implements_ids:[]. Behavior phases use implements_ids for new direct responsibilities.
-Other tables continue to use complete records in upserts. Return ui_updates:[] when unchanged.
-existing.ui is a NESTED forest of loaded full records; children are embedded records in INPUT ONLY.
-loaded_ui_ids defines the editable UI nodes. When supplied, ui_tree_summary contains only app,
-all pages and the three largest direct subtree roots per page; it does not contain the whole tree.
-omitted descendants are not deletions. All OUTPUT child references use IDs.
-If you need a UI absent from loaded_ui_ids, return load_ui_ids with exact tree-summary/children IDs
-and an otherwise empty delta. List all existing UI records you need for the next attempt; this
-replaces the prior explicit selection to allow switching regions. The compiler loads records and asks
-again. Otherwise use []. At most four context requests are allowed per phase; work on a small region.
-Never edit an existing UI that has not been loaded. Missing descendants remain unchanged.
-For large trees work on the current semantic region; ask to load another region when necessary.
-UI phase has no reuse_ids: bind relevant existing nodes through ui_requirement_updates.
-Behavior phases may return unchanged reused data/functions in reuse_ids, not duplicate records.
-deletes contains only IDs intentionally superseded by your design changes. Otherwise use empty lists.
-requirement_ids means DIRECT implementation, not use, tree containment or scheduling history.
-In UI phase, ui_requirement_updates explicitly binds ONLY UI directly involved in the current requirement.
-Each operation is {id:UI_ID,requirement_id:CURRENT_REQUIREMENT_ID,description:REQUIREMENT_EXCERPT}.
-Extract the relevant text from requirement.description and/or requirement.scenarios[].steps[].content
-to explain precisely WHICH PART of the requirement this UI implements. Use the requirement's language;
-do not substitute a generic visual label or invent behavior. Select only text pertinent to this node.
-The compiler adds the requirement ID while preserving previous owners, and REPLACES the UI node's
-description with the supplied text if a description already exists. It leaves spec and structure intact.
-This operation works on loaded existing UI and newly created UI, even without structural changes.
-UI discovered from an image alone has requirement_ids=[] and is not automatically owned by the current requirement.
-In behavior phases, new data/functions/events implement the current requirement by default. Preserve existing direct owners
-when updating objects. Add an owner only for a new semantic responsibility explicitly implementing
-that requirement. Editing children to attach UI, moving nodes or changing shared layout does not
-make the parent/container implement the attached requirement. reuse_ids records use only.
-implements_ids lists changed existing objects whose NEW semantic responsibility directly implements
-the current requirement. Use [] for structural maintenance and pure reuse. To create only shared
-shell structure, set requirement_ids=[]; it is used by the current task, not directly owned by it.
-Never copy ancestor requirement IDs onto all descendants, or current IDs onto every reused object.
-Existing shared responsibilities must survive changes. Preserve loaded UI, state and event contracts.
-Do not invent product behaviors. Parent requirements describe shared composition; do not duplicate
-child-specific UI and behavior. Backend-only requirements may return an entirely empty delta.
-The compiler maintains root_ui_id; preserve that root. New-node OUTPUT children are ordered IDs.
-UI containment follows application layout and navigation, not the requirement tree.
-Ancestors supply context, not additional feature tasks.
-declared_pages is the authoritative page scope. Page identity is the EXACT pages[].name,
-not an image path or image hash. page_matches maps those names to existing screen IDs.
-Use the same screen for every requirement sharing a page name, even with no image reference.
-missing_pages lists page names needing a new screen subtree. In UI output, page_assignments
-contains {name,ui_id} for new declared pages; unchanged existing assignments may be omitted.
-Never assign an undeclared page or duplicate an existing screen. Each screen corresponds to one
-page name. All UI/data/interaction calls for a requirement use the same declared page scope.
-The optional pages[].reference supplies cached visual evidence only and does not identify a page.
-Do not create login/search/booking surfaces just because an ancestor mentions them during a leaf task.
-When building shared shell structure, add only the regions needed to host the current leaf surface.
-structural_ui contains compact ancestor summaries for discovery only. Before updating an ancestor,
-request its full record with load_ui_ids, then preserve all sibling IDs and events.
-ui_tree_summary is discovery only; absent subtrees are not implicitly editable.
-Every non-root UI has ONE parent. Reusing the same surface means referencing/updating its existing
-node at its existing position, never attaching it to a second parent. Similar controls at different
-locations are distinct UI instances; reuse their data/functions where appropriate. Repeated items
-use repeat, not copied subtrees. To move a UI update both old and new parent children.
-UI kinds: screen,group,section,form,field,navigation,dialog,tabs,tab,table,row,cell,heading,link,progress,text,input,choice,action,image,list,feedback.
-Use form for a submission unit, field for a labeled input region, navigation for shared navigation,
-section for a meaningful page region, dialog for an overlay, and table/row/cell for tabular information.
-Do not mirror every DOM wrapper: each node must have a meaningful visible or interaction responsibility.
-bindings keys are semantic attributes such as label,value,options,visible,enabled,items.
-Additional semantic attributes: heading level, link destination, tab selected, progress maximum,
-cell header, action submits_form. A table contains rows, rows contain cells.
-Do not use DOM/CSS properties or framework lifecycle names.
-presentation is optional natural-language layout/visual intent. Reference images are optional;
-requirement.pages[].analysis supplies visual evidence beside the exact page name and reference path.
-Use that analysis in every design phase and preserve its relevant layout and visual cues.
-Pictures define complete visible UI structure; requirements define ownership and functional behavior.
+COMMON = """Design a technology-neutral frontend IR. Return the JSON delta required by this phase's schema.
+Use stable existing IDs; prefix new IDs with the current requirement ID and a meaningful suffix.
+existing.ui contains nested complete UI records; output children references use IDs.
+Use ui_updates for existing nodes and complete upserts for new records. Omitted fields remain unchanged.
+Modify only nodes supplied in existing.ui. Summaries locate nodes but are not full editable records.
+To read omitted nodes, return load_ui_ids and otherwise empty operations; then continue after loading.
+Preserve unrelated sibling controls, data and events. Implement only the current requirement's behavior.
 """
 
-STATE_CONTRACT = """scope_ui_id=null means shared application data; otherwise local to that UI subtree instance.
-Only bind/read/write scoped data from within its owner subtree. A shared function reused across
-screens needs explicit typed inputs or shared data; do not capture a different screen's local state.
-Values: {kind:literal,value:JSON}, or {kind:data|input|result|item,id:string,path?:[string|integer]}.
-UI bindings use literal/data/item only. input refers to current event payload/function input semantic_id.
-result refers to an earlier local call ID and its output semantic_id in path[0]. item refers to a
-current/ancestor repeat UI ID. No executable expressions; derived values use ordinary functions.
-Fields: semantic_id,name,type,required,nullable,description. Types use scalar/array/named exactly
-as backend IR. Scalars: string,integer,number,boolean,date,datetime,json,uuid.
-Reuse backend named types; put only frontend-specific definitions in types.
-"""
-EVENT_CONTRACT = """Each UI owns events:[]; events are embedded records, never a separate top-level table.
-An event keeps its stable id and DIRECT requirement_ids independently from its UI owner.
-"""
-CAPABILITY_CONTRACT = """The backend API catalog is the capability boundary. For every required server behavior with no
-compatible API, emit pending_capabilities in data/interaction instead of hiding the gap
-only in function spec. Fields: stable id (<prefix>capability.<operation>), requirement_ids, capability,
-reason, function_ids (empty until known). Reuse supplied pending IDs for the same missing capability;
-include affected frontend function IDs once designed. Preserve unrelated gaps.
-Delete a gap only if a supplied existing API fully supports it and the affected interaction is wired;
-local simulation, disabled UI or a local logout that leaves the server session valid is not resolution.
-Do not invent API IDs or claim unsupported server effects. Local-only behavior needs no gap.
+VALUES = """Bindings use {kind:literal,value:JSON} or {kind:data|item,id,path?:[string|integer]}.
+Types use scalar/array/named; named IDs must exist in supplied or newly defined types.
+scope_ui_id=null is application data; otherwise the state belongs to that UI subtree.
+Use state only inside its scope; pass typed inputs to functions reused outside it.
 """
 
 PROMPTS = {
     "ui": COMMON + """
-Pass 1: execute the current page mode specified in these instructions, then bind requirement UI.
-requirement.pages retains the original declared page fields and adds analysis for each page.
-A page without reference uses its first parsed visual reference's cached analysis, if available.
-NEW_PAGE with visual evidence: the image is authoritative for the COMPLETE visible component tree.
-Inspect ALL regions, headings, text, images, navigation, forms, fields, labels, actions, lists/tables,
-feedback and overlays, including UI unrelated to this requirement's description or scenarios.
-Organize every visible meaningful UI into the page's full semantic hierarchy; do not stop once
-the current requirement's controls are covered. Avoid decorative DOM wrappers and invented behavior.
-Set requirement_ids=[] on new UI; ui_requirement_updates identifies only nodes involved in
-the current requirement. Structural ancestors are uses, not automatic direct owners.
-NEW_PAGE without evidence: derive the necessary UI from requirements; do not invent unseen screens.
-BIND_ONLY: this page/reference pair has already been parsed. Return no UI creations, updates,
-deletions or page assignments. Return ui_requirement_updates with descriptions for
-the relevant nodes of the existing tree, including replacements for earlier descriptions.
-NEW_PAGE_STATE: a new reference for the SAME page represents another state. Compare its full
-visual evidence with baseline_page_states (the first parsed reference and UI) AND the current
-page tree. Identify additions, reuse already-added controls, and insert only missing nodes under
-existing parents. Preserve baseline controls absent from the new state: absence is not deletion.
-Describe state-dependent visibility/selection in presentation/spec; behavior is designed later.
-After every mode, including first-time page creation and new-state parsing, return
-ui_requirement_updates for the affected nodes using excerpts from the current description/scenario
-steps. Apply these bindings after constructing the subtree, without assigning
-the whole page tree to the requirement. Use load_ui_ids before binding unloaded nodes.
-Existing UI updates may use set/unset for schema-listed fields, children and bindings.
-New UI records must include events:[]; ui_updates.events is absent from this pass's schema.
-Each page is a screen-rooted subtree of the application UI tree. When page_ids is populated,
-inspect and update the loaded corresponding page subtree, preserving unrelated controls.
-For each missing_pages name, create a new screen subtree and attach it via ui_updates.children,
-then return its page_assignments entry with the exact declared page name. Use ui_tree_summary
-to locate shared application structure; never substitute an undeclared page by semantic similarity.
-Give screens logical routes when needed. Establish shared navigation/header/footer regions once.
-NON_LEAF requirements obey the same current page mode; bind their shared responsibilities precisely.
-Screen routes and UI presentation are optional prose/locations; the prohibition on HTTP routes
-means backend endpoints, not the screen's route field.
-For visual parsing, include every visible semantic region, text, control, list and feedback.
-Place all new nodes into the tree by adding child IDs to existing parents with ui_updates.
-Reuse the existing screen/surface rather than creating a new screen for every requirement.
-Define visual composition and static bindings now; leave dynamic bindings for the next pass.
-Do not create data/events/functions. Preserve already established shared layouts and sibling nodes.
+Task: build/refine the page's semantic UI tree and bind relevant nodes to this requirement.
+Page identity is requirement.pages[].name. Analysis appears next to its reference path.
+NEW_PAGE: with analysis, build ALL visible meaningful UI, including regions unrelated to this
+requirement. Without analysis, derive required UI from the description/scenarios.
+NEW_PAGE_STATE: compare analysis with baseline_page_states and the current page tree. Insert
+missing state-specific nodes, preserving controls absent from this image and existing node IDs.
+BIND_ONLY: create/update/delete no visual structure; only bind relevant existing UI nodes.
+Use concise English snake_case UI names. Include meaningful regions, forms, fields, text,
+actions, navigation, lists and feedback; omit decorative wrappers. New UI has events:[] and
+requirement_ids:[]. Static bindings and presentation describe visual intent, not business logic.
+For a new page, return page_assignments {name,ui_id}; attach its screen via ui_updates.children.
+children updates use {remove:[IDs],add:[{id,before_id?:ID|null}]}; omitted before_id appends.
+Existing visual fields use set/unset; bindings use {set:{attribute:value},remove:[attributes]}.
+After building or selecting the subtree, return ui_requirement_updates
+{id,requirement_id,description} for ONLY nodes implementing this requirement. Extract description
+from its description/scenario steps to state each node's responsibility. This operation adds the
+requirement ID and replaces description, while preserving prior owners. Do not create data/functions.
 """,
-    "data": COMMON + """
-Pass 2: define typed frontend data and UI bindings for this requirement's committed UI.
-Always return upserts.ui=[] and deletes.ui=[]. ui_updates supports only bindings,
-set.repeat and unset:["repeat"]. No children/events or other set fields, including spec.
-Use the same declared page subtree selected/created by UI; do not switch pages or reconstruct UI.
-Reuse existing state when its meaning, lifecycle and type match. Use local subtree scope by default;
-promote genuinely shared state to the nearest shared ancestor or application scope.
-Cover user input, display results, loading, empty/error/selection states as requirements need them.
-Include initialization rules in data spec. Omitted initial means uninitialized, not null.
-Use supplied backend API types for data crossing the API boundary, preserving named type IDs.
-Complete repeat source and stable item keys, dynamic visible/enabled/value/items bindings.
-Do not duplicate state merely to store a label or a formatting convenience. Use literals for static
-content; store derived values only when their lifecycle requires persistence. Describe derivation
-in data spec when state is involved; function behavior and UI behavioral spec belong to interaction.
-Never insert code or expression strings. Do not create events or functions yet.
+    "data": COMMON + VALUES + """
+Task: design state needed by this requirement and connect it to the committed UI.
+Upsert data and frontend types. Reuse matching state by its ID; avoid duplicate or derived state
+without a lifecycle need. State spec explains meaning, initialization and lifecycle.
+UI updates may change bindings and repeat only. bindings uses {set:{attribute:value},remove:[attributes]};
+repeat defines a data source and stable item key. Cover input values, displayed results,
+loading/error/empty/selection states as needed. Keep static text literal.
+No UI topology, events, functions, API calls or server capability analysis in this phase.
 """,
-    "interaction": COMMON + """
-Pass 3: update events through ui_updates.events and connect ordered frontend function calls.
-Always return upserts.ui=[] and deletes.ui=[]. ui_updates supports only events,
-bindings and set.spec. No children/unset or other set fields; preserve repeat and presentation.
-Use the same committed page subtree as UI and Data; preserve its node identities and containment.
-Complete the full interaction: payload -> function arguments -> state reads -> backend API calls ->
-result/state writes -> bound UI, including initialization/enter, derived state recomputation,
-local-only actions, navigation and applicable success/failure/loading/empty behavior.
-Reuse an existing function only when its interface and responsibilities match; otherwise create one.
-Embedded events use id,name,spec,requirement_ids,payload fields,handlers (ordered FUNC calls only); no ui_id.
-An event can implement a requirement independently of the containing UI. Preserve other requirements' events.
-Functions have inputs/outputs, direct reads/writes of data IDs, and ordered calls (FUNC or API).
-API target_id must copy a supplied backend API ID exactly. arguments keys are its INPUT semantic_ids.
-Never call backend FUNC/DB or pass backend trusted context as client arguments. Copy output types.
-Each function spec must state how inputs/results become outputs/state, conditions, navigation targets,
-and applicable error, reentry/concurrency rules. reads/writes lists alone are not behavior.
-Call failures stop the list unless caller spec explicitly defines handling; never use a skipped result
-unconditionally. Specify call interleaving with local computations in spec; no executable step DSL.
-Preserve shared function behavior for its original requirements when updating it.
-This pass generates behavior; do not audit or reject the existing design.
+    "interaction": COMMON + VALUES + """
+Task: connect UI events to frontend functions, state changes and supplied backend APIs.
+Upsert functions and any required types. UI updates may change events, bindings and spec only.
+Event updates use {upserts:[complete events],deletes:[event IDs]}. Events are embedded in UI;
+each has its own requirement_ids and ordered FUNC handlers. Preserve unrelated events.
+Functions have typed inputs/outputs, reads/writes of data IDs and ordered FUNC/API calls.
+Function spec explains local computation, validation, call conditions, result-to-state updates,
+navigation and failure/loading behavior. input/result values refer to input or earlier call IDs.
+Use exact supplied API IDs and request semantic_ids; never call backend FUNC/DB from the client.
+Reuse existing functions by ID when their responsibility and signature match.
+Emit pending_capabilities only for required server behavior unsupported by supplied APIs; include
+affected function IDs. Resolve a gap only after wiring a supporting API. Do not simulate server success.
+Do not create UI nodes, change containment or remove another requirement's events.
 """,
 }
-
-
-PROMPTS["data"] += STATE_CONTRACT + CAPABILITY_CONTRACT
-PROMPTS["interaction"] += STATE_CONTRACT + EVENT_CONTRACT + CAPABILITY_CONTRACT
-
-
-# Complete JSON envelopes keep examples aligned with each phase's output protocol.
-EXAMPLES: dict[str, dict[str, Any]] = {}
-for _phase, _tables in PHASE_TABLES.items():
-    EXAMPLES[_phase] = {
-        "upserts": {table: [] for table in _tables},
-        "ui_updates": [], "deletes": {table: [] for table in _tables},
-        **({"reuse_ids": []} if _phase != "ui" else {}),
-        "implements_ids": [], "load_ui_ids": [],
-        **({"page_assignments": [], "ui_requirement_updates": []} if _phase == "ui" else {}),
-    }
-EXAMPLES["ui"]["upserts"]["ui"] = [{
-    "id": "REQ-1.ui.heading", "name": "page_heading", "kind": "heading",
-    "spec": "Page heading.", "requirement_ids": [], "children": [],
-    "bindings": {"label": {"kind": "literal", "value": "Settings"}}, "events": [],
-}]
-EXAMPLES["ui"]["ui_updates"] = [{"id": "ui.settings", "children": {
-    "remove": [], "add": [{"id": "REQ-1.ui.heading", "before_id": None}]}}]
-EXAMPLES["ui"]["ui_requirement_updates"] = [{
-    "id": "REQ-1.ui.heading", "requirement_id": "REQ-1",
-    "description": "The Settings page displays the Settings heading.",
-}]
-EXAMPLES["data"]["upserts"]["data"] = [{
-    "id": "REQ-1.data.email", "name": "email", "type": {"kind": "scalar", "name": "string"},
-    "nullable": False, "spec": "Editable email input, initially empty.",
-    "requirement_ids": ["REQ-1"], "scope_ui_id": "ui.settings", "initial": "",
-}]
-EXAMPLES["data"]["ui_updates"] = [{"id": "ui.email", "bindings": {
-    "set": {"value": {"kind": "data", "id": "REQ-1.data.email"}}, "remove": []}}]
-EXAMPLES["interaction"]["upserts"]["functions"] = [{
-    "id": "REQ-1.fn.clear_email", "spec": "Set email to the empty string.",
-    "requirement_ids": ["REQ-1"], "inputs": [], "outputs": [],
-    "reads": [], "writes": ["REQ-1.data.email"], "calls": [],
-}]
-EXAMPLES["interaction"]["ui_updates"] = [{"id": "ui.clear_email", "set": {
-    "spec": "Clear the email when activated."}, "events": {"upserts": [{
-        "id": "REQ-1.event.clear_email", "name": "activate", "spec": "Clear the current email.",
-        "requirement_ids": ["REQ-1"], "payload": [], "handlers": [{
-            "id": "call.clear_email", "kind": "FUNC", "target_id": "REQ-1.fn.clear_email", "arguments": {}}],
-    }], "deletes": []}}]
-for _phase in PROMPTS:
-    PROMPTS[_phase] += "\nComplete output example (assume referenced existing UI is loaded on the declared Settings page; copy actual supplied IDs):\n" + json.dumps(EXAMPLES[_phase], ensure_ascii=False)
