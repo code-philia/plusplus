@@ -181,15 +181,12 @@ class RequirementPreprocessor:
         if not isinstance(value, list):
             errors.append(_format_error("ARC1108", "pages must be a list.", node_id=node_id, source=source))
             return []
-        pages, names = [], set()
+        pages = []
         for page in value:
             if not isinstance(page, dict) or set(page) - {"name", "reference"} or not isinstance(page.get("name"), str) or not page["name"].strip():
                 errors.append(_format_error("ARC1108", "Each page needs a nonempty name and optional reference.", node_id=node_id, source=source))
                 continue
             name = page["name"].strip()
-            if name in names:
-                errors.append(_format_error("ARC1108", f"Duplicate page name: {name}", node_id=node_id, source=source))
-                continue
             row = {"name": name}
             reference = page.get("reference")
             if reference is not None:
@@ -198,7 +195,6 @@ class RequirementPreprocessor:
                     continue
                 row["reference"] = reference.strip()
             pages.append(row)
-            names.add(name)
         return pages
 
     @staticmethod

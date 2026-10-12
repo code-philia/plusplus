@@ -107,7 +107,7 @@ class Compiler:
                 generated = await asyncio.to_thread(ValidationPreparationPass(model, request.output_dir).generate, requirement_ir)
                 result.artifacts.update(generated)
                 ProjectGitHistory(request.output_dir).commit("7 external validation data preparation", [
-                    ".arc/validation", "backend/src/validation", "backend/package.json", "package.json"])
+                    ".arc/validation", "backend/src/validation", "backend/package.json", "package.json", "frontend/index.html"])
             except Exception as exc:
                 result.ok = False
                 await self._log("Compiler", f"Validation preparation failed: {exc}", "error")

@@ -9,6 +9,7 @@ from compiler.build.stage import ProjectBuilder
 from model.contracts import StructuredModel
 from model.structured import BaseStructuredAgent
 from utils.jsonio import append_jsonl, write_json_atomic
+from .runtime import HTML_TAG, RUNTIME_PATH, normalize_environment, render_runtime_source
 
 
 SEED_PATH = "backend/src/validation/seed.ts"
@@ -49,14 +50,16 @@ When returning the completed source use request_files:[]. Compiler build errors 
 """
 
 
-def _start_source(fingerprint: str, timezone: str | None) -> str:
+def _start_source(fingerprint: str, environment: dict[str, Any]) -> str:
     return '''// Optional validation startup. Runs only through the configured application start command.
 import { fileURLToPath } from "node:url";
 import { createDatabaseClient } from "../db/client.js";
 import { initializeDatabase } from "../db/initialize.js";
+import { installValidationRuntime } from "./runtime.js";
 
 process.env.DATABASE_URL ??= fileURLToPath(new URL("../../data/validation.db", import.meta.url));
 TIMEZONE
+const environment = ENVIRONMENT as const;
 const fingerprint = FINGERPRINT;
 const client = createDatabaseClient();
 try {
@@ -64,6 +67,7 @@ try {
   client.connection.exec('CREATE TABLE IF NOT EXISTS "__arc_validation_seed" (fingerprint TEXT PRIMARY KEY)');
   client.connection.exec("BEGIN IMMEDIATE");
   try {
+    installValidationRuntime(client.connection, environment);
     const applied = client.connection.prepare('SELECT fingerprint FROM "__arc_validation_seed" LIMIT 1').get() as { fingerprint: string } | undefined;
     if (applied && applied.fingerprint !== fingerprint) {
       throw new Error("Validation fixture definition changed; choose a fresh DATABASE_URL.");
@@ -83,8 +87,8 @@ try {
 }
 // Dynamic import ensures seeding finishes before any server module executes.
 await import("../server.js");
-'''.replace("FINGERPRINT", json.dumps(fingerprint)).replace(
-        "TIMEZONE", "process.env.TZ = " + json.dumps(timezone) + ";" if timezone else "")
+'''.replace("FINGERPRINT", json.dumps(fingerprint)).replace("ENVIRONMENT", json.dumps(environment, ensure_ascii=False)).replace(
+        "TIMEZONE", "process.env.TZ = " + json.dumps(environment["timezone"]) + ";" if environment.get("timezone") else "")
 
 
 def disable_validation_startup(root: Path) -> None:
@@ -98,6 +102,12 @@ def disable_validation_startup(root: Path) -> None:
     if package.get("scripts", {}).get("start") == START_COMMAND:
         package["scripts"]["start"] = state["original_backend_start"]
         write_json_atomic(backend, package)
+    for relative in ("frontend/index.html", "frontend/dist/index.html"):
+        html = root / relative
+        if html.is_file():
+            content = html.read_text(encoding="utf-8")
+            if HTML_TAG in content:
+                html.write_text(content.replace(HTML_TAG, ""), encoding="utf-8")
     state["enabled"] = False
     write_json_atomic(marker, state)
 
@@ -116,7 +126,7 @@ class ValidationPreparationPass:
         if any(not isinstance(row, dict) for row in requirement_ir.get("data", [])):
             raise ValueError("Each ROOT.data record must be an object")
         seed_data = [row for row in requirement_ir.get("data", []) if row.get("lifecycle") == "SEED"]
-        environment = requirement_ir.get("environment", {})
+        environment = normalize_environment(requirement_ir.get("environment", {}))
         schema_path = self.root / ".arc/design/database/schema.json"
         if not schema_path.is_file() or not (self.root / "backend/src/server.ts").is_file():
             raise ValueError("Validation preparation requires an implemented, initialized application")
@@ -138,19 +148,19 @@ class ValidationPreparationPass:
             for path in (self.root / directory).rglob("*"):
                 if path.is_file() and self.root in path.resolve().parents and path.suffix in {".ts", ".sql", ".json"}:
                     relative = path.relative_to(self.root).as_posix()
-                    if relative not in {SEED_PATH, START_PATH}:
+                    if relative not in {SEED_PATH, START_PATH, RUNTIME_PATH}:
                         catalog[relative] = path
         loaded = {path for path in catalog if path.startswith(("backend/src/db/", "backend/sql/"))}
         loaded.add("backend/src/server.ts")
         for path in ("backend/src/app.ts",):
             if path in catalog:
                 loaded.add(path)
-        fingerprint = hashlib.sha256(json.dumps({"data": seed_data,
+        fingerprint = hashlib.sha256(json.dumps({"data": seed_data, "environment": environment,
             "schema": json.loads(schema_path.read_text(encoding="utf-8"))}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         seed_fingerprint = fingerprint
         originals = {path: (self.root / path).read_bytes() if (self.root / path).is_file() else None
-                     for path in (SEED_PATH, START_PATH, "backend/package.json", "package.json",
-                                  MARKER, ".arc/validation/environment.json")}
+                     for path in (SEED_PATH, START_PATH, RUNTIME_PATH, "backend/package.json", "package.json",
+                                  "frontend/index.html", "frontend/dist/index.html", MARKER, ".arc/validation/environment.json")}
         self.root.joinpath(SEED_PATH).parent.mkdir(parents=True, exist_ok=True)
         requests: list[str] = []
 
@@ -170,7 +180,14 @@ class ValidationPreparationPass:
                 return ["Export seedValidation(client: DatabaseClient): Promise<void>"]
             (self.root / SEED_PATH).write_text(source, encoding="utf-8")
             seed_fingerprint = hashlib.sha256((fingerprint + source).encode()).hexdigest()
-            (self.root / START_PATH).write_text(_start_source(seed_fingerprint, environment.get("timezone")), encoding="utf-8")
+            (self.root / START_PATH).write_text(_start_source(seed_fingerprint, environment), encoding="utf-8")
+            (self.root / RUNTIME_PATH).write_text(render_runtime_source(), encoding="utf-8")
+            html_path = self.root / "frontend/index.html"
+            html = html_path.read_text(encoding="utf-8")
+            if HTML_TAG not in html:
+                if "<head>" not in html:
+                    return ["Frontend HTML must contain a head element for synchronous validation bootstrap"]
+                html_path.write_text(html.replace("<head>", "<head>\n    " + HTML_TAG, 1), encoding="utf-8")
             build = ProjectBuilder(self.root).build()
             if not build.ok:
                 return build.errors
@@ -203,7 +220,7 @@ class ValidationPreparationPass:
             write_json_atomic(root_package_path, root_package)
             state = {"enabled": True, "original_backend_start": original_start,
                      "fingerprint": seed_fingerprint, "seed_ids": [row["id"] for row in seed_data],
-                     "startup": START_PATH, "seed": SEED_PATH, "executed": False}
+                     "startup": START_PATH, "seed": SEED_PATH, "runtime": RUNTIME_PATH, "executed": False}
             write_json_atomic(self.root / MARKER, state)
             write_json_atomic(self.root / ".arc/validation/environment.json", environment)
         except Exception:
@@ -215,4 +232,4 @@ class ValidationPreparationPass:
                     target.write_bytes(content)
             raise
         return {"validation_preparation": str(self.root / MARKER), "validation_seed": str(self.root / SEED_PATH),
-                "validation_startup": str(self.root / START_PATH)}
+                "validation_startup": str(self.root / START_PATH), "validation_runtime": str(self.root / RUNTIME_PATH)}
