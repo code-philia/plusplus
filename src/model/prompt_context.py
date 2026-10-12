@@ -7,6 +7,7 @@ from typing import Any
 
 
 STAGE_TASKS = {
+    "arc_validation_seed": "Generate startup SEED data code for a completed application using its final database and business implementation; external validation tests are unavailable.",
     "arc_database_entities": "Identify or reuse entities for the current requirement.",
     "arc_database_fields": "Add the current requirement's fields to the selected entities.",
     "arc_database_relationships": "Design relationships for the focus entity using the supplied requirements.",
@@ -68,6 +69,8 @@ STAGE_GROUPS = {
 
 
 def _stage_family(schema_name: str) -> str:
+    if schema_name == "arc_validation_seed":
+        return "validation_preparation"
     if schema_name.startswith("arc_database_"):
         return "database"
     if schema_name.startswith("arc_backend_"):

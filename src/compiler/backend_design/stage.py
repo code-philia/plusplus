@@ -213,7 +213,8 @@ class BackendDesignPass:
             while ancestor in nodes and ancestor not in seen_ancestors:
                 seen_ancestors.add(ancestor)
                 self.inherited_context.insert(0, {'requirement_id': ancestor,
-                    'requirement': copy.deepcopy(nodes[ancestor]),
+                    'requirement': {key: copy.deepcopy(value) for key, value in nodes[ancestor].items()
+                                    if key not in {'environment', 'data'}},
                     'scenario_ids': sorted(_scenario_ids(nodes[ancestor], ancestor))})
                 ancestor = nodes[ancestor].get('parent_id')
             if event == 'parent':

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -80,6 +81,11 @@ class RequirementPreprocessor:
             "folder_nodes": folder_ids,
             "nodes": dict(sorted(nodes.items())),
         }
+        # External validation setup is preserved as metadata, not expanded into
+        # requirement descriptions or the internal TDD task scope.
+        for key in ("environment", "data"):
+            if key in payload:
+                requirement_ir[key] = copy.deepcopy(payload[key])
         dependency_graph = {
             "requirement_dependencies": dict(sorted(requirement_dependencies.items())),
             "atomic_dependencies": dict(sorted(effective_dependencies.items())),
@@ -145,6 +151,9 @@ class RequirementPreprocessor:
             "scenarios": scenarios,
             "source": {"document": source_name, "pointer": pointer},
         }
+        for key in ("environment", "data"):
+            if key in raw:
+                node[key] = copy.deepcopy(raw[key])
         if node_id not in nodes:
             nodes[node_id] = node
             node_order.append(node_id)

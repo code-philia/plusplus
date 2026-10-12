@@ -102,12 +102,16 @@ def build_compile_parser(subparsers) -> None:
                         help="Continue only unstarted TDD requirements in the existing output project")
     parser.add_argument("--stop-after-lowering", action="store_true",
                         help="Stop after database/backend/frontend design and lowering, before test generation and TDD")
+    parser.add_argument("--prepare-validation", action="store_true",
+                        help="After implementation, use the model to generate SEED data code and install automatic validation startup")
     parser.set_defaults(func=cmd_compile)
 
 
 async def cmd_compile(args: argparse.Namespace) -> int:
     """Execute compile subcommand."""
     _ensure_dotenv_loaded()
+    if args.prepare_validation and args.stop_after_lowering:
+        raise ValueError("--prepare-validation requires completed implementation; cannot combine with --stop-after-lowering")
     web_port = _resolve_web_port(args.port)
     
     # Normalize paths
@@ -185,6 +189,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         start_from=args.start_from,
         resume=args.resume,
         stop_after_lowering=args.stop_after_lowering,
+        prepare_validation=args.prepare_validation,
     ))
     result = outcome.to_dict()
     

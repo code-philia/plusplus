@@ -15,6 +15,7 @@ class CompilationRequest:
     start_from: str = "zero"
     resume: bool = False
     stop_after_lowering: bool = False
+    prepare_validation: bool = False
 
 
 @dataclass(slots=True)

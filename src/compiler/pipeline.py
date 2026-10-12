@@ -80,6 +80,11 @@ class Compiler:
         self._model = model
 
     async def compile(self, request: CompilationRequest) -> CompilationResult:
+        if request.prepare_validation and request.stop_after_lowering:
+            raise ValueError("Validation preparation requires completed implementation")
+        from compiler.validation_preparation import ValidationPreparationPass, disable_validation_startup
+        # A previously prepared deployment must not seed during internal TDD.
+        disable_validation_startup(request.output_dir.expanduser().resolve())
         run_id = uuid.uuid4().hex
         set_run_id(run_id)
         os.environ["ARC_WORKSPACE_ROOT"] = str(request.output_dir.expanduser().resolve())
@@ -92,6 +97,20 @@ class Compiler:
         runtime.events.mark_run_started("ARC compilation started.", phase="PROJECT")
         await self._log("Compiler", "ARC compilation started.")
         result = await self._run_compile(request)
+        if result.ok and request.prepare_validation:
+            await self._log("Compiler", "Generating external validation seed code from the completed application.")
+            try:
+                model = self._model or Model.from_env()
+                if hasattr(model, "set_usage_path"):
+                    model.set_usage_path(request.output_dir / ".arc/model_usage.jsonl")
+                requirement_ir = json.loads((request.output_dir / ".arc/preprocessing/requirement_ir.json").read_text(encoding="utf-8"))
+                generated = await asyncio.to_thread(ValidationPreparationPass(model, request.output_dir).generate, requirement_ir)
+                result.artifacts.update(generated)
+                ProjectGitHistory(request.output_dir).commit("7 external validation data preparation", [
+                    ".arc/validation", "backend/src/validation", "backend/package.json", "package.json"])
+            except Exception as exc:
+                result.ok = False
+                await self._log("Compiler", f"Validation preparation failed: {exc}", "error")
         result.run_id = run_id
         if result.ok:
             if result.failed_nodes:

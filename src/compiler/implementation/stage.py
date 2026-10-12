@@ -567,7 +567,8 @@ class NodeTDDOrchestrator:
         nodes = self.requirement_ir.get("nodes", {})
         if not isinstance(nodes, dict) or not isinstance(nodes.get(requirement_id), dict):
             raise KeyError(f"Unknown requirement: {requirement_id}")
-        return nodes[requirement_id]
+        return {key: value for key, value in nodes[requirement_id].items()
+                if key not in {"environment", "data"}}
 
     def _has_test(self, requirement_id: str, layer: str) -> bool:
         return any(
