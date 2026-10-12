@@ -280,7 +280,9 @@ class BackendDesignPass:
         if kind != 'API' and not pending:
             return base, api_ids
         upstream_ids = {row['caller_id'] for row in pending}
-        upstream = [copy.deepcopy(modules[key]) for key in sorted(upstream_ids)]
+        upstream = [{**module_contract(modules[key]),
+                     'calls': copy.deepcopy(modules[key].get('calls', []))}
+                    for key in sorted(upstream_ids)]
         related = _related_data(schema, rid) if kind == 'DB' else {}
         candidates = _candidates(base, rid, dependencies, set(related), str(requirement), kinds)
         # Accepted upper-layer modules occur once in upstream_modules, never again in reuse_context.
@@ -289,33 +291,45 @@ class BackendDesignPass:
         requested_types: set[str] = set()
         for expansion in range(4):
             reuse = reuse_context(base, candidates, requirement, requested_types, kinds=kinds, upstream=upstream)
-            payload = {'requirement_id': rid, 'requirement': requirement,
-                       'ancestor_rules': [{'requirement_id': row['requirement_id'],
-                                           'description': row['requirement'].get('description', ''),
-                                           'scenarios': [dict(scenario, id=scenario.get('id') or scenario.get('scenario_id')
-                                                              or f'{row["requirement_id"]}:scenario:{index + 1}')
-                                                         for index, scenario in enumerate(row['requirement'].get('scenarios', []))
-                                                         if isinstance(scenario, dict)]}
-                                          for row in self.inherited_context],
-                       'upstream_modules': upstream,
-                       'pending_module_ids': sorted({row['module_id'] for row in pending}),
-                       'reuse_context': reuse, 'context_requests_remaining': 3 - expansion}
+            payload = {'requirement': requirement}
+            reuse_payload = {key: value for key, value in reuse.items() if value}
+            if reuse_payload:
+                payload['reuse_context'] = reuse_payload
+            rules = [{'id': row['requirement_id'], 'description': row['requirement'].get('description', '')}
+                     for row in self.inherited_context if row['requirement'].get('description')]
+            if rules:
+                payload['ancestor_rules'] = rules
+            if upstream:
+                payload['upstream_modules'] = upstream
             if kind == 'DB':
                 payload['schema_slice'] = {'tables': tables}
                 loaded_tables = {row['name'] for row in tables}
-                payload['schema_index'] = [{'name': row['name'], 'description': row.get('description', '')}
-                                           for row in schema['tables'] if row['name'] not in loaded_tables]
+                schema_index = [{'name': row['name'], 'description': row.get('description', '')}
+                                for row in schema['tables'] if row['name'] not in loaded_tables]
+                if schema_index:
+                    payload['schema_index'] = schema_index
 
             decision = self._decision('design_' + kind.lower(), rid, LAYER_PROMPTS[kind],
                                       LAYER_SCHEMAS[kind], payload)
             # Context expansion is orchestration, not a semantic validation pass.
             has_design = any(decision.get(key) for key in
-                             ('new_modules', 'new_types', 'reuse_module_ids', 'resolved_calls', 'api_ids'))
+                             ('new_modules', 'new_types', 'resolved_calls', 'api_ids'))
             loaded_modules = {row['id'] for row in candidates}
-            fresh_modules = set(decision['requested_module_ids']) & modules.keys() - loaded_modules
-            fresh_types = set(decision['requested_type_ids']) & {row['id'] for row in base['types']} - {row['id'] for row in reuse['types']}
+            requested_module_ids = set(decision.get('requested_module_ids', []))
+            requested_type_ids = set(decision.get('requested_type_ids', []))
+            requested_table_names = set(decision.get('requested_tables', []))
+            fresh_modules = requested_module_ids & {key for key, row in modules.items() if row['kind'] in kinds} - loaded_modules - upstream_ids
+            fresh_types = set(decision.get('requested_type_ids', [])) & {row['id'] for row in base['types']} - {row['id'] for row in reuse['types']}
             fresh_tables = set(decision.get('requested_tables', [])) & {row['name'] for row in schema['tables']} - {row['name'] for row in tables}
-            if has_design or not (fresh_modules or fresh_types or fresh_tables) or expansion == 3:
+            requests = any(decision.get(key) for key in ('requested_module_ids', 'requested_type_ids', 'requested_tables'))
+            if requests and has_design:
+                raise ValueError('Context requests must not be combined with module/type design')
+            if requests and (requested_module_ids != fresh_modules or requested_type_ids != fresh_types
+                             or requested_table_names != fresh_tables):
+                raise ValueError('Request unloaded existing modules, types or tables only')
+            if requests and expansion == 3:
+                raise ValueError('Backend context request limit exceeded (3 expansions)')
+            if not requests:
                 return self._materialize_layer(base, rid, decision, api_ids)
             requested_types.update(fresh_types)
             requested_modules = fresh_modules
@@ -337,7 +351,7 @@ class BackendDesignPass:
             return key if '::' in key or key in modules and key not in new_ids else f'{rid}::{key}'
 
         mapping = {key: qualify(key) for key in new_ids}
-        for row in value['new_types']:
+        for row in value.get('new_types', []):
             types.setdefault(row['id'], copy.deepcopy(row))
         for source in value['new_modules']:
             module = copy.deepcopy(source)
@@ -348,7 +362,7 @@ class BackendDesignPass:
                 call['module_id'] = mapping.get(call['module_id'], qualify(call['module_id']))
             modules[module['id']] = module
         resolutions = {qualify(source): mapping.get(target, qualify(target))
-                       for source, target in value['resolved_calls'].items()}
+                       for source, target in value.get('resolved_calls', {}).items()}
         for module in modules.values():
             for call in module.get('calls', []):
                 call['module_id'] = resolutions.get(call['module_id'], call['module_id'])
@@ -367,12 +381,17 @@ class BackendDesignPass:
         modules = {row['id']: row for row in base['modules']}
         available = {key for key, module in modules.items() if module['kind'] == 'API'
                      and descendants & set(module['requirement_ids'])}
-        payload = {'requirement_id': rid, 'requirement': nodes[rid],
-                   'ancestor_context': self.inherited_context,
-                   'child_requirements': [nodes[key] for key in self.children[rid]],
-                   'available_api_ids': sorted(available),
-                   'api_contracts': [module_contract(modules[key]) for key in sorted(available)],
-                   'pending_capabilities': copy.deepcopy(self.pending_capabilities)}
+        def requirement_context(key: str) -> dict[str, Any]:
+            return {field: copy.deepcopy(value) for field, value in nodes[key].items()
+                    if field in {'id', 'name', 'description', 'scenarios'}}
+        payload = {'requirement': requirement_context(rid),
+                   'child_requirements': [requirement_context(key) for key in self.children[rid]],
+                   'api_contracts': [module_contract(modules[key]) for key in sorted(available)]}
+        if self.inherited_context:
+            payload['ancestor_rules'] = [{'id': row['requirement_id'], 'description': row['requirement'].get('description', '')}
+                                         for row in self.inherited_context if row['requirement'].get('description')]
+        if self.pending_capabilities:
+            payload['pending_capabilities'] = copy.deepcopy(self.pending_capabilities)
         payload['types'] = required_types(payload, base['types'])
 
         decision = self._decision('parent_composition', rid, PARENT_DESIGN_PROMPT,
@@ -381,7 +400,7 @@ class BackendDesignPass:
         targets = {row['id']: row for row in trial['modules']}
         for key in reachable(decision['api_ids'], targets):
             targets[key]['requirement_ids'] = sorted(set(targets[key]['requirement_ids']) | {rid})
-        for gap in decision['pending_capabilities']:
+        for gap in decision.get('pending_capabilities', []):
             gap['requirement_ids'] = sorted(set(gap['requirement_ids']) | {rid})
             self.pending_capabilities.append(gap)
         return trial

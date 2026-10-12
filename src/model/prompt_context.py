@@ -133,6 +133,27 @@ def render_section(name: str, purpose: str, payload: dict[str, Any]) -> str:
 
 
 def stage_sections(schema_name: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if schema_name in {"arc_backend_design_api", "arc_backend_design_func", "arc_backend_design_db",
+                        "arc_backend_parent_composition"}:
+        remaining = dict(payload)
+        sections = []
+        groups = [
+            ("Current task", {"requirement"}),
+            ("Inherited constraints", {"ancestor_rules"}),
+            ("Completed child requirements", {"child_requirements"}),
+            ("Upstream contracts", {"upstream_modules"}),
+            ("Existing API contracts", {"api_contracts", "types"}),
+            ("Reusable contracts and discovery", {"reuse_context"}),
+            ("Database schema", {"schema_slice", "schema_index"}),
+            ("Integration gaps and feedback", {"pending_capabilities", "validation_feedback"}),
+        ]
+        for name, keys in groups:
+            selected = {key: remaining.pop(key) for key in list(remaining) if key in keys}
+            if selected:
+                sections.append({"name": name, "purpose": "", "payload": selected})
+        if remaining:
+            sections.append({"name": "Additional context", "purpose": "", "payload": remaining})
+        return sections
     if schema_name in {"frontend_ui", "frontend_data", "frontend_interaction"}:
         remaining = dict(payload)
         sections = []

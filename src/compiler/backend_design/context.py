@@ -31,8 +31,9 @@ def module_contract(module: dict[str, Any]) -> dict[str, Any]:
     result = {key: copy.deepcopy(module[key]) for key in
               ('id', 'kind', 'path', 'method', 'authentication', 'request', 'response', 'status_code',
                'content_type', 'parameters', 'returns', 'context', 'spec') if key in module}
-    result['guarantees'] = [{key: row[key] for key in ('given', 'when', 'then')}
-                            for row in module.get('acceptance_criteria', [])]
+    if module.get('acceptance_criteria'):
+        result['guarantees'] = [{key: row[key] for key in ('given', 'when', 'then')}
+                                for row in module['acceptance_criteria']]
     return result
 
 
@@ -53,7 +54,7 @@ def reuse_context(ir: dict[str, Any], modules: list[dict[str, Any]], query: Any,
     type_catalog = sorted([row for row in ir['types'] if row['id'] not in loaded_types],
                           key=lambda row: (-len(wanted & terms(row)), row['id']))[:16]
     return {
-        'modules': copy.deepcopy(modules), 'types': types,
+        'modules': [module_contract(row) for row in modules], 'types': types,
         'module_catalog': [{key: copy.deepcopy(row[key]) for key in ('id', 'kind', 'path', 'method') if key in row}
                            | {'spec': row['spec'][:240]} for row in catalog],
         'type_catalog': [{'id': row['id'], 'kind': row['kind']} for row in type_catalog],
