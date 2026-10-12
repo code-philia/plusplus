@@ -20,6 +20,7 @@ from .glue import BackendGlueLowerer
 from .database_bindings import render_bindings
 from .module_types import attach_module_types
 from ..database_lowering.sqlite import storage_type
+from ..backend_design.validation import validate_backend_ir
 
 PROFILE = 'web-react18-tailwind4-express-drizzle-sqlite'
 
@@ -61,6 +62,9 @@ class BackendLowerer:
                 raise ValueError('Database lowering must finish before backend lowering')
             if not isinstance(default_port, int) or not 1 <= default_port <= 65535:
                 raise ValueError('Invalid backend port')
+            graph_errors = validate_backend_ir(blueprint, schema, set())
+            if graph_errors:
+                raise ValueError('; '.join(graph_errors))
             design = project_lowering_design(blueprint)
             # Tables, not ER compatibility entities, own physical bindings.
             projected_schema = {'entities': [
