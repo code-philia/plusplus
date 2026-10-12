@@ -30,8 +30,65 @@ def module_contract(module: dict[str, Any]) -> dict[str, Any]:
     """Project interfaces and their single authoritative behavior spec."""
     result = {key: copy.deepcopy(module[key]) for key in
               ('id', 'kind', 'path', 'method', 'authentication', 'request', 'response', 'status_code',
-               'content_type', 'parameters', 'returns', 'context', 'spec') if key in module}
+               'content_type', 'parameters', 'returns', 'context', 'spec', 'data_access') if key in module}
     return result
+
+
+def requirement_reuse_candidates(ir: dict[str, Any], rid: str, nodes: dict[str, Any],
+                                 schema: dict[str, Any], *, kinds: set[str],
+                                 count: int = 6) -> list[dict[str, Any]]:
+    """Retrieve committed requirements by overlapping entities and business domains."""
+    from .validation import reachable
+    modules = {row['id']: row for row in ir['modules']}
+    tables = schema.get('tables', [])
+    links = schema.get('traceability', {}).get('requirements', {})
+
+    def tokens(value: Any) -> set[str]:
+        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', str(value))
+        return set(re.findall(r'[a-z0-9]+|[\u4e00-\u9fff]', text.lower()))
+
+    def features(key: str) -> tuple[set[str], set[str]]:
+        node = nodes.get(key, {})
+        text = tokens(node.get('name', '') + ' ' + node.get('description', ''))
+        entities = set(links.get(key, {}).get('tables', []))
+        entities.update(row['name'] for row in tables if key in row.get('requirement_ids', [])
+                        or tokens(row['name']) <= text)
+        owned = [row['id'] for row in modules.values() if key in row['requirement_ids']]
+        entities.update(access['table'] for target in reachable(owned, modules)
+                        for access in modules[target].get('data_access', []))
+        domains = {str(value) for field in ('domain', 'domains')
+                   for value in (node.get(field, []) if isinstance(node.get(field), list) else [node.get(field)]) if value}
+        parent = node.get('parent_id')
+        visited = set()
+        while parent in nodes and nodes[parent].get('parent_id') and parent not in visited:
+            visited.add(parent)
+            domains.add(parent)
+            parent = nodes[parent].get('parent_id')
+        return entities, domains
+
+    entities, domains = features(rid)
+    matches = []
+    owners = {owner for row in modules.values() for owner in row['requirement_ids'] if owner != rid}
+    for owner in owners:
+        other_entities, other_domains = features(owner)
+        common_entities, common_domains = entities & other_entities, domains & other_domains
+        if common_entities or common_domains:
+            matches.append({'requirement_id': owner, 'entity_overlap': sorted(common_entities),
+                            'domain_overlap': sorted(common_domains),
+                            'score': 20 * len(common_entities) + 10 * len(common_domains)})
+    matches.sort(key=lambda row: (-row['score'], row['requirement_id']))
+    matches = matches[:8]
+    scores = {row['requirement_id']: row['score'] for row in matches}
+    candidates = [row for row in modules.values() if row['kind'] in kinds and set(row['requirement_ids']) & scores.keys()]
+    # Prefer the module's own resource/responsibility over setup APIs inherited by its owner.
+    query = tokens(nodes.get(rid, {}).get('name', '') + ' ' + nodes.get(rid, {}).get('description', ''))
+    def module_score(row: dict[str, Any]) -> int:
+        direct = {access['table'] for access in row.get('data_access', [])}
+        own = tokens(row['id'].split('::')[-1] + ' ' + row.get('path', ''))
+        return (100 * len(entities & direct) + 5 * len(query & own)
+                + max(scores.get(owner, 0) for owner in row['requirement_ids']))
+    candidates.sort(key=lambda row: (-module_score(row), row['id']))
+    return copy.deepcopy(candidates[:count])
 
 
 def reuse_context(ir: dict[str, Any], modules: list[dict[str, Any]], query: Any,

@@ -397,14 +397,10 @@ class Compiler:
                 await self._log("Compiler", warning, "warning")
             artifacts.update(artifact_store.write_design(design_ir=design.design_ir))
             if not design.ok:
+                # Fatal errors are limited to invalid input/schema. A failed model
+                # unit is isolated by BackendDesignPass and represented as SKIPPED.
                 failed_nodes = sorted(node_id for node_id, state in states.items() if state == "FAILED")
-                if not failed_nodes:
-                    failed_nodes = list(preprocessing.requirement_ir.get("atomic_units", []))
-                await self._log(
-                    "Compiler",
-                    "Backend design incomplete after correction attempts; stopping before backend lowering. See per-call feedback in .arc/design/backend/passes.",
-                    "error",
-                )
+                await self._log("Compiler", "Backend design has fatal input errors; stopping before backend lowering.", "error")
                 return CompilationResult(ok=False, root_id=root_id, states=states,
                                          failed_nodes=failed_nodes, artifacts=artifacts)
 
