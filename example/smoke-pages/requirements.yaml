@@ -1,0 +1,208 @@
+id: ROOT
+name: Train ticket website
+type: FOLDER
+dependencies: []
+pages:
+  - name: home
+  - name: registration
+description: >-
+  Visitors can access the home page, register an account, search published trains
+  by stations and date, and open the My 12306 menu. The website contains a home
+  page at / and a registration page at /register. Use the exact control labels
+  shown in the reference images, including their capitalization.
+environment:
+  benchmark_now: '2030-06-15T00:00:00+07:00'
+  timezone: Asia/Ho_Chi_Minh
+  locale: en-US
+  clock: Client and server start at benchmark_now and advance together with elapsed time. Train dates and times use the declared timezone.
+data:
+  - id: DATA-STATIONS
+    lifecycle: SEED
+    entity: station directory
+    properties:
+      locations:
+        - Hanoi
+        - Da Nang
+  - id: DATA-TIMETABLE
+    lifecycle: SEED
+    entity: published train services
+    properties:
+      services:
+        - number: SE1
+          from_station: Hanoi
+          to_station: Da Nang
+          date: '2030-06-15'
+          departure: '09:00'
+          arrival: '21:00'
+          published: true
+  - id: DATA-ACCOUNTS-SEED
+    lifecycle: SEED
+    entity: existing registered accounts
+    properties:
+      accounts:
+        - username: smoke_existing
+          email: smoke_existing@example.com
+          password: Valid-password-123!
+      persistence: Exists in the database before the first request; server restart preserves the account without inserting duplicates.
+  - id: DATA-ACCOUNTS-CREATED
+    lifecycle: CREATED
+    entity: visitor account
+    properties:
+      identity: Unique username and email address supplied by the scenario.
+      password: Valid-password-123!
+      creation: Registration UI at /register; accept the agreement and submit Next step.
+      persistence: Successful registration stores the account in the database; reload and server restart preserve it.
+children:
+  - id: REQ-1
+    name: Access the home page and registration entry
+    type: ATOMIC
+    dependencies: []
+    pages:
+      - name: home
+        reference: ./reference/homepage.png
+    description: >-
+      At /, display the railway branding shown in the reference image:
+      “中国铁路12306” and “12306 CHINA RAILWAY”. Provide the shared navigation and
+      a “Register” link to /register, together with a search form containing
+      editable station inputs labeled “From” and “To”. Match the reference's
+      navigation labels, including “Home”, “Booking”, “Travel guides”, “Login”,
+      “My 12306”, “简体中文” and “Contact us”. Visitors can enter station names in
+      From and To and follow Register to the registration page. This requirement
+      covers the home-page presentation, editable station fields and registration
+      navigation; train-search behavior is specified in REQ-3.
+    data:
+      requires:
+        - DATA-STATIONS
+    scenarios:
+      - name: View the home page and enter stations
+        steps:
+          - keyword: GIVEN
+            content: A visitor opens the website home page.
+          - keyword: WHEN
+            content: The visitor views the page and enters departure and arrival stations in From and To.
+          - keyword: THEN
+            content: The page displays the reference's railway branding, both station inputs are editable, and Register links to /register.
+  - id: REQ-2
+    name: Register a visitor account
+    type: ATOMIC
+    dependencies:
+      - REQ-1
+    pages:
+      - name: registration
+        reference: ./reference/register.png
+    description: >-
+      Visitors can register an account at /register. Display the “Create an account” page label shown in
+      the reference breadcrumb, and controls labeled “Username”, “Email address”,
+      “Password” and “Confirm Password”. Include the agreement checkbox with
+      the text “I have read and agree to abide by Terms of Service and Privacy Policy
+      of 12306.cn.”, with “Terms of Service” and “Privacy Policy” as its linked text.
+      Use “Next step” as the submission button label. All fields covered by this
+      requirement are mandatory. Username must contain 3–32 ASCII letters,
+      digits, underscores or hyphens. Email address must be valid and at most
+      254 characters. Password must contain 12–128 characters, and Confirm
+      Password must match. Username and email must be unique. A valid submission
+      saves the account on the server and displays a success message. Accounts
+      remain stored after a page reload or server restart. The server enforces
+      username and email uniqueness and rejects invalid account data without
+      creating an account; the page displays the corresponding field errors.
+      Provide a “Home” link back to /. Additional traveler fields shown in the
+      reference are not required for account creation. Acceptance may use a unique
+      username and email address with the password Valid-password-123!.
+      DATA-ACCOUNTS-SEED already exists at startup; attempts to register its username
+      or email address must be rejected without creating another account.
+    data:
+      requires:
+        - DATA-ACCOUNTS-SEED
+        - DATA-ACCOUNTS-CREATED
+    scenarios:
+      - name: Register a valid account
+        steps:
+          - keyword: GIVEN
+            content: A visitor opens /register and has an unused valid username and email address.
+          - keyword: WHEN
+            content: The visitor completes Username, Email address, Password and Confirm Password with valid values, accepts the agreement, and clicks Next step.
+          - keyword: THEN
+            content: The account is saved and a success message appears; another submission using the same username is rejected.
+      - name: Reject an account conflicting with startup data
+        steps:
+          - keyword: GIVEN
+            content: DATA-ACCOUNTS-SEED exists in the database and a visitor opens /register.
+          - keyword: WHEN
+            content: The visitor submits smoke_existing with an unused valid email address, matching valid passwords and the agreement accepted; then submits an unused valid username with smoke_existing@example.com.
+          - keyword: THEN
+            content: Both submissions are rejected with the corresponding uniqueness error, no account is created, and the preloaded account remains stored.
+  - id: REQ-3
+    name: Search published trains by stations and date
+    type: ATOMIC
+    dependencies:
+      - REQ-1
+      - REQ-2
+    pages:
+      - name: home
+        reference: ./reference/homepage.png
+    description: >-
+      Visitors can search published trains on the home page using From, To and
+      Date, then submit the form with Search. Display search results below the
+      form. The home page also displays its railway branding, navigation and
+      Register link.
+      From, To and Date are mandatory. On submission, search published trains
+      and display each train's number, departure time and arrival time. Provide
+      feedback while searching, when no results are found, and when the search
+      fails. The system must provide a searchable example: Hanoi to Da Nang on
+      2030-06-15, train SE1, departing at 09:00 and arriving at 21:00.
+      DATA-STATIONS and DATA-TIMETABLE must exist in the database at startup,
+      before any registration or search. Search reads the persisted published
+      services rather than returning an example hardcoded in the UI. Reload and
+      server restart preserve the seeded services without duplicate rows.
+    data:
+      requires:
+        - DATA-STATIONS
+        - DATA-TIMETABLE
+    scenarios:
+      - name: Search for a published train
+        steps:
+          - keyword: GIVEN
+            content: A visitor opens the home page; DATA-STATIONS and DATA-TIMETABLE were preloaded at startup, and the benchmark clock starts at 2030-06-15 00:00 Asia/Ho_Chi_Minh.
+          - keyword: WHEN
+            content: The visitor enters Hanoi in From, Da Nang in To and 2030-06-15 in Date, then clicks Search.
+          - keyword: THEN
+            content: SE1 and its departure and arrival times are displayed, and Register links to /register.
+  - id: REQ-4
+    name: My 12306 hover dropdown on the home page
+    type: ATOMIC
+    dependencies:
+      - REQ-3
+    pages:
+      - name: home
+        reference: ./reference/homepage_center.png
+    description: >-
+      Provide the “My 12306” entry in the existing home page's shared navigation.
+      Hovering over this entry opens a dropdown containing “Order center”,
+      “User information”, “Account security” and “My passengers”, in that order
+      and with the exact capitalization shown in the reference image. Keep the
+      dropdown open when the pointer moves from the entry into the dropdown;
+      close it when the pointer leaves both the entry and the dropdown region.
+      The reference image shows the menu while expanded. Opening or closing the
+      menu keeps the home-page branding, Register link, search form and search
+      results visible and usable.
+      This requirement covers menu presentation and hover interaction only;
+      implementing the business pages behind the menu items is outside scope.
+    data:
+      requires: []
+    scenarios:
+      - name: Hover to display the personal-center menu
+        steps:
+          - keyword: GIVEN
+            content: A visitor opens the home page, the navigation displays My 12306, and its dropdown is closed.
+          - keyword: WHEN
+            content: The visitor hovers over My 12306 and moves the pointer into the dropdown.
+          - keyword: THEN
+            content: The dropdown remains visible and contains Order center, User information, Account security and My passengers, in that order.
+      - name: Close the dropdown after leaving the menu region
+        steps:
+          - keyword: GIVEN
+            content: The My 12306 dropdown is open.
+          - keyword: WHEN
+            content: The visitor moves the pointer outside both the My 12306 entry and the dropdown region.
+          - keyword: THEN
+            content: The dropdown closes and the rest of the home page remains usable.
