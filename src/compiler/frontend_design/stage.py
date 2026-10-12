@@ -45,9 +45,9 @@ class FrontendIRGenerationPass:
         self.artifact_root = artifact_root
         self.log = SynchronousLog("FrontendDesignPass", workspace_root=artifact_root.resolve().parent)
         try:
-            self.output_retries = max(0, min(10, int(os.getenv("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", "2"))))
+            self.output_retries = max(0, min(10, int(os.getenv("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", "5"))))
         except ValueError:
-            self.output_retries = 2
+            self.output_retries = 5
         if hasattr(model, "set_usage_path"):
             model.set_usage_path(artifact_root / "model_usage.jsonl")
 
@@ -382,7 +382,7 @@ class FrontendIRGenerationPass:
         write_frontend_ir(self.root / "frontend_ir.json", trial)
         self.ir = trial
 
-    def _generate(self, kwargs: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    def _generate(self, kwargs: dict[str, Any], record: dict[str, Any], validate=None) -> dict[str, Any]:
         """Retry malformed JSON or output shapes before applying any design delta."""
         from compiler.backend_design.validation import shape_errors
 
@@ -404,6 +404,13 @@ class FrontendIRGenerationPass:
                              error_position=exc.pos, error_excerpt=exc.doc[max(0, exc.pos - 120):exc.pos + 120])
             else:
                 feedback = shape_errors(output, kwargs["output_schema"])
+                if not feedback and validate is not None:
+                    try:
+                        validate(output)
+                    except ValueError as exc:
+                        feedback = [str(exc), 'Correct load_ui_ids: request fewer relevant nodes, use exact '
+                                    'IDs in the current page, and return an otherwise empty delta. '
+                                    'Alternatively omit the request and use the loaded context.']
                 trace["output"] = output
                 if not feedback:
                     trace["status"] = "ACCEPTED"
@@ -439,9 +446,39 @@ class FrontendIRGenerationPass:
         record["context_requests"] = []
         self.log.info(f"MODEL_REQUEST phase=frontend_{phase} task={task_id} requirements={requirements}")
         try:
+            def validate_context(output):
+                requested = output.get('load_ui_ids', [])
+                if not requested:
+                    return
+                if any(output.get('upserts', {}).values()) or any(output.get('deletes', {}).values()) or any(
+                    output.get(key) for key in ('ui_updates', 'page_assignments', 'ui_requirement_updates')):
+                    raise ValueError('UI context requests must contain an otherwise empty delta')
+                ui = {row['id']: row for row in self.ir['ui']}
+                if set(requested) - ui.keys():
+                    raise ValueError('Context request contains unknown UI IDs')
+                active_pages = [self.active_page] if self.active_page is not None else self.nodes[requirements[0]]['pages']
+                page_ids = {row['screen_id'] for row in page_screen_matches(self.ir, active_pages)}
+                parents = {child: row['id'] for row in ui.values() for child in row['children']}
+                for key in requested:
+                    seen = set()
+                    while key in ui and key not in seen:
+                        seen.add(key)
+                        if ui[key]['kind'] == 'screen':
+                            if key not in page_ids:
+                                raise ValueError('Cannot load a page outside this requirement\'s declared pages')
+                            break
+                        key = parents.get(key)
+                rid = requirements[0]
+                previous = self.requested_ui.get(rid, set())
+                try:
+                    self.requested_ui[rid] = set(requested)
+                    self._payload(rid, phase)  # Budget validation before accepting the model reply.
+                finally:
+                    self.requested_ui[rid] = previous
+
             kwargs = {"schema_name": f"frontend_{phase}", "instructions": instructions,
                       "input_payload": payload, "output_schema": schema}
-            output = self._generate(kwargs, record)
+            output = self._generate(kwargs, record, validate_context)
             for _ in range(4):
                 requested = output.get("load_ui_ids", [])
                 if not requested:
@@ -468,7 +505,7 @@ class FrontendIRGenerationPass:
                 if phase == "ui" and baselines:
                     payload["baseline_page_states"] = baselines
                 kwargs["input_payload"] = payload
-                output = self._generate(kwargs, record)
+                output = self._generate(kwargs, record, validate_context)
             if output.get("load_ui_ids"):
                 raise ValueError("UI context request limit exceeded; design a smaller region")
             loaded = {row["id"] for row in context_ui_nodes(payload)}
@@ -497,6 +534,9 @@ class FrontendIRGenerationPass:
             record["status"] = "APPLIED"
             self.log.info(f"MODEL_APPLIED phase=frontend_{phase} task={task_id}")
         except Exception as exc:
+            # A rejected request must not poison the next phase's initial payload.
+            for rid in requirements:
+                self.requested_ui[rid] = set()
             message = describe_model_error(exc)
             record.update(status="FAILED", error=message)
             self.failures.append({"task_id": task_id, "phase": phase,
