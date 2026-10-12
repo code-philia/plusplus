@@ -182,21 +182,6 @@ class FrontendIRGenerationPass:
         context = local_context(self.ir, rid, requirement, set(related),
                                 self.requested_ui.get(rid, set()) | self.page_ui_scope.get(rid, set()),
                                 screen_matches=matches, page_root_ids={row["screen_id"] for row in matches})
-        operations = []
-        for page in pages:
-            state = self.page_parse_state.get(page["name"], {})
-            reference = image_key(page["reference"]) if page.get("reference") else None
-            exists = page["name"] in self.ir.get("page_roots", {})
-            mode = "NEW_PAGE" if not exists else "BIND_ONLY" if reference is None or reference in state.get("parsed_references", []) else "NEW_PAGE_STATE"
-            operation = {"page_name": page["name"], "reference": reference, "mode": mode,
-                         "baseline_reference": state.get("baseline_reference")}
-            if mode == "NEW_PAGE_STATE":
-                baseline = state.get("baseline_ui", [])
-                operation["baseline_ui"] = baseline
-                if state.get("baseline_reference"):
-                    next(row for row in requirement["pages"] if row["name"] == page["name"])["baseline"] = self._page_context(
-                        {"name": page["name"], "reference": state["baseline_reference"]})
-            operations.append(operation)
         owners = set(related) | {rid}
         attached = {key for owner in owners for key in self.api_owners.get(owner, [])}
         primary = [row for row in self.apis if row["id"] in attached
@@ -208,7 +193,7 @@ class FrontendIRGenerationPass:
                    "api_contracts": [self._api(row) for row in apis] if phase != "ui" else [],
                    "api_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}
                                    for row in ranked(self.apis, requirement, 24)] if phase != "ui" else [],
-                   "declared_pages": copy.deepcopy(pages), "page_operations": operations,
+                   "declared_pages": copy.deepcopy(pages),
                    "missing_pages": [page["name"] for page in pages
                                      if page["name"] not in self.ir.get("page_roots", {})],
                    "pending_capabilities": [copy.deepcopy(row) for row in self.ir["pending_capabilities"]
@@ -217,11 +202,31 @@ class FrontendIRGenerationPass:
         payload["types"] = required_types(payload, [*self.backend_types, *self.ir["types"]])
         return payload
 
+    def _page_operations(self, pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        operations = []
+        for page in pages:
+            state = self.page_parse_state.get(page["name"], {})
+            reference = image_key(page["reference"]) if page.get("reference") else None
+            exists = page["name"] in self.ir.get("page_roots", {})
+            mode = "NEW_PAGE" if not exists else "BIND_ONLY" if reference is None or reference in state.get("parsed_references", []) else "NEW_PAGE_STATE"
+            operation = {"page_name": page["name"], "reference": reference, "mode": mode,
+                         "baseline_reference": state.get("baseline_reference")}
+            if mode == "NEW_PAGE_STATE":
+                baseline = state.get("baseline_ui", [])
+                operation["baseline_ui"] = baseline
+            operations.append(operation)
+        return operations
+
     def _page_context(self, page: dict[str, Any]) -> dict[str, Any]:
         result = copy.deepcopy(page)
         result["analysis"] = {}
-        if page.get("reference"):
-            path = image_key(page["reference"])
+        reference = page.get("reference") or self.page_parse_state.get(page["name"], {}).get("baseline_reference")
+        if not reference:
+            reference = next((candidate["reference"] for node in self.nodes.values()
+                              for candidate in node.get("pages", [])
+                              if candidate["name"] == page["name"] and candidate.get("reference")), None)
+        if reference:
+            path = image_key(reference)
             for row in [*self.visuals, *self.cached_visuals]:
                 if not isinstance(row, dict) or not row.get("analysis"):
                     continue
@@ -404,20 +409,31 @@ class FrontendIRGenerationPass:
     def _call(self, phase: str, requirements: list[str], payload: dict[str, Any]) -> None:
         task_id = f"{phase}-{len(self.batches) + 1:05d}"
         schema = patch_schema(phase)
+        operations = self._page_operations(payload["requirement"]["pages"]) if phase == "ui" else []
+        instructions = PROMPTS[phase]
+        for operation in operations:
+            instructions += "\nCurrent page: " + json.dumps(operation["page_name"], ensure_ascii=False) + "; mode: " + operation["mode"] + "."
+        if phase == "ui":
+            baselines = [{"name": row["page_name"], "reference": row["baseline_reference"],
+                          "analysis": self._page_context({"name": row["page_name"], "reference": row["baseline_reference"]})["analysis"],
+                          "ui": row.get("baseline_ui", [])}
+                         for row in operations if row["mode"] == "NEW_PAGE_STATE"]
+            if baselines:
+                payload["baseline_page_states"] = baselines
         record = {"task_id": task_id, "phase": phase, "requirement_ids": requirements,
-                  "input": payload, "instructions": PROMPTS[phase], "output_schema": schema}
+                  "input": payload, "instructions": instructions, "output_schema": schema}
         started = time.monotonic()
         record["context_requests"] = []
         self.log.info(f"MODEL_REQUEST phase=frontend_{phase} task={task_id} requirements={requirements}")
         try:
-            kwargs = {"schema_name": f"frontend_{phase}", "instructions": PROMPTS[phase],
+            kwargs = {"schema_name": f"frontend_{phase}", "instructions": instructions,
                       "input_payload": payload, "output_schema": schema}
             output = self._generate(kwargs, record)
             for _ in range(4):
                 requested = output.get("load_ui_ids", [])
                 if not requested:
                     break
-                if any(output["upserts"].values()) or any(output["deletes"].values()) or output["ui_updates"] or output["implements_ids"] or output["reuse_ids"] or output.get("page_assignments") or output.get("ui_requirement_updates"):
+                if any(output["upserts"].values()) or any(output["deletes"].values()) or output["ui_updates"] or output["implements_ids"] or output.get("reuse_ids") or output.get("page_assignments") or output.get("ui_requirement_updates"):
                     raise ValueError("UI context requests must contain an otherwise empty delta")
                 known = {row["id"] for row in self.ir["ui"]}
                 if set(requested) - known:
@@ -436,6 +452,8 @@ class FrontendIRGenerationPass:
                 record["context_requests"].append({"ids": requested, "output": output})
                 self.requested_ui[requirements[0]] = set(requested)
                 payload = self._payload(requirements[0], phase)
+                if phase == "ui" and baselines:
+                    payload["baseline_page_states"] = baselines
                 kwargs["input_payload"] = payload
                 output = self._generate(kwargs, record)
             if output.get("load_ui_ids"):
@@ -450,10 +468,10 @@ class FrontendIRGenerationPass:
             if phase == "ui":
                 if {row["id"] for row in output["ui_requirement_updates"]} - (loaded | {row["id"] for row in output["upserts"]["ui"]}):
                     raise ValueError("Requirement binding must target loaded or newly created UI")
-                if payload["page_operations"] and all(row["mode"] == "BIND_ONLY" for row in payload["page_operations"]):
+                if operations and all(row["mode"] == "BIND_ONLY" for row in operations):
                     if output["upserts"]["ui"] or output["deletes"]["ui"] or output["ui_updates"] or output["page_assignments"]:
                         raise ValueError("Parsed page/reference permits requirement bindings only")
-                if any(row["mode"] == "NEW_PAGE_STATE" for row in payload["page_operations"]):
+                if any(row["mode"] == "NEW_PAGE_STATE" for row in operations):
                     if output["deletes"]["ui"] or any(row.get("children", {}).get("remove") for row in output["ui_updates"]):
                         raise ValueError("New page states must preserve previously parsed UI nodes")
             record["output"] = output
@@ -462,7 +480,7 @@ class FrontendIRGenerationPass:
             output = materialize_ui_updates(self.ir, phase, output, loaded, requirements)
             self._merge(phase, output, requirements)
             if phase == "ui":
-                self._record_page_parse(payload["page_operations"])
+                self._record_page_parse(operations)
             record["status"] = "APPLIED"
             self.log.info(f"MODEL_APPLIED phase=frontend_{phase} task={task_id}")
         except Exception as exc:

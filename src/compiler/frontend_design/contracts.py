@@ -99,7 +99,7 @@ def patch_schema(phase: str) -> dict[str, Any]:
         "upserts": obj(table_upserts),
         "ui_updates": {"type": "array", "items": update},
         "deletes": obj(table_deletes),
-        "reuse_ids": strings,
+        **({"reuse_ids": strings} if phase != "ui" else {}),
         "implements_ids": empty_array if phase == "ui" else strings,
         "load_ui_ids": strings,
         **({"page_assignments": {"type": "array", "items": obj({
@@ -144,7 +144,8 @@ replaces the prior explicit selection to allow switching regions. The compiler l
 again. Otherwise use []. At most four context requests are allowed per phase; work on a small region.
 Never edit an existing UI that has not been loaded. Missing descendants remain unchanged.
 For large trees work on the current semantic region; ask to load another region when necessary.
-For unchanged reused objects return their IDs in reuse_ids, not duplicate records.
+UI phase has no reuse_ids: bind relevant existing nodes through ui_requirement_updates.
+Behavior phases may return unchanged reused data/functions in reuse_ids, not duplicate records.
 deletes contains only IDs intentionally superseded by your design changes. Otherwise use empty lists.
 requirement_ids means DIRECT implementation, not use, tree containment or scheduling history.
 In UI phase, ui_requirement_updates explicitly binds ONLY UI directly involved in the current requirement.
@@ -227,7 +228,9 @@ Do not invent API IDs or claim unsupported server effects. Local-only behavior n
 
 PROMPTS = {
     "ui": COMMON + """
-Pass 1: execute the supplied page_operations, one declared page per call, then bind requirement UI.
+Pass 1: execute the current page mode specified in these instructions, then bind requirement UI.
+requirement.pages retains the original declared page fields and adds analysis for each page.
+A page without reference uses its first parsed visual reference's cached analysis, if available.
 NEW_PAGE with visual evidence: the image is authoritative for the COMPLETE visible component tree.
 Inspect ALL regions, headings, text, images, navigation, forms, fields, labels, actions, lists/tables,
 feedback and overlays, including UI unrelated to this requirement's description or scenarios.
@@ -237,10 +240,10 @@ Set requirement_ids=[] on new UI; ui_requirement_updates identifies only nodes i
 the current requirement. Structural ancestors are uses, not automatic direct owners.
 NEW_PAGE without evidence: derive the necessary UI from requirements; do not invent unseen screens.
 BIND_ONLY: this page/reference pair has already been parsed. Return no UI creations, updates,
-deletions or page assignments. Return ui_requirement_updates with descriptions and reuse_ids for
+deletions or page assignments. Return ui_requirement_updates with descriptions for
 the relevant nodes of the existing tree, including replacements for earlier descriptions.
 NEW_PAGE_STATE: a new reference for the SAME page represents another state. Compare its full
-visual evidence with baseline_reference/baseline_ui (the first parsed reference) AND the current
+visual evidence with baseline_page_states (the first parsed reference and UI) AND the current
 page tree. Identify additions, reuse already-added controls, and insert only missing nodes under
 existing parents. Preserve baseline controls absent from the new state: absence is not deletion.
 Describe state-dependent visibility/selection in presentation/spec; behavior is designed later.
@@ -256,7 +259,7 @@ For each missing_pages name, create a new screen subtree and attach it via ui_up
 then return its page_assignments entry with the exact declared page name. Use ui_tree_summary
 to locate shared application structure; never substitute an undeclared page by semantic similarity.
 Give screens logical routes when needed. Establish shared navigation/header/footer regions once.
-NON_LEAF requirements obey the same page_operations; bind their shared responsibilities precisely.
+NON_LEAF requirements obey the same current page mode; bind their shared responsibilities precisely.
 Screen routes and UI presentation are optional prose/locations; the prohibition on HTTP routes
 means backend endpoints, not the screen's route field.
 For visual parsing, include every visible semantic region, text, control, list and feedback.
@@ -315,7 +318,8 @@ for _phase, _tables in PHASE_TABLES.items():
     EXAMPLES[_phase] = {
         "upserts": {table: [] for table in _tables},
         "ui_updates": [], "deletes": {table: [] for table in _tables},
-        "reuse_ids": [], "implements_ids": [], "load_ui_ids": [],
+        **({"reuse_ids": []} if _phase != "ui" else {}),
+        "implements_ids": [], "load_ui_ids": [],
         **({"page_assignments": [], "ui_requirement_updates": []} if _phase == "ui" else {}),
     }
 EXAMPLES["ui"]["upserts"]["ui"] = [{
