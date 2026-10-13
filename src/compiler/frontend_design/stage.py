@@ -283,7 +283,7 @@ class FrontendIRGenerationPass:
                 "outputs": fields("outputs"),
                 **{key: row[key] for key in ("path", "method", "authentication", "status_code", "content_type")}}
 
-    def _merge(self, phase: str, output: dict[str, Any], requirements: list[str]) -> None:
+    def _merge(self, phase: str, output: dict[str, Any], requirements: list[str], *, publish: bool = True) -> dict[str, Any]:
         """Merge a region atomically while preserving tree and independent event ownership."""
         trial = copy.deepcopy(self.ir)
         for table in PHASE_TABLES[phase]:
@@ -379,8 +379,70 @@ class FrontendIRGenerationPass:
             for rid in requirements:
                 links[rid]["implements"] = sorted(key for key, row in records.items() if rid in row.get("requirement_ids", []))
                 links[rid]["uses"] = sorted(set(links[rid]["uses"]) - set(links[rid]["implements"]))
-        write_frontend_ir(self.root / "frontend_ir.json", trial)
-        self.ir = trial
+        self._check_trial(trial, phase)
+        if publish:
+            write_frontend_ir(self.root / "frontend_ir.json", trial)
+            self.ir = trial
+        return trial
+
+    @staticmethod
+    def _ignore_ui_data(output: dict[str, Any]) -> dict[str, Any]:
+        """UI describes structure; dynamic data expressions belong to the data pass."""
+        def clean(value):
+            if isinstance(value, dict):
+                if value.get('kind') in {'data', 'item', 'input', 'result'} and 'name' not in value and 'id' in value:
+                    return None
+                return {key: result for key, item in value.items()
+                        if (result := clean(item)) is not None and not (key == 'repeat' and 'source' not in result)}
+            if isinstance(value, list):
+                return [result for item in value if (result := clean(item)) is not None]
+            return value
+        return clean(copy.deepcopy(output))
+
+    @staticmethod
+    def _check_trial(trial: dict[str, Any], phase: str) -> None:
+        ui = {row['id']: row for row in trial['ui']}
+        parents = {}
+        for row in ui.values():
+            for child in row['children']:
+                if child not in ui:
+                    raise ValueError(f"Unknown UI child {child} in {row['id']}")
+                if child in parents:
+                    raise ValueError(f'UI node {child} has multiple parents')
+                parents[child] = row['id']
+        for key in ui:
+            seen = set()
+            while key in parents:
+                if key in seen:
+                    raise ValueError(f'UI containment cycle at {key}')
+                seen.add(key)
+                key = parents[key]
+        data = {row['id'] for row in trial['data']}
+        functions = {row['id'] for row in trial['functions']}
+        types = {row['id'] for row in trial['types']}
+        def check(value):
+            if isinstance(value, list):
+                for item in value:
+                    check(item)
+            elif isinstance(value, dict):
+                if value.get('kind') == 'data' and value.get('id') not in data:
+                    raise ValueError(f"Unknown UIData reference {value.get('id')}; define it in data pass or correct the binding")
+                if value.get('kind') == 'named' and value.get('type_id') not in types:
+                    raise ValueError(f"Unknown frontend type {value.get('type_id')}")
+                if phase == 'interaction' and value.get('kind') == 'FUNC' and value.get('target_id') not in functions:
+                    raise ValueError(f"Unknown frontend function {value.get('target_id')}")
+                for item in value.values():
+                    check(item)
+        if phase != 'ui':
+            check([trial['ui'], trial['data'], trial['functions'], trial['types']])
+        for row in trial['data']:
+            if row['scope_ui_id'] not in ui:
+                raise ValueError(f"Unknown data scope UI {row['scope_ui_id']}")
+        if phase == 'interaction':
+            for row in trial['functions']:
+                unknown = (set(row.get('reads', [])) | set(row.get('writes', []))) - data
+                if unknown:
+                    raise ValueError(f"Function {row['id']} references unknown data {sorted(unknown)}")
 
     def _generate(self, kwargs: dict[str, Any], record: dict[str, Any], validate=None) -> dict[str, Any]:
         """Retry malformed JSON or output shapes before applying any design delta."""
@@ -391,6 +453,10 @@ class FrontendIRGenerationPass:
             request = {**kwargs, "input_payload": copy.deepcopy(kwargs["input_payload"])}
             if feedback:
                 request["input_payload"]["output_format_feedback"] = feedback
+                request["input_payload"]["validation_feedback"] = feedback
+                previous = record.get('generation_attempts', [])
+                if previous and 'output' in previous[-1]:
+                    request["input_payload"]["previous_output"] = previous[-1]['output']
             trace = {"attempt": attempt + 1}
             try:
                 output = self.model.generate_json(**request)
@@ -407,10 +473,8 @@ class FrontendIRGenerationPass:
                 if not feedback and validate is not None:
                     try:
                         validate(output)
-                    except ValueError as exc:
-                        feedback = [str(exc), 'Correct load_ui_ids: request fewer relevant nodes, use exact '
-                                    'IDs in the current page, and return an otherwise empty delta. '
-                                    'Alternatively omit the request and use the loaded context.']
+                    except (ValueError, KeyError, TypeError) as exc:
+                        feedback = [str(exc), "Correct the rejected delta. Request unloaded UI by exact load_ui_ids with an otherwise empty delta; preserve accepted contracts."]
                 trace["output"] = output
                 if not feedback:
                     trace["status"] = "ACCEPTED"
@@ -440,6 +504,7 @@ class FrontendIRGenerationPass:
                          for row in operations if row["mode"] == "NEW_PAGE_STATE"]
             if baselines:
                 payload["baseline_page_states"] = baselines
+        instructions += "\nAll edits and bindings must target loaded or newly created UI. To modify a cross-page navigation entry, request only the exact target nodes via load_ui_ids; the compiler grants edit permission after loading. UI pass data/item/input/result references are discarded; data pass must design dynamic state and bindings."
         record = {"task_id": task_id, "phase": phase, "requirement_ids": requirements,
                   "input": payload, "instructions": instructions, "output_schema": schema}
         started = time.monotonic()
@@ -456,18 +521,6 @@ class FrontendIRGenerationPass:
                 ui = {row['id']: row for row in self.ir['ui']}
                 if set(requested) - ui.keys():
                     raise ValueError('Context request contains unknown UI IDs')
-                active_pages = [self.active_page] if self.active_page is not None else self.nodes[requirements[0]]['pages']
-                page_ids = {row['screen_id'] for row in page_screen_matches(self.ir, active_pages)}
-                parents = {child: row['id'] for row in ui.values() for child in row['children']}
-                for key in requested:
-                    seen = set()
-                    while key in ui and key not in seen:
-                        seen.add(key)
-                        if ui[key]['kind'] == 'screen':
-                            if key not in page_ids:
-                                raise ValueError('Cannot load a page outside this requirement\'s declared pages')
-                            break
-                        key = parents.get(key)
                 rid = requirements[0]
                 previous = self.requested_ui.get(rid, set())
                 try:
@@ -476,9 +529,40 @@ class FrontendIRGenerationPass:
                 finally:
                     self.requested_ui[rid] = previous
 
+            def validate_delta(output):
+                if output.get('load_ui_ids'):
+                    if context_round >= 4:
+                        raise ValueError('UI context expansion limit reached; use loaded nodes only')
+                    validate_context(output)
+                    return
+                if 'upserts' not in output:
+                    output = {**output, 'upserts': {'ui': []}, 'ui_updates': [], 'page_assignments': []}
+                if phase == 'ui':
+                    output = self._ignore_ui_data(output)
+                loaded = {row["id"] for row in context_ui_nodes(payload)}
+                known = {row["id"] for row in self.ir["ui"]}
+                changed = {row["id"] for row in output.get("upserts", {}).get("ui", [])}
+                changed.update(output.get("deletes", {}).get("ui", []))
+                changed.update(row["id"] for row in output.get("ui_updates", []))
+                if (changed & known) - loaded:
+                    raise ValueError(f"Cannot edit unloaded existing UI {sorted((changed & known) - loaded)}; request load_ui_ids first")
+                if phase == "ui":
+                    if {row["id"] for row in output["ui_requirement_updates"]} - (loaded | {row["id"] for row in output["upserts"]["ui"]}):
+                        raise ValueError("Requirement binding must target loaded or newly created UI")
+                    if operations and all(row["mode"] == "BIND_ONLY" for row in operations):
+                        if output["upserts"]["ui"] or output.get("deletes", {}).get("ui") or output["ui_updates"] or output["page_assignments"]:
+                            raise ValueError("Parsed page/reference permits requirement bindings only")
+                    if any(row["mode"] == "NEW_PAGE_STATE" for row in operations):
+                        if output.get("deletes", {}).get("ui") or any(row.get("children", {}).get("remove") for row in output["ui_updates"]):
+                            raise ValueError("New page states must preserve previously parsed UI nodes")
+                from .delta import materialize_ui_updates
+                delta = materialize_ui_updates(self.ir, phase, output, loaded, requirements)
+                self._merge(phase, delta, requirements, publish=False)
+
+            context_round = 0
             kwargs = {"schema_name": f"frontend_{phase}", "instructions": instructions,
                       "input_payload": payload, "output_schema": schema}
-            output = self._generate(kwargs, record, validate_context)
+            output = self._generate(kwargs, record, validate_delta)
             for _ in range(4):
                 requested = output.get("load_ui_ids", [])
                 if not requested:
@@ -488,42 +572,19 @@ class FrontendIRGenerationPass:
                 known = {row["id"] for row in self.ir["ui"]}
                 if set(requested) - known:
                     raise ValueError("Context request contains unknown UI IDs")
-                active_pages = [self.active_page] if self.active_page is not None else self.nodes[requirements[0]]["pages"]
-                page_ids = {row["screen_id"] for row in page_screen_matches(self.ir, active_pages)}
-                ui = {row["id"]: row for row in self.ir["ui"]}
-                parents = {child: row["id"] for row in ui.values() for child in row["children"]}
-                for key in requested:
-                    while key in ui:
-                        if ui[key]["kind"] == "screen":
-                            if key not in page_ids:
-                                raise ValueError("Cannot load a page outside this requirement's declared pages")
-                            break
-                        key = parents.get(key)
                 record["context_requests"].append({"ids": requested, "output": output})
                 self.requested_ui[requirements[0]] = set(requested)
                 payload = self._payload(requirements[0], phase)
                 if phase == "ui" and baselines:
                     payload["baseline_page_states"] = baselines
                 kwargs["input_payload"] = payload
-                output = self._generate(kwargs, record, validate_context)
+                context_round += 1
+                output = self._generate(kwargs, record, validate_delta)
             if output.get("load_ui_ids"):
                 raise ValueError("UI context request limit exceeded; design a smaller region")
-            loaded = {row["id"] for row in context_ui_nodes(payload)}
-            known = {row["id"] for row in self.ir["ui"]}
-            changed = {row["id"] for row in output.get("upserts", {}).get("ui", [])}
-            changed.update(output.get("deletes", {}).get("ui", []))
-            changed.update(row["id"] for row in output.get("ui_updates", []))
-            if (changed & known) - loaded:
-                raise ValueError("Cannot edit unloaded existing UI; request load_ui_ids first")
-            if phase == "ui":
-                if {row["id"] for row in output["ui_requirement_updates"]} - (loaded | {row["id"] for row in output["upserts"]["ui"]}):
-                    raise ValueError("Requirement binding must target loaded or newly created UI")
-                if operations and all(row["mode"] == "BIND_ONLY" for row in operations):
-                    if output["upserts"]["ui"] or output.get("deletes", {}).get("ui") or output["ui_updates"] or output["page_assignments"]:
-                        raise ValueError("Parsed page/reference permits requirement bindings only")
-                if any(row["mode"] == "NEW_PAGE_STATE" for row in operations):
-                    if output.get("deletes", {}).get("ui") or any(row.get("children", {}).get("remove") for row in output["ui_updates"]):
-                        raise ValueError("New page states must preserve previously parsed UI nodes")
+            loaded = {row['id'] for row in context_ui_nodes(payload)}
+            if phase == 'ui':
+                output = self._ignore_ui_data(output)
             record["output"] = output
             record["final_input"] = payload
             from .delta import materialize_ui_updates

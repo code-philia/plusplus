@@ -122,6 +122,8 @@ def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
             key = parents.get(key)
     if page_root_ids is not None:
         def permitted(key: str) -> bool:
+            if key in requested:
+                return True  # Explicit exact-node request grants local cross-page access.
             seen = set()
             while key in ui and key not in seen:
                 seen.add(key)
