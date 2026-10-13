@@ -7,7 +7,7 @@ import hashlib
 import json
 from typing import Any
 
-from ..ir import ERModelIR
+from ..ir.database import ERModelIR
 from .common import (
     _append_unique,
     _compact_properties,
@@ -34,14 +34,19 @@ class DatabaseSchemaState:
         self.warnings: list[str] = []
         self.contributions: dict[str, Any] = {"fields": {}, "relationships": {}}
         self.conflicts: list[dict[str, Any]] = []
+        self.requirement_access: dict[str, dict[str, set[str]]] = {}
 
-    def entity_headers(self) -> list[dict[str, str]]:
-        return [{"key": item["key"], "description": item["description"]} for item in self._ordered_entities()]
+    def entity_headers(self) -> list[dict[str, Any]]:
+        return [{"key": item["key"], "description": item["description"],
+                 "requirement_ids": list(item['requirement_ids']),
+                 "read": list(item.get('read', [])), "write": list(item.get('write', []))}
+                for item in self._ordered_entities()]
 
     def ensure_requirement(self, requirement_id: str) -> None:
         """Retain traceability even when a requirement needs no persistent data."""
 
         self.requirement_entity_links.setdefault(requirement_id, set())
+        self.requirement_access.setdefault(requirement_id, {'read': set(), 'write': set()})
 
     def related_entity_keys(self, requirement_id: str) -> list[str]:
         return sorted(self.requirement_entity_links.get(requirement_id, set()))
@@ -68,7 +73,7 @@ class DatabaseSchemaState:
             if key not in self.entities:
                 self.entities[key] = {
                     "key": key, "description": str(raw.get("description", "")).strip(),
-                    "requirement_ids": [], "fields": {},
+                    "requirement_ids": [], "fields": {}, "read": [], "write": [],
                 }
                 self._add_field(key, {
                     "name": "id", "type": "uuid", "nullable": False,
@@ -76,15 +81,38 @@ class DatabaseSchemaState:
                     "origin": "SYSTEM", "references": None,
                 }, requirement_id, errors, trace=False)
             self._link_entity(requirement_id, key)
+        self._apply_access(requirement_id, decision, errors)
 
     def apply_fields(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
         for item in decision.get("entities", []):
             key = _normalize_identifier(str(item.get("entity", "")))
             if key not in self.entities:
-                self.apply_entities(requirement_id, {"new_entities": [{"key": key, "description": ""}]}, errors)
+                errors.append(f'Unknown entity in field discovery: {key}')
+                continue
             self._link_entity(requirement_id, key)
             for raw_field in [*item.get("new_fields", []), *item.get("update_fields", [])]:
                 self._apply_field_contribution(key, raw_field, requirement_id, errors)
+            for name in item.get('reuse_fields', []):
+                if name not in self.entities[key]['fields']:
+                    errors.append(f'Unknown reused field: {key}.{name}')
+                else:
+                    self._link_field(requirement_id, key, name)
+        self._apply_access(requirement_id, decision, errors)
+
+    def _apply_access(self, rid: str, decision: dict[str, Any], errors: list[str]) -> None:
+        self.ensure_requirement(rid)
+        for operation in ('read', 'write'):
+            for reference in decision.get(operation, []):
+                entity, separator, name = reference.partition('.')
+                if entity not in self.entities or separator and name not in self.entities[entity]['fields']:
+                    errors.append(f'Unknown {operation} target: {reference}')
+                    continue
+                self._link_entity(rid, entity)
+                if separator:
+                    self._link_field(rid, entity, name)
+                record = self.entities[entity]['fields'][name] if separator else self.entities[entity]
+                _append_unique(record.setdefault(operation, []), rid)
+                self.requirement_access[rid][operation].add(reference)
 
     def _apply_field_contribution(self, key: str, raw: dict[str, Any], rid: str, errors: list[str]) -> None:
         reference = key + "." + raw["name"]
@@ -204,6 +232,8 @@ class DatabaseSchemaState:
                 "fields": sorted(self.requirement_field_links.get(requirement_id, set())),
                 "relationships": sorted(self.requirement_relationship_links.get(requirement_id, set())),
                 "constraints": sorted(self.requirement_constraint_links.get(requirement_id, set())),
+                **{operation: sorted(self.requirement_access.get(requirement_id, {}).get(operation, set()))
+                   for operation in ('read', 'write')},
             }
             for requirement_id in sorted(requirement_ids)
         }
@@ -222,6 +252,8 @@ class DatabaseSchemaState:
             "status": "PROPOSED",
             "contributions": copy.deepcopy(self.contributions),
             "conflicts": copy.deepcopy(self.conflicts),
+            "access": {rid: {operation: sorted(targets) for operation, targets in access.items()}
+                       for rid, access in sorted(self.requirement_access.items())},
             "entities": [self._public_entity(item) for item in self._ordered_entities()],
             "relationships": [
                 {name: copy.deepcopy(item[name]) for name in (
@@ -242,6 +274,7 @@ class DatabaseSchemaState:
             "description": entity["description"],
             "requirement_ids": list(entity["requirement_ids"]),
             "fields": fields,
+            "read": list(entity.get('read', [])), "write": list(entity.get('write', [])),
         }
 
     def _link_entity(self, requirement_id: str, key: str) -> None:
@@ -284,6 +317,7 @@ class DatabaseSchemaState:
                 "origin": str(raw.get("origin", "REQUIREMENT")),
                 "references": raw.get("references"),
                 "requirement_ids": [],
+                "read": [], "write": [],
             }
             self.entities[entity_key]["fields"][name] = existing
         if requirement_id != "SYSTEM":

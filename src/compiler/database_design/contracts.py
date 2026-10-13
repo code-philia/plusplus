@@ -252,3 +252,40 @@ Example:
 Example assumes both entities exist in er_graph and REQ-3.2 explicitly supports the relationship.
 No-relationship example: {"entity_key":"traveler","relationships":[]}
 """
+
+
+# Access is reported by the requirement, not inferred from schema creation.
+for decision_schema in (ENTITY_DECISION_SCHEMA, FIELD_DECISION_SCHEMA):
+    for operation in ('read', 'write'):
+        decision_schema['properties'][operation] = {'type': 'array', 'items': {'type': 'string'}}
+        decision_schema['required'].append(operation)
+field_entity_schema = FIELD_DECISION_SCHEMA['properties']['entities']['items']
+field_entity_schema['properties']['reuse_fields'] = {'type': 'array', 'items': {'type': 'string'}}
+field_entity_schema['required'].append('reuse_fields')
+ACCESS_INSTRUCTIONS = """
+Also return read and write arrays for the CURRENT requirement's actual data access, not schema
+creation. read contains an entity key for querying its rows, or entity.field for reading a
+specific persisted field. write contains an entity key for inserting/deleting rows, or
+entity.field for writing a specific field. Both modes may apply to the same target.
+Entity access does not imply access to every field; report each explicitly supported field
+access separately. Only this requirement's described behavior/scenario steps justify access;
+do not attribute prerequisite requirement operations merely because dependencies are supplied.
+Use [] for no access. Never guess read/write from new versus reused schema definitions.
+All new entity/field descriptions are one concise sentence explaining domain meaning/purpose.
+"""
+ENTITY_INSTRUCTIONS += ACCESS_INSTRUCTIONS + """
+In entity discovery, read/write targets are entity keys only (fields are discovered later).
+Examples earlier omit the new mandatory read/write arrays; always include them in your response.
+"""
+FIELD_INSTRUCTIONS = FIELD_INSTRUCTIONS.replace(
+    '- An existing field requiring no new or changed fact is reused silently. No reuse_fields key.',
+    '- List existing fields used unchanged in reuse_fields (field names within the entity). '
+    'This records requirement association without adding or altering storage invariants.').replace(
+    'Return only entities with changes.', 'Return entities with changes or reused fields.')
+FIELD_INSTRUCTIONS += ACCESS_INSTRUCTIONS + """
+Return reuse_fields in every entity entry, including [] when none. Any accessed existing field,
+including compiler-owned id, must be listed in reuse_fields unless declared in new_fields or
+update_fields. read/write may contain entity keys and entity.field references. Do not invent
+fields to satisfy access. Refer only to related_entities and fields declared in this reply.
+Empty output: {"requirement_id":"REQ-1", "entities":[], "read":[], "write":[]}.
+"""

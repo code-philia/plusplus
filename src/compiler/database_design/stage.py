@@ -14,7 +14,7 @@ from utils.logging import SynchronousLog
 
 from compiler.preprocessing.traversal import postorder
 
-from ..ir import ERModelIR, SchemaIR
+from ..ir.database import ERModelIR, SchemaIR
 from model.contracts import StructuredModel
 from model.client import describe_model_error
 from utils.trace import format_payload_trace
@@ -94,6 +94,8 @@ class DatabaseSchemaPass:
                     ),
                     errors=errors,
                     warnings=state.warnings,
+                    validate=lambda value, rid=node_id, phase_name=phase: _validate_access_decision(
+                        state, phase_name, rid, value),
                 )
                 if decision is None:
                     states[node_id] = "FAILED"
@@ -219,6 +221,7 @@ class DatabaseSchemaPass:
         context: dict[str, Any],
         errors: list[str],
         warnings: list[str],
+        validate: Callable[[dict[str, Any]], list[str]] | None = None,
     ) -> dict[str, Any] | None:
         feedback: list[str] = []
         for attempt in range(self._retry_count + 1):
@@ -272,6 +275,11 @@ class DatabaseSchemaPass:
                 decision, normalization_notes = _normalize_decision_context(
                     phase, decision, context
                 )
+                if validate is not None:
+                    feedback = validate(decision)
+                    if feedback:
+                        self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
+                        continue
                 for note in normalization_notes:
                     self._trace(
                         f"MODEL_NORMALIZED phase={phase} requirement={node_id} "
@@ -290,6 +298,45 @@ class DatabaseSchemaPass:
     def _trace(self, message: str) -> None:
         if self._trace_enabled:
             self._log.info(message)
+
+
+def _validate_access_decision(state: DatabaseSchemaState, phase: str, rid: str,
+                              value: Any) -> list[str]:
+    """Check metadata and references on an isolated trial before committing a pass."""
+    if not isinstance(value, dict) or value.get('requirement_id') != rid:
+        return ['Return an object with the exact current requirement_id.']
+    errors = []
+    for operation in ('read', 'write'):
+        references = value.get(operation)
+        if not isinstance(references, list) or any(not isinstance(ref, str) for ref in references):
+            errors.append(f'{operation} must be an array of entity or entity.field references.')
+        elif len(references) != len(set(references)):
+            errors.append(f'{operation} contains duplicate targets.')
+        elif phase == 'pass1_entities' and any('.' in ref for ref in references):
+            errors.append('Entity discovery read/write must contain entity keys only; report fields in pass2.')
+    if errors:
+        return errors
+    trial = copy.deepcopy(state)
+    try:
+        if phase == 'pass1_entities':
+            for row in value.get('new_entities', []):
+                if not isinstance(row.get('description'), str) or not row['description'].strip():
+                    errors.append('Each new entity needs a concise meaning/purpose description.')
+            trial.apply_entities(rid, value, errors)
+        else:
+            for item in value.get('entities', []):
+                reused = item.get('reuse_fields')
+                if not isinstance(reused, list) or any(not isinstance(name, str) for name in reused):
+                    errors.append('Each entity entry needs reuse_fields as an array of existing field names.')
+                    continue
+                for row in [*item.get('new_fields', []), *item.get('update_fields', [])]:
+                    if not isinstance(row.get('description'), str) or not row['description'].strip():
+                        errors.append('Each declared field needs a concise meaning/purpose description.')
+            if not errors:
+                trial.apply_fields(rid, value, errors)
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        errors.append(f'Invalid database design declaration: {exc}')
+    return errors
 
 
 def _node_context(

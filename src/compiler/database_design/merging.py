@@ -31,7 +31,8 @@ def merge_field_contributions(entity: str, contributions: dict[str, dict[str, An
     result = {
         'name': rows[0]['name'], 'type': rows[0]['type'],
         'nullable': all(row['nullable'] for row in rows),
-        'description': '\n'.join(sorted({row['description'].strip() for row in rows if row['description'].strip()})),
+        # One stable domain description; per-requirement wording remains in the ledger.
+        'description': next((row['description'].strip() for row in rows if row['description'].strip()), ''),
         'properties': props,
     }
     return result

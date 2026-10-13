@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from cli.commands import _ensure_dotenv_loaded, _locate_requirement_file
 from utils.jsonio import write_json_atomic
-from compiler.runtime.artifacts import CompilerArtifactStore
 from compiler.database_design import DatabaseSchemaPass
 from model.client import Model, ModelConfigurationError
 from compiler.preprocessing.stage import RequirementPreprocessor
@@ -39,10 +38,12 @@ def main(argv: list[str] | None = None) -> int:
         _ensure_dotenv_loaded()
         requirement = Path(_locate_requirement_file(str(Path(args.requirement_path).expanduser())))
         output = Path(args.output_dir).expanduser().resolve()
-        store = CompilerArtifactStore(output)
+        artifact_root = output / ".arc"
+        preprocessing_root = artifact_root / "preprocessing"
+        database_root = artifact_root / "design/database"
         print(f"Database design workspace: {output}", flush=True)
-        requirement_path = store.preprocessing_root / "requirement_ir.json"
-        dependency_path = store.preprocessing_root / "dependency_graph.json"
+        requirement_path = preprocessing_root / "requirement_ir.json"
+        dependency_path = preprocessing_root / "dependency_graph.json"
         if requirement_path.exists() or dependency_path.exists():
             if not requirement_path.is_file() or not dependency_path.is_file():
                 raise ValueError("Existing preprocessing artifacts are incomplete; they will not be overwritten")
@@ -63,12 +64,15 @@ def main(argv: list[str] | None = None) -> int:
 
         model = Model.from_env()
         if not requirement_path.exists():
-            store.write_preprocessing(requirement_ir=requirement_ir, dependency_graph=dependency_graph)
-        result = DatabaseSchemaPass(model, store.root).compile(
+            write_json_atomic(requirement_path, requirement_ir)
+            write_json_atomic(dependency_path, dependency_graph)
+        result = DatabaseSchemaPass(model, artifact_root).compile(
             requirement_ir, dependency_graph,
         )
-        schema_path = store.write_database_schema(result.schema, er_model=result.er_model)
-        report_path = store.database_root / "report.json"
+        schema_path = database_root / "schema.json"
+        write_json_atomic(schema_path, result.schema)
+        write_json_atomic(database_root / "er_model.json", result.er_model)
+        report_path = database_root / "report.json"
         write_json_atomic(report_path, {
             "status": result.schema["status"],
             "node_states": result.node_states,
@@ -76,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             "warnings": result.warnings,
         })
         print(f"Database design completed: {result.schema['status']}", flush=True)
-        print(f"ER: {store.database_root / 'er_model.json'}")
+        print(f"ER: {database_root / 'er_model.json'}")
         print(f"Schema IR: {schema_path}")
         print(f"Report: {report_path}")
         for warning in result.warnings:

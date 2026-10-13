@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..ir import ERModelIR, SchemaIR, table_constraints
+from ..ir.database import ERModelIR, SchemaIR, table_constraints
 from .state import DatabaseSchemaState
 from .validation import logical_literal_valid
 
@@ -38,6 +38,10 @@ def refine_er_model(
     errors: list[str] = []
     for rid in sorted(requirement_ids or set()):
         state.ensure_requirement(rid)
+    for rid, access in er_model.get('access', {}).items():
+        state.ensure_requirement(rid)
+        state.requirement_access[rid] = {operation: set(access.get(operation, []))
+                                         for operation in ('read', 'write')}
     for entity in er_model["entities"]:
         state.entities[entity["key"]] = {
             **copy.deepcopy(entity),
@@ -110,6 +114,7 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
                 "generation": "application_uuid" if column["primary_key"] and resolved_type == "uuid" else "none",
                 "description": column["description"], "origin": column["origin"],
                 "requirement_ids": list(column["requirement_ids"]), "constraints": [],
+                "read": list(column.get('read', [])), "write": list(column.get('write', [])),
             })
             for kind, value in sorted(props.items()):
                 if value is None or kind in {"default", "unique", "comparison"}:
@@ -163,12 +168,15 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
             "name": table_name, "description": entity["description"],
             "columns": columns, "constraints": composite_constraints,
             "requirement_ids": list(entity["requirement_ids"]),
+            "read": list(entity.get('read', [])), "write": list(entity.get('write', [])),
         })
 
     traceability = {"requirements": {}}
     for rid in relational["traceability"]["requirements"]:
         owned_tables = [table for table in tables if rid in table["requirement_ids"]]
         traceability["requirements"][rid] = {
+            **{operation: list(relational['traceability']['requirements'][rid].get(operation, []))
+               for operation in ('read', 'write')},
             "tables": sorted(table["name"] for table in owned_tables),
             "columns": sorted(f"{table['name']}.{column['name']}" for table in tables
                               for column in table["columns"] if rid in column["requirement_ids"]),
@@ -219,7 +227,7 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
     types = {"string", "integer", "number", "boolean", "date", "datetime", "json", "uuid"}
     for table in schema["tables"]:
         _identifier(table["name"], errors)
-        if set(table) - {"name", "description", "columns", "constraints", "requirement_ids"}:
+        if set(table) - {"name", "description", "columns", "constraints", "requirement_ids", "read", "write"}:
             errors.append(f"SCHEMA_IR_UNKNOWN_TABLE_SEMANTICS: {table['name']}")
         if table["name"].startswith(("sqlite_", "arc_")):
             errors.append(f"SCHEMA_IR_RESERVED_TABLE: {table['name']}")
@@ -239,7 +247,7 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
                 if "columns" in constraint:
                     errors.append(f"SCHEMA_IR_COLUMN_CONSTRAINT_REDUNDANT_COLUMNS: {constraint['name']}")
             unknown = set(column) - {"name", "type", "nullable", "default", "generation", "description",
-                                     "origin", "requirement_ids", "constraints"}
+                                     "origin", "requirement_ids", "constraints", "read", "write"}
             if unknown:
                 errors.append(f"SCHEMA_IR_UNKNOWN_COLUMN_SEMANTICS: {table['name']}.{column['name']}: {sorted(unknown)}")
             if "properties" in column:

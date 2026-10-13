@@ -16,6 +16,8 @@ class ERAttribute(TypedDict):
     origin: Literal["REQUIREMENT", "RELATIONSHIP", "SYSTEM"]
     references: str | None
     requirement_ids: list[str]
+    read: list[str]
+    write: list[str]
 
 
 class EREntity(TypedDict):
@@ -23,6 +25,8 @@ class EREntity(TypedDict):
     description: str
     requirement_ids: list[str]
     fields: list[ERAttribute]
+    read: list[str]
+    write: list[str]
 
 
 class ERRelationship(TypedDict):
@@ -47,6 +51,7 @@ class ERModelIR(TypedDict):
     relationships: list[ERRelationship]
     contributions: dict[str, Any]
     conflicts: list[dict[str, Any]]
+    access: dict[str, dict[str, list[str]]]
 
 
 SchemaDataType = Literal["string", "integer", "number", "boolean", "date", "datetime", "json", "uuid"]
@@ -68,6 +73,8 @@ class SchemaColumn(TypedDict):
     origin: str
     requirement_ids: list[str]
     constraints: list[SchemaColumnConstraint]
+    read: list[str]
+    write: list[str]
 
 
 class SchemaColumnConstraint(TypedDict):
@@ -101,6 +108,8 @@ class SchemaTable(TypedDict):
     name: str
     description: str
     columns: list[SchemaColumn]
+    read: list[str]
+    write: list[str]
     constraints: list[SchemaConstraint]
     requirement_ids: list[str]
 
