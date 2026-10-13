@@ -136,6 +136,25 @@ def render_section(name: str, purpose: str, payload: dict[str, Any]) -> str:
 
 
 def stage_sections(schema_name: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if schema_name in {'frontend_design_ui', 'frontend_design_data', 'frontend_design_interaction', 'frontend_design_visual'}:
+        remaining = dict(payload)
+        sections = []
+        for name, keys in (
+            ('Current task', {'current_task'}),
+            ('Selected page and UI tree', {'current_page', 'page_mode', 'selected_ui_tree', 'app', 'loaded_ui_ids'}),
+            ('Page state comparison', {'baseline_page_states'}),
+            ('Global UI summary', {'ui_tree_summary'}),
+            ('Backend API contracts', {'api_contracts'}),
+            ('Existing state and interaction contracts', {'existing_data', 'reuse_handlers', 'existing_events', 'handler_name_index'}),
+            ('Type definitions', {'existing_types', 'type_name_index'}),
+            ('Correction feedback', {'validation_feedback', 'previous_output'}),
+        ):
+            selected = {key: remaining.pop(key) for key in list(remaining) if key in keys}
+            if selected:
+                sections.append({'name': name, 'purpose': '', 'payload': selected})
+        if remaining:
+            sections.append({'name': 'Additional context', 'purpose': '', 'payload': remaining})
+        return sections
     if schema_name in {'backend_api', 'backend_func', 'backend_db'}:
         remaining = dict(payload)
         sections = []

@@ -1,294 +1,84 @@
-"""Bounded reuse retrieval and derived frontend traceability."""
-from __future__ import annotations
-
+"""Page-local contexts, compact summaries and small contract reuse catalogs."""
 import copy
 import json
-import re
-
-from compiler.ir.frontend import frontend_events
-from typing import Any
-
-TABLES = ("ui", "data", "functions", "types")
+from compiler.backend_design.context import database_context, retrieve, terms
+from .validation import ui_index, within
 
 
-def ranked(rows: list[dict[str, Any]], query: Any, count: int) -> list[dict[str, Any]]:
-    def terms(value: Any) -> set[str]:
-        return set(re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]", json.dumps(value, ensure_ascii=False).lower()))
-    wanted = terms(query)
-    return sorted(rows, key=lambda row: (-len(wanted & terms(row)), row["id"]))[:count]
+def tree_summary(root):
+    def size(row):
+        return 1 + sum(size(child) for child in row['children'])
+    def identity(row):
+        return {key: row[key] for key in ('id', 'name', 'kind')}
+    return {**identity(root), 'pages': [
+        {**identity(page), 'major_subtrees': [identity(child) for child in
+            sorted(page['children'], key=lambda child: (-size(child), child['id']))[:3]]}
+        for page in root['children']]}
 
 
-def value_references(value: Any, kind: str) -> set[str]:
-    if isinstance(value, list):
-        return {key for child in value for key in value_references(child, kind)}
-    if not isinstance(value, dict) or value.get("kind") == "literal":
-        return set()
-    own = {value["id"]} if value.get("kind") == kind and "id" in value else set()
-    return own | {key for child in value.values() for key in value_references(child, kind)}
+def region(ir, page_names):
+    pages = [copy.deepcopy(page) for page in ir['ui']['children'] if page['name'] in page_names]
+    ids = {ir['ui']['id']}
+    for page in pages:
+        ids.update(ui_index(page)[0])
+    return pages, ids
 
 
-def ui_data_associations(ir: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
-    ui = {row["id"]: row for row in ir.get("ui", [])}
-    result = {}
-    for row in ui.values():
-        direct = value_references(row.get("bindings", {}), "data")
-        sources = value_references(row.get("bindings", {}), "item")
-        sources |= value_references(row.get("repeat", {}), "item")
-        data = direct | value_references(row.get("repeat", {}), "data")
-        pending, seen = list(sources), set()
-        while pending:
-            key = pending.pop()
-            if key in seen:
-                continue
-            seen.add(key)
-            repeat = ui.get(key, {}).get("repeat", {})
-            data |= value_references(repeat, "data")
-            pending.extend(value_references(repeat, "item") - seen)
-        result[row["id"]] = {"direct_ids": sorted(direct), "data_ids": sorted(data),
-                              "repeat_ui_ids": sorted(seen)}
-    return result
+def related_apis(backend, requirement, database):
+    data = database_context(database, requirement['id'])
+    direct = [row for row in backend['modules'] if row['kind'] == 'API' and requirement['id'] in row['reqs']]
+    candidates = retrieve(backend, 'API', requirement, data, database.get('access', {}))
+    return list({row['id']: copy.deepcopy(row) for row in direct + candidates}.values())
 
 
-def frontend_ir_traceability(ir: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    links: dict[str, dict[str, Any]] = {}
-    for table, name in (("ui", "ui_ids"), ("data", "data_ids"),
-                        ("events", "event_ids"), ("functions", "function_ids")):
-        for row in (frontend_events(ir) if table == "events" else ir.get(table, [])):
-            for rid in row.get("requirement_ids", []):
-                link = links.setdefault(rid, {"ui_scope": "UI_AFFECTING"})
-                link.setdefault(name, []).append(row["id"])
-                if table in {"ui", "events"}:
-                    link["ui_scope"] = "UI_REQUIRED"
-                if table == "ui":
-                    link.setdefault("visual_reference_ids", []).extend(row.get("visual_reference_ids", []))
-                if table == "functions":
-                    link.setdefault("api_ids", []).extend(call["target_id"] for call in row.get("calls", [])
-                                                           if call.get("kind") == "API")
-    for rid, association in ir.get("requirement_links", {}).items():
-        link = links.setdefault(rid, {"ui_scope": "NO_UI"})
-        link["implements"] = list(association.get("implements", []))
-        link["uses"] = list(association.get("uses", []))
-        ui_ids = {row['id'] for row in ir.get('ui', [])}
-        if link['ui_scope'] == 'NO_UI' and ui_ids & set(link['uses']):
-            link['ui_scope'] = 'UI_AFFECTING'
-    for row in links.values():
-        for key, value in row.items():
-            if isinstance(value, list):
-                row[key] = list(dict.fromkeys(value))
-    return links
+def select_types(ir, apis, contracts=()):
+    definitions = {row['name']: row for row in ir['types']}
+    used = set()
+    def visit(value):
+        if isinstance(value, dict):
+            reference = value.get('$ref', '')
+            if isinstance(reference, str) and reference.startswith('#/types/'):
+                name = reference[8:]
+                if name in definitions and name not in used:
+                    used.add(name)
+                    visit(json.loads(definitions[name]['schema']))
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+    for api in apis:
+        for field in ('payload', 'response'):
+            visit(json.loads(api[field]))
+    for raw in contracts:
+        visit(json.loads(raw))
+    return used
 
 
-def page_screen_matches(ir: dict[str, Any], pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Exact declared page-name lookup; image paths do not define page identity."""
-    ui = {row["id"]: row for row in ir["ui"]}
-    roots = ir.get("page_roots", {})
-    return [{"screen_id": roots[page["name"]], "page_name": page["name"],
-             "reason": "declared_page_name", "matched_ui_ids": [roots[page["name"]]]}
-            for page in pages if page["name"] in roots
-            and ui.get(roots[page["name"]], {}).get("kind") == "screen"]
+def state_context(ir, ids):
+    return [copy.deepcopy(row) for row in ir['data'] if row['owner'] in ids]
 
 
-def local_context(ir: dict[str, Any], rid: str, requirement: dict[str, Any],
-                  related_ids: set[str], requested_ui_ids: set[str] | None = None,
-                  max_chars: int = 400_000, *,
-                  screen_matches: list[dict[str, Any]] | None = None,
-                  page_root_ids: set[str] | None = None) -> dict[str, Any]:
-    """Load requirement pages only; expose other pages through a tree summary."""
-    rows = {row["id"]: row for table in TABLES for row in ir[table]}
-    events = frontend_events(ir)
-    rows.update({event["id"]: event for event in events})
-    ui = {row["id"]: row for row in ir["ui"]}
-    parents = {child: row["id"] for row in ui.values() for child in row["children"]}
-    owned = {key for key, row in rows.items() if rid in row.get("requirement_ids", [])}
-    used = set(ir.get("requirement_links", {}).get(rid, {}).get("uses", []))
-    requested = (requested_ui_ids or set()) & ui.keys()
-    matches = screen_matches or []
-    screens = set(page_root_ids) if page_root_ids is not None else {row["screen_id"] for row in matches}
-    anchors = (owned | used | requested) & ui.keys()
-    anchors.update(event["ui_id"] for event in events if event["id"] in owned | used)
-    scoped_data = (owned | used) & {row["id"] for row in ir["data"]}
-    scoped_data.update(key for row in ir["functions"] if row["id"] in owned | used
-                       for key in [*row.get("reads", []), *row.get("writes", [])])
-    anchors.update(row["scope_ui_id"] for row in ir["data"] if row["id"] in scoped_data
-                   and row["scope_ui_id"] in ui)
-    for key in anchors:
-        seen = set()
-        while key in ui and key not in seen:
-            seen.add(key)
-            if ui[key]["kind"] == "screen":
-                if page_root_ids is None:
-                    screens.add(key)
-                break
-            key = parents.get(key)
-    if page_root_ids is not None:
-        def permitted(key: str) -> bool:
-            if key in requested:
-                return True  # Explicit exact-node request grants local cross-page access.
-            seen = set()
-            while key in ui and key not in seen:
-                seen.add(key)
-                if ui[key]["kind"] == "screen":
-                    return key in screens
-                key = parents.get(key)
-            return True  # Shared application structure has no screen ancestor.
-        anchors = {key for key in anchors if permitted(key)}
-        owned = {key for key in owned if key not in ui or permitted(key)}
-        used = {key for key in used if key not in ui or permitted(key)}
-        requested = {key for key in requested if permitted(key)}
-    region = set(anchors)
-    pending, walked = sorted(screens), set()
-    while pending:
-        key = pending.pop()
-        if key in walked or key not in ui:
+def handler_context(ir, ids, data, apis, requirement, k=6):
+    nodes, parents = ui_index(ir['ui'])
+    bound = {key for key in ids if requirement['id'] in nodes[key]['reqs']}
+    available_data, available_apis = {row['id'] for row in data}, {row['id'] for row in apis}
+    events = [row for row in ir['events'] if row['ui'] in bound]
+    direct = {row['handler'] for row in events}
+    query = terms({key: requirement.get(key) for key in ('name', 'description', 'scenarios')})
+    ranked = []
+    for row in ir['handlers']:
+        if set(row['read'] + row['write']) - available_data or set(row['apis']) - available_apis:
             continue
-        walked.add(key)
-        region.add(key)
-        pending.extend(child for child in ui[key]["children"] if child not in walked
-                       and ui[child]["kind"] != "screen")
-    # The root is needed for attaching a new page, never for loading all pages.
-    selected = owned | (used & rows.keys()) | region | requested
-    missing_page = any(page["name"] not in {match["page_name"] for match in matches}
-                       for page in requirement.get("pages", []))
-    if missing_page:
-        selected.add(ir["root_ui_id"])
-    elif ir["root_ui_id"] not in requested:
-        selected.discard(ir["root_ui_id"])
-    selected.update(row["id"] for row in ir["data"] if row["scope_ui_id"] in region)
-    selected.update(event["id"] for event in events if event["ui_id"] in selected)
-    pending, visited = list(selected), set()
-    while pending:
-        key = pending.pop()
-        if key in visited or key not in rows:
+        if not any(all(within(ui, next(item['owner'] for item in data if item['id'] == target), parents)
+                       for target in row['read'] + row['write']) for ui in bound):
             continue
-        visited.add(key)
-        row = rows[key]
-        references = value_references(row, "data") | value_references(row, "item")
-        references.update(row.get("reads", []))
-        references.update(row.get("writes", []))
-        references.update(call["target_id"] for call in [*row.get("calls", []), *row.get("handlers", []),
-                          *[call for event in row.get("events", []) for call in event.get("handlers", [])]]
-                          if call.get("kind") == "FUNC")
-        fresh = (references & rows.keys()) - selected
-        if page_root_ids is not None:
-            fresh = {key for key in fresh if key not in ui or permitted(key)}
-        selected.update(fresh)
-        pending.extend(fresh)
-    structural = {ir["root_ui_id"]}
-    for key in selected & ui.keys():
-        seen = set()
-        while key in parents and key not in seen:
-            seen.add(key)
-            key = parents[key]
-            if key not in selected:
-                structural.add(key)
-    records = {table: [] for table in ("ui", "data", "functions")}
-    size, loaded = 0, set()
-    candidates = [(table, row) for table in records for row in ir[table] if row["id"] in selected]
-    candidates.sort(key=lambda pair: (pair[1]["id"] not in requested,
-                                      pair[0] != "ui",
-                                      pair[1]["id"] not in screens | {ir["root_ui_id"]},
-                                      pair[1]["id"] not in owned, pair[1]["id"]))
-    for table, row in candidates:
-        cost = len(json.dumps(row, ensure_ascii=False))
-        if size + cost > max_chars:
-            if row["id"] in requested:
-                raise ValueError("Requested UI context exceeds budget; select fewer UI nodes")
-            continue
-        records[table].append(copy.deepcopy(row))
-        loaded.add(row["id"])
-        size += cost
-    loaded_ui = loaded & ui.keys()
-
-    def tree(key: str, summary: bool) -> dict[str, Any]:
-        source = ui[key]
-        if summary:
-            row = {name: copy.deepcopy(source[name]) for name in ("id", "name", "kind", "route") if name in source}
-            row["spec"] = source.get("spec", "")[:120]
-            children = source["children"]
-        else:
-            row = copy.deepcopy(source)
-            children = [child for child in source["children"] if child in loaded_ui]
-        row["children"] = [tree(child, summary) for child in children]
-        return row
-
-    # Nested page records show actual containment; the separate summary retains
-    # unloaded edges. Edits use stable IDs, never reconstruct a partial subtree.
-    roots = [row["id"] for row in records["ui"] if parents.get(row["id"]) not in loaded_ui]
-    records["ui"] = [tree(key, False) for key in roots]
-    # Application structure stays separate from matched screen subtrees even
-    # when explicitly loaded to attach a new page.
-    if screens:
-        displayed_roots = (screens & loaded_ui) | set(roots)
-        def detached_tree(key: str) -> dict[str, Any]:
-            row = copy.deepcopy(ui[key])
-            row["children"] = [detached_tree(child) for child in row["children"]
-                               if child in loaded_ui and child not in screens]
-            return row
-        records["ui"] = [detached_tree(key) for key in sorted(displayed_roots, key=lambda key: (key not in screens, key))]
-    def summary_node(key: str) -> dict[str, Any]:
-        return {name: copy.deepcopy(ui[key][name]) for name in ("id", "name", "kind", "route") if name in ui[key]}
-
-    def subtree_size(key: str) -> int:
-        return 1 + sum(subtree_size(child) for child in ui[key]["children"])
-
-    summary = summary_node(ir["root_ui_id"])
-    summary["children"] = []
-    for name, key in ir.get("page_roots", {}).items():
-        page = {**summary_node(key), "page_name": name}
-        major = sorted(ui[key]["children"], key=lambda child: (-subtree_size(child), child))[:3]
-        page["children"] = [{**summary_node(child), "subtree_size": subtree_size(child)} for child in major]
-        summary["children"].append(page)
-    return {
-        "root_ui_id": ir["root_ui_id"], "existing": records,
-        "loaded_ui_ids": sorted(loaded_ui), "page_ids": sorted(screens),
-        "page_context_mode": "EXISTING_PAGE" if screens else "NEW_PAGE_OR_SELECT_EXISTING",
-        **({"ui_tree_summary": summary} if any(page["name"] not in
-             {match["page_name"] for match in matches} for page in requirement.get("pages", [])) else {}),
-        "structural_ui": [ui_summary(ui[key], parents) for key in sorted(structural - loaded)],
-        "requirement_links": copy.deepcopy(ir.get("requirement_links", {}).get(rid, {"implements": [], "uses": []})),
-        "page_matches": copy.deepcopy(matches),
-        "omitted_ids": sorted((selected & rows.keys()) - loaded - {event["id"] for event in events}),
-        "context_budget_chars": max_chars,
-        "function_catalog": [{"id": row["id"], "spec": row.get("spec", "")[:180]}
-                             for row in ranked(ir["functions"], requirement, 4)],
-    }
-
-
-def context_ui_nodes(context: dict[str, Any]) -> list[dict[str, Any]]:
-    """Iterate full records in the nested model context, excluding summaries."""
-    result, pending = [], list(context["existing"]["ui"])
-    while pending:
-        row = pending.pop()
-        result.append(row)
-        pending.extend(row["children"])
-    return result
-
-
-def ui_summary(row: dict[str, Any], parents: dict[str, str]) -> dict[str, Any]:
-    return {"id": row["id"], "name": row.get("name", ""), "kind": row["kind"],
-            "spec": row.get("spec", "")[:180], "parent_id": parents.get(row["id"]),
-            "route": row.get("route"), "child_count": len(row.get("children", [])),
-            "children": list(row.get("children", []))[:48],
-            "children_truncated": len(row.get("children", [])) > 48,
-            "requirement_ids": list(row.get("requirement_ids", []))}
-
-
-def required_types(values: Any, definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    registry = {row["id"]: row for row in definitions}
-
-    def names(value: Any) -> set[str]:
-        if isinstance(value, list):
-            return {key for child in value for key in names(child)}
-        if not isinstance(value, dict) or value.get("kind") == "literal":
-            return set()
-        own = {value["type_id"]} if value.get("kind") == "named" else set()
-        return own | {key for child in value.values() for key in names(child)}
-
-    pending, found = list(names(values)), set()
-    while pending:
-        key = pending.pop()
-        if key in found:
-            continue
-        found.add(key)
-        pending.extend(names(registry.get(key, {})) - found)
-    return [copy.deepcopy(row) for row in definitions if row["id"] in found]
+        score = len(query & terms(row['name'] + ' ' + row['spec']))
+        score += 5 * len(set(row['read'] + row['write']) & available_data)
+        if row['id'] in direct or score:
+            ranked.append((score, row))
+    ranked.sort(key=lambda item: (-item[0], item[1]['id']))
+    selected = {row['id']: row for _, row in ranked[:k]}
+    selected.update({row['id']: row for _, row in ranked if row['id'] in direct})
+    events = [row for row in events if row['handler'] in selected]
+    return copy.deepcopy(list(selected.values())), copy.deepcopy(events)

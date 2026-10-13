@@ -1,219 +1,136 @@
-"""Typed frontend deltas and instructions for page-scoped incremental design."""
-from __future__ import annotations
+"""Small model deltas; compiler-owned identities and reciprocal links are omitted."""
+import json
+from compiler.backend_design.contracts import obj, STRING, STRINGS, TYPE
 
-import types
-from typing import Any, ForwardRef, Literal, NotRequired, Required, Union, get_args, get_origin, get_type_hints, is_typeddict
-
-from ..ir.frontend import UINode, UIEvent, FrontendState, UIFunction, ValueSource
-from ..ir.backend import BackendTypeDefinition
-from ..ir.integration import PendingCapability
-from ..frontend_semantics import UI_SEMANTIC_CONTRACT
-
-TABLE_TYPES = {"ui": UINode, "data": FrontendState,
-               "functions": UIFunction, "types": BackendTypeDefinition,
-               "pending_capabilities": PendingCapability}
-PHASE_TABLES = {
-    "ui": ("ui",),
-    "data": ("ui", "data", "types", "pending_capabilities"),
-    "interaction": ("ui", "data", "types", "functions", "pending_capabilities"),
+KINDS = ['region', 'form', 'list', 'item', 'input', 'button', 'text', 'image', 'dialog', 'navigation', 'other']
+TRIGGERS = ['click', 'change', 'input', 'submit', 'load', 'focus', 'blur', 'keydown', 'select', 'toggle', 'close']
+SCHEMAS = {
+    'ui': obj({
+        'add_nodes': {'type': 'array', 'items': obj({'name': STRING, 'kind': {'type': 'string', 'enum': KINDS}, 'description': STRING, 'parent': STRING})},
+        'updates': {'type': 'array', 'items': obj({'id': STRING, 'description': STRING})},
+        'bindings': {'type': 'array', 'items': obj({'id': STRING, 'description': STRING})},
+    }),
+    'data': obj({
+        'new_data': {'type': 'array', 'items': obj({'name': STRING, 'owner': STRING, 'spec': STRING, 'schema': STRING, 'initial': STRING})},
+        'reuse_data': STRINGS,
+        'bindings': {'type': 'array', 'items': obj({'ui': STRING, 'data': STRING})},
+        'new_types': {'type': 'array', 'items': TYPE},
+    }),
+    'interaction': obj({
+        'blocked_reason': STRING,
+        'new_handlers': {'type': 'array', 'items': obj({'name': STRING, 'spec': STRING, 'input': STRING, 'output': STRING,
+                                                      'read': STRINGS, 'write': STRINGS, 'apis': STRINGS})},
+        'reuse_handlers': STRINGS,
+        'handler_updates': {'type': 'array', 'items': obj({'id': STRING, 'spec': STRING, 'read': STRINGS, 'write': STRINGS, 'apis': STRINGS})},
+        'new_events': {'type': 'array', 'items': obj({'ui': STRING, 'name': STRING, 'trigger': {'type': 'string', 'enum': TRIGGERS}, 'handler': STRING})},
+        'reuse_events': STRINGS,
+        'new_types': {'type': 'array', 'items': TYPE},
+    }),
+    'visual': obj({'analysis': STRING}),
 }
 
+COMMON = '''## Background and role
+You are a frontend architect designing one leaf requirement in an existing application.
+Produce framework-neutral contracts, not React components, source code, CSS, tests or SQL.
+Requirements and scenario steps define behavior. Images define visible structure and states;
+image evidence must not invent authentication policies, persistence or server capabilities.
+Ancestor descriptions constrain the leaf; do not implement parent or unrelated requirements.
 
-def patch_schema(phase: str, *, bind_only: bool = False) -> dict[str, Any]:
-    """New records are complete; existing UI uses typed, field-level deltas."""
-    defs: dict[str, Any] = {
-        "JSONValue": {"anyOf": [
-            {"type": "string"}, {"type": "number"}, {"type": "boolean"}, {"type": "null"},
-            {"type": "array", "items": {"$ref": "#/$defs/JSONValue"}},
-            {"type": "object", "additionalProperties": {"$ref": "#/$defs/JSONValue"}},
-        ]},
-    }
-
-    def convert(annotation: Any) -> dict[str, Any]:
-        origin, args = get_origin(annotation), get_args(annotation)
-        if isinstance(annotation, ForwardRef):
-            return {"$ref": "#/$defs/" + annotation.__forward_arg__}
-        if origin in (Required, NotRequired):
-            return convert(args[0])
-        if origin is Literal:
-            return {"enum": list(args)}
-        if origin in (Union, types.UnionType):
-            return {"anyOf": [convert(item) for item in args]}
-        if origin is list:
-            return {"type": "array", "items": convert(args[0])}
-        if origin is dict:
-            return {"type": "object", "additionalProperties": convert(args[1])}
-        if is_typeddict(annotation):
-            name = annotation.__name__
-            if name not in defs:
-                defs[name] = {}
-                hints = get_type_hints(annotation, include_extras=True)
-                defs[name] = {"type": "object", "additionalProperties": False,
-                    "properties": {key: convert(value) for key, value in hints.items()},
-                    "required": [key for key, value in hints.items() if get_origin(value) is not NotRequired]}
-            return {"$ref": "#/$defs/" + name}
-        return {"type": {str: "string", int: "integer", float: "number", bool: "boolean", type(None): "null"}[annotation]}
-
-    def obj(properties: dict[str, Any]) -> dict[str, Any]:
-        return {"type": "object", "additionalProperties": False,
-                "properties": properties, "required": list(properties)}
-
-    strings = {"type": "array", "items": {"type": "string"}}
-    tables = {"ui": ("ui",), "data": ("data", "types"),
-              "interaction": ("functions", "types", "pending_capabilities")}[phase]
-    ui_fields = {key: convert(value) for key, value in get_type_hints(UINode, include_extras=True).items()
-                 if key not in {"id", "children", "bindings", "events", "requirement_ids", "description"}}
-    optional_fields = [key for key, value in get_type_hints(UINode, include_extras=True).items()
-                       if get_origin(value) is NotRequired and key != "description"]
-    if phase == "data":
-        ui_fields = {"repeat": ui_fields["repeat"]}
-        optional_fields = ["repeat"]
-    elif phase == "interaction":
-        ui_fields = {"spec": ui_fields["spec"]}
-        optional_fields = []
-    update = {"type": "object", "additionalProperties": False, "required": ["id"], "properties": {
-        "id": {"type": "string"},
-        "set": {"type": "object", "additionalProperties": False, "properties": ui_fields},
-        "unset": {"type": "array", "items": {"enum": optional_fields}},
-        "children": obj({"remove": strings, "add": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False, "required": ["id"], "properties": {
-                "id": {"type": "string"}, "before_id": {"anyOf": [{"type": "string"}, {"type": "null"}]}}}}}),
-        "bindings": obj({"set": {"type": "object", "additionalProperties": convert(ValueSource)}, "remove": strings}),
-        "events": obj({"upserts": {"type": "array", "items": convert(UIEvent)}, "deletes": strings}),
-    }}
-    if phase != "ui":
-        update["properties"].pop("children")
-    if phase != "interaction":
-        update["properties"].pop("events")
-    if phase == "interaction":
-        update["properties"].pop("unset")
-    empty_array = {"type": "array", "items": {"type": "string"}, "maxItems": 0}
-    table_upserts = {table: {"type": "array", "items": convert(TABLE_TYPES[table])} for table in tables}
-    if phase == "ui":
-        defs["UINode"]["properties"]["events"] = empty_array
-    properties = {
-        "upserts": obj(table_upserts),
-        "ui_updates": {"type": "array", "items": update},
-    }
-    if phase == "ui":
-        properties.update({
-            "page_assignments": {"type": "array", "items": obj({
-                "name": {"type": "string"}, "ui_id": {"type": "string"}})},
-            "ui_requirement_updates": {"type": "array", "items": obj({
-                "id": {"type": "string"}, "requirement_id": {"type": "string"},
-                "description": {"type": "string", "minLength": 1}})},
-        })
-    schema = obj(properties)
-    # Optional operations need no repeated empty arrays in normal replies.
-    schema["properties"]["deletes"] = {"type": "object", "additionalProperties": False,
-        "properties": {table: strings for table in tables}}
-    schema["properties"]["load_ui_ids"] = strings
-    if phase == "ui" and bind_only:
-        schema["properties"] = {key: schema["properties"][key]
-                                for key in ("ui_requirement_updates", "load_ui_ids")}
-        schema["required"] = ["ui_requirement_updates"]
-    # Intermediate annotation conversions may have populated unused definitions.
-    # Supply only contracts reachable from this phase's output properties.
-    def references(value: Any) -> set[str]:
-        if isinstance(value, list):
-            return {key for item in value for key in references(item)}
-        if not isinstance(value, dict):
-            return set()
-        own = {value["$ref"].removeprefix("#/$defs/")} if "$ref" in value else set()
-        return own | {key for item in value.values() for key in references(item)}
-    pending, retained = list(references(schema)), set()
-    while pending:
-        key = pending.pop()
-        if key not in retained:
-            retained.add(key)
-            pending.extend(references(defs[key]) - retained)
-    defs = {key: value for key, value in defs.items() if key in retained}
-    return {**schema, "$defs": defs, "x-arc-output-mode": "json_object"}
-
-
-COMMON = """Design a technology-neutral frontend IR. Return the JSON delta required by this phase's schema.
-Use stable existing IDs; prefix new IDs with the current requirement ID and a meaningful suffix.
-existing.ui contains nested complete UI records; output children references use IDs.
-Use ui_updates for existing nodes and complete upserts for new records. Omitted fields remain unchanged.
-Modify only nodes supplied in existing.ui. Summaries locate nodes but are not full editable records.
-To read omitted nodes, return load_ui_ids and otherwise empty operations; then continue after loading.
-Preserve unrelated sibling controls, data and events. Implement only the current requirement's behavior.
-Frozen upstream designs are authoritative: backend follows database; frontend follows backend.
-Visual analysis describes appearance, not additional business requirements. Image-only fields
-must not introduce mandatory validation, submission data, persistence or API capability gaps.
-NON_LEAF requirements integrate completed child designs; add only explicitly described shared
-navigation, page composition or small local interactions. Preserve child behavior and its scope;
-do not redesign child workflows or activate every control visible in the page analysis.
-"""
-
-COMMON += UI_SEMANTIC_CONTRACT
-
-VALUES = """Bindings use {kind:literal,value:JSON} or {kind:data|item,id,path?:[string|integer]}.
-Types use scalar/array/named; named IDs must exist in supplied or newly defined types.
-scope_ui_id=null is application data; otherwise the state belongs to that UI subtree.
-Use state only inside its scope; pass typed inputs to functions reused outside it.
-"""
-
-BIND_ONLY_PROMPT = COMMON + """
-Task: bind relevant existing UI nodes to the current requirement. The page/reference has
-already been parsed; preserve its tree. Return ui_requirement_updates containing
-{id,requirement_id,description}. Extract description from the requirement/scenario steps
-to describe the node's responsibility. Binding adds the requirement ID, replaces description
-and preserves previous owners. Do not return UI upserts, updates, deletes or page assignments.
-To load omitted nodes, return load_ui_ids with ui_requirement_updates:[] first.
-Do not design state, dynamic bindings, mandatory-field checks, events or functions.
-"""
-
-PROMPTS = {
-    "ui": COMMON + """
-Task: build/refine the page's semantic UI tree and bind relevant nodes to this requirement.
-Page identity is requirement.pages[].name. Analysis appears next to its reference path.
-NEW_PAGE: with analysis, build ALL visible meaningful UI, including regions unrelated to this
-requirement. Without analysis, derive required UI from the description/scenarios.
-NEW_PAGE_STATE: compare requirement.pages[].analysis with baseline_page_states[].analysis to identify
-visual state differences. The current UI tree is supplied once in existing.ui; use it to locate
-existing controls and insertion parents, without treating it as the baseline image analysis. Insert
-missing state-specific nodes, preserving controls absent from this image and existing node IDs.
-BIND_ONLY: create/update/delete no visual structure; only bind relevant existing UI nodes.
-Use concise English snake_case UI names. Include meaningful regions, forms, fields, text,
-actions, navigation, lists and feedback; omit decorative wrappers. New UI has events:[] and
-requirement_ids:[]. Static bindings and presentation describe visual intent, not business logic.
-Required markers in the image are visual text; do not turn them into required bindings or checks.
-For a new page, return page_assignments {name,ui_id}; attach its screen via ui_updates.children.
-children updates use {remove:[IDs],add:[{id,before_id?:ID|null}]}; omitted before_id appends.
-Existing visual fields use set/unset; bindings use {set:{attribute:value},remove:[attributes]}.
-After building or selecting the subtree, return ui_requirement_updates
-{id,requirement_id,description} for ONLY nodes implementing this requirement. Extract description
-from its description/scenario steps to state each node's responsibility. This operation adds the
-requirement ID and replaces description, while preserving prior owners. Do not create data/functions.
-""",
-    "data": COMMON + VALUES + """
-Task: design state needed by this requirement and connect it to the committed UI.
-Upsert data and frontend types. Reuse matching state by its ID; avoid duplicate or derived state
-without a lifecycle need. State spec explains meaning, initialization and lifecycle.
-UI updates may change bindings and repeat only. bindings uses {set:{attribute:value},remove:[attributes]};
-repeat defines a data source and stable item key. Cover input values, displayed results,
-loading/error/empty/selection states as needed. Keep static text literal.
-No UI topology, events, functions, API calls or server capability analysis in this phase.
-Do not create state merely because a control appears in an image. For NON_LEAF, reuse child
-state and add only state needed by explicit shared/local interactions.
-""",
-    "interaction": COMMON + VALUES + """
-Task: connect UI events to frontend functions, state changes and supplied backend APIs.
-Upsert functions and any required types. UI updates may change events, bindings and spec only.
-Event updates use {upserts:[complete events],deletes:[event IDs]}. Events are embedded in UI;
-each has its own requirement_ids and ordered FUNC handlers. Preserve unrelated events.
-Functions have typed inputs/outputs, reads/writes of data IDs and ordered FUNC/API calls.
-Function spec explains local computation, call conditions, result-to-state updates,
-navigation and failure/loading behavior. input/result values refer to input or earlier call IDs.
-Use exact supplied API IDs and request semantic_ids; never call backend FUNC/DB from the client.
-Keep submission fields within the frozen API contract. Do not design client-side mandatory-field
-checks or submission blockers; leave concrete validation implementation to later TDD.
-Display validation errors returned by the supplied API without inventing additional field rules.
-Reuse existing functions by ID when their responsibility and signature match.
-Emit pending_capabilities only for explicit requirement behavior unsupported by supplied APIs; include
-affected function IDs. Resolve a gap only after wiring a supporting API. Do not simulate server success.
-Never report gaps inferred solely from visual analysis or broaden a child function at NON_LEAF.
-Do not create UI nodes, change containment or remove another requirement's events.
-""",
+## Identity and response protocol
+Return exactly one JSON delta matching the supplied schema, no Markdown or extra properties.
+The compiler owns IDs, reqs, the app/page roots and reciprocal UI links. Never output those fields
+for new records. Reference supplied records by exact ID; reference same-reply new records by @Name.
+Do not guess IDs. Names are semantic, not framework-specific. Preserve unrelated existing design.
+validation_feedback and previous_output describe a rejected delta: return a full corrected delta.
+Before returning, check each current scenario step has the UI/state/interaction needed in this layer.
+Do not create implementation detail nodes or speculative operations just to fill the response.
+'''
+TYPES = '''## Type and reuse conventions
+Use JSON STRINGS containing JSON Schema. Scalar types are string/integer/number/boolean/null;
+arrays have items; objects have properties, required and additionalProperties:false. Parameter
+names use snake_case. Nullable values use anyOf. String formats: date/date-time/uuid. Enums match
+their scalar type. No source HTTP-location extensions in frontend contracts.
+Custom types use #/types/Name and new_types:[{name:"PascalCase",schema:"<JSON Schema>"}].
+Never redefine supplied types; recursive types and unused new types are forbidden.
+Handler input/output must be object schemas; void is an empty object. Data schema may be any type.
+Existing data/handlers/events can be reused only unchanged, with identical behavior and contracts.
+Reuse IDs must come from supplied records. The compiler adds current reqs without changing contracts.
+'''
+TASKS = {
+    'ui': '''## Task: discover the UI and bind the requirement
+Work only in current_page. selected_ui_tree is this page's nested tree, not a flat component list.
+page_mode=new: with an analysis, discover ALL visible regions, controls, text, dialogs and states,
+not only those in the leaf's scenarios. Without an image, derive structure from requirement evidence.
+Use one representative item template for repeated content. Then bind only the nodes implementing
+current requirement description/scenario steps. Do not bind every visual node automatically.
+page_mode=bind: the page/reference is already parsed; add_nodes and updates MUST be empty. Bind
+existing nodes even when no structure changes; do not return an obsolete reuse_ids field.
+page_mode=extend: compare current pages.analysis to baseline_page_states.analysis and insert ONLY
+new controls into the existing page. Keep existing nodes and IDs. updates change description only,
+recording alternative states without overwriting unrelated requirements. Baseline contains analysis,
+not another UI tree. Never duplicate the page or create an app/page node.
+New nodes have page-local unique PascalCase names. parent may be a loaded ID or @Name from add_nodes.
+updates target loaded existing page nodes. bindings target loaded or new nodes; each description
+must extract the requirement's wording or scenario action and explain which part this UI realizes.
+The compiler appends this leaf's ID and REPLACES that UI description. Always return bindings for
+relevant UI even on first creation. Use the narrowest relevant controls/regions, not just the page.
+''',
+    'data': '''## Task: minimal typed frontend state
+Design only state required by this leaf: inputs, fetched results, selections, loading and error state.
+Do not create separate UIData/UIValue, duplicate DTO fields as unrelated global state, or model static
+labels as data. owner is the smallest suitable common UI ancestor of consumers; app is for genuinely
+cross-page state. initial is a JSON STRING containing a value matching schema; null requires a nullable
+schema. Every new_data needs at least one binding. Bind state only to loaded UI, within owner's subtree.
+Use globally unambiguous @Name aliases for this reply even though data names are owner-scoped snake_case.
+Reuse supplied state unchanged when it already suffices. Return empty arrays if state is unnecessary.
+''',
+    'interaction': '''## Task: events and their handlers together
+Connect scenario actions, page/region load, input changes, submissions, navigation and supported failures.
+new_events.ui must be a loaded UI explicitly bound to this leaf. trigger is a framework-neutral semantic
+trigger, not an onClick/effect string. Each event points to exactly one handler. Multiple events may share
+one handler. There is at most one event per UI+trigger: reuse it unchanged if its existing handler suffices.
+If an established event cannot serve this leaf unchanged, use a permitted handler_updates addition or
+report a contradiction; never quietly overwrite another requirement or create a duplicate trigger.
+An existing event whose handler needs ADDITIONAL behavior may use handler_updates. This is an explicit
+revision, not reuse. Give its loaded handler ID, an ADDITIONAL spec, and additional read/write/apis.
+The compiler preserves its ID/name/input/output/original spec and appends these additions. Preserve
+all old behavior; do not negate the previous contract. All existing event sites of an updated handler
+must be loaded. Also select its event through reuse_events, or attach a new event to the updated handler.
+Never list an updated handler in reuse_handlers. Use blocked_reason when a signature change or removal
+of old behavior is required, rather than silently changing the contract.
+New handlers use globally unique PascalCase names. read/write name loaded data IDs; apis name loaded
+backend API IDs, never backend FUNC/DB. APIs must be sufficient, with existing request/response contracts;
+never invent an endpoint. spec uses {preconditions} action {postconditions}, explaining event parameter
+mapping, data updates, API request/response mappings, navigation and failure behavior as needed.
+input/output are object contracts. UI-only actions need no API. Keep orchestration in spec, not a separate
+handler call graph. Every new or explicitly reused handler must be used by an event. Use @Name for a new
+handler. Reuse_events contains loaded IDs only. Data already committed by the Data pass cannot be invented
+here. blocked_reason is empty on success. If required state or a backend capability is unavailable,
+or an immutable existing event contradicts the requirement, explain the precise gap in blocked_reason;
+do not drop required behavior just to make an empty delta pass validation. The compiler feeds the
+reason back and rolls back this leaf if the gap cannot be resolved within the attempts.
+''',
+    'visual': '''## Task: complete visual reference analysis
+Describe the WHOLE visible page, including spatial hierarchy, major regions, all meaningful controls,
+labels, repeated item structure, overlays/dialogs, selections and visible empty/loading/error states.
+The image is the only visual evidence. Distinguish visible facts from unknown behavior. Do not discuss
+only the current requirement. Return a concise but complete textual hierarchy in analysis.
+''',
 }
+EMPTY = '{"type":"object","properties":{},"required":[],"additionalProperties":false}'
+EXAMPLES = {
+    'ui': {'add_nodes': [{'name': 'SearchInput', 'kind': 'input', 'description': 'Search term entry.', 'parent': 'UI_000002'}],
+           'updates': [], 'bindings': [{'id': '@SearchInput', 'description': 'Enter a search term in the search input.'}]},
+    'data': {'new_data': [{'name': 'search_term', 'owner': 'UI_000002', 'spec': 'Search query while this page is open.', 'schema': '{"type":"string"}', 'initial': '""'}],
+             'reuse_data': [], 'bindings': [{'ui': 'UI_000003', 'data': '@search_term'}], 'new_types': []},
+    'interaction': {'blocked_reason': '', 'handler_updates': [], 'new_handlers': [{'name': 'ChangeSearchTerm', 'spec': '{page open} store entered term {search_term equals input value; no API calls}',
+                       'input': '{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}',
+                       'output': EMPTY, 'read': [], 'write': ['DATA_000001'], 'apis': []}],
+                    'reuse_handlers': [], 'new_events': [{'ui': 'UI_000003', 'name': 'SearchTermChanged', 'trigger': 'input', 'handler': '@ChangeSearchTerm'}],
+                    'reuse_events': [], 'new_types': []},
+    'visual': {'analysis': 'A page with a top navigation region, a main search input and a results list. The results list repeats a title and description item.'},
+}
+PROMPTS = {phase: COMMON + (TYPES if phase in {'data', 'interaction'} else '') + TASKS[phase]
+           + '\n## Return format\n' + json.dumps(SCHEMAS[phase], ensure_ascii=False)
+           + '\n## Example (IDs are illustrative; use supplied IDs)\n' + json.dumps(EXAMPLES[phase], ensure_ascii=False)
+           for phase in SCHEMAS}

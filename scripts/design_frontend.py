@@ -1,7 +1,4 @@
-"""Run only frontend design against existing database and backend artifacts.
-
-Usage: python scripts/design_frontend.py requirements.yaml -o output-directory
-"""
+"""Design framework-neutral frontend contracts for leaf requirements."""
 from __future__ import annotations
 
 import argparse
@@ -10,95 +7,64 @@ import json
 import sys
 from pathlib import Path
 
-
-# Allow direct execution without installing the compiler package.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from cli.commands import _ensure_dotenv_loaded, _locate_requirement_file
-from compiler.runtime.artifacts import CompilerArtifactStore
-from compiler.frontend_design import FrontendIRGenerationPass
+from compiler.frontend_design import FrontendDesignPass
+from compiler.preprocessing.stage import RequirementPreprocessor
 from model.client import Model, ModelConfigurationError
-from compiler.preprocessing.visual import VisualReferenceResolver, VisualReferenceAnalyzer
+from utils.jsonio import write_json_atomic
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=(
-        "Generate only frontend design using existing preprocessing, database schema "
-        "and backend IR. Incrementally maintain the semantic UI tree and UI-owned events. "
-        "Only frontend design artifacts are updated. No project initialization or lowering."
-    ))
-    parser.add_argument("requirement_path", help="Requirements directory or .yaml/.yml file")
-    parser.add_argument("-o", "--output-dir", required=True, help="Existing design workspace")
-    parser.add_argument("--no-visuals", action="store_true",
-                        help="Ignore optional reference images and their cached analyses.")
+    parser = argparse.ArgumentParser(description='Design frontend UI, state and interactions for leaf requirements')
+    parser.add_argument('requirement_path', nargs='?', help='Requirements directory or YAML file')
+    parser.add_argument('-o', '--output-dir', required=True)
+    parser.add_argument('--reference-root', help='Image path base directory; defaults to requirement YAML directory')
     args = parser.parse_args(argv)
-
     try:
         _ensure_dotenv_loaded()
-        requirement = Path(_locate_requirement_file(str(Path(args.requirement_path).expanduser())))
-        output = Path(args.output_dir).expanduser().resolve()
-        store = CompilerArtifactStore(output)
-
-        def read(relative: str) -> dict:
-            path = store.root / relative
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(value, dict):
-                raise ValueError(f"Expected a JSON object: {path}")
-            return value
-
-        requirements = read("preprocessing/requirement_ir.json")
-        dependencies = read("preprocessing/dependency_graph.json")
-        # The backend IR already encapsulates the database-facing design.
-        # Require the existing database artifact, without regenerating/auditing it.
-        read("design/database/schema.json")
-        backend = read("design/backend/backend_ir.json")
-        if backend.get("ir_kind") != "backend_design":
-            raise ValueError("Expected current Backend IR; run scripts/design_backend.py first")
-        backend_report = store.backend_design_root / "report.json"
-        if backend_report.is_file() and read("design/backend/report.json").get("errors"):
-            raise ValueError("Backend design report contains unresolved errors")
-        if requirements.get("source", {}).get("sha256") != hashlib.sha256(requirement.read_bytes()).hexdigest():
-            raise ValueError(
-                "Requirement file differs from the existing preprocessing artifacts; "
-                "use the original requirement file or regenerate the preceding design stages."
-            )
-
-        print(f"Frontend design workspace: {output}", flush=True)
-        model = Model.from_env()
-        visuals, analyses, warnings = [], [], []
-        if not args.no_visuals:
-            resolved = VisualReferenceResolver().resolve(requirement, requirements)
-            visuals = resolved.references
-            warnings.extend(issue.format() for issue in resolved.errors)
-            if visuals:
-                print(f"Loading/analyzing {len(visuals)} optional reference images.", flush=True)
-                analyzed = VisualReferenceAnalyzer.from_env(store.root).analyze_cached(
-                    visuals, store.design_root / "visual_cache.json",
-                )
-                analyses = analyzed.references
-                warnings.extend(issue.format() for issue in analyzed.errors)
-
-        result = FrontendIRGenerationPass(model, store.root).compile(
-            requirements, dependencies, backend, visuals, analyses,
-        )
-        result.report["warnings"].extend(warnings)
-        if warnings and result.report["status"] == "GENERATED":
-            result.report["status"] = "GENERATED_WITH_WARNINGS"
-        store.write_frontend_design(frontend_ir=result.frontend_ir, report=result.report,
-                                    batches=result.batches, traceability=result.traceability)
-        print(f"Frontend design completed: {result.report['status']}")
-        print(f"IR: {store.frontend_design_root / 'frontend_ir.json'}")
-        print(f"Report: {store.frontend_design_root / 'report.json'}")
-        print(f"Pass logs: {store.frontend_design_root / 'passes'}")
-        for warning in result.report["warnings"]:
-            print(f"WARNING: {warning}")
-        for failure in result.report["failed_tasks"]:
-            print(f"ERROR: {failure['task_id']}: {failure['message']}", file=sys.stderr)
-        return 0 if result.ok and not result.report["failed_tasks"] else 1
+        arc = Path(args.output_dir).expanduser().resolve() / '.arc'
+        req_path = arc / 'preprocessing/requirement_ir.json'
+        dep_path = arc / 'preprocessing/dependency_graph.json'
+        source = (Path(_locate_requirement_file(str(Path(args.requirement_path).expanduser()))).resolve()
+                  if args.requirement_path else None)
+        if req_path.exists() or dep_path.exists():
+            if not req_path.is_file() or not dep_path.is_file():
+                raise ValueError('Existing preprocessing artifacts are incomplete; they will not be overwritten')
+            requirements = json.loads(req_path.read_text(encoding='utf-8'))
+            if source and requirements.get('source', {}).get('sha256') != hashlib.sha256(source.read_bytes()).hexdigest():
+                raise ValueError('Requirements differ from existing preprocessing; use a new workspace')
+        else:
+            if source is None:
+                raise ValueError('Provide requirement_path when preprocessing artifacts do not exist')
+            parsed = RequirementPreprocessor().compile(source)
+            if not parsed.ok:
+                raise ValueError('; '.join(parsed.errors))
+            requirements = parsed.requirement_ir
+            write_json_atomic(req_path, requirements)
+            write_json_atomic(dep_path, parsed.dependency_graph)
+        reference_root = (Path(args.reference_root).expanduser().resolve() if args.reference_root
+                          else source.parent if source else None)
+        if reference_root is None and any(page.get('reference') for node in requirements['nodes'].values()
+                                          for page in node.get('pages', [])):
+            raise ValueError('Provide requirement_path or --reference-root to resolve visual reference images')
+        database = json.loads((arc / 'design/database/er_model.json').read_text(encoding='utf-8'))
+        backend = json.loads((arc / 'design/backend/backend_ir.json').read_text(encoding='utf-8'))
+        result = FrontendDesignPass(Model.from_env(), arc, reference_root=reference_root).compile(
+            requirements, database, backend)
+        for warning in result.warnings:
+            print('WARNING:', warning)
+        for error in result.errors:
+            print('ERROR:', error, file=sys.stderr)
+        print(f'Frontend IR: {arc / "design/frontend/frontend_ir.json"}')
+        print(f'UI tree: {arc / "design/frontend/ui.json"}')
+        print(f'Report: {arc / "design/frontend/report.json"}')
+        return 0 if result.ok else 1
     except (ModelConfigurationError, OSError, ValueError, KeyError, TypeError) as exc:
-        print(f"Frontend design error: {exc}", file=sys.stderr)
+        print('Frontend design error:', exc, file=sys.stderr)
         return 1
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())
