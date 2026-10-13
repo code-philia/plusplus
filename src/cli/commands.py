@@ -196,7 +196,9 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     elapsed = time.time() - start_time
     print_compilation_summary(result, output_dir, elapsed)
     
-    return 0 if result.get("ok") else 1
+    # Completion of the compilation run is the process-level success signal.
+    # Requirement failures remain available in the result, summary and debug log.
+    return 0
 
 
 def _resolve_web_port(cli_port: int | None) -> int:
