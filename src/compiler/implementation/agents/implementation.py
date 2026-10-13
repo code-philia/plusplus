@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from model.structured import BaseStructuredAgent, StructuredModel
 from compiler.implementation.contracts import ProposedEdit, ProposedPatch
+from compiler.frontend_semantics import REACT_SEMANTIC_EXAMPLES
 
 
 IMPLEMENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -107,6 +108,9 @@ Wire existing child components and ancestors without duplicating their markup. T
 route plan defines navigation targets; do not invent routes or expect a generated UI runtime.
 Only the keys of editable_files define the writable scope.
 """
+
+
+FRONTEND_IMPLEMENTATION_INSTRUCTIONS += REACT_SEMANTIC_EXAMPLES
 
 
 @dataclass(frozen=True, slots=True)

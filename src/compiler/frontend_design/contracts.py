@@ -7,6 +7,7 @@ from typing import Any, ForwardRef, Literal, NotRequired, Required, Union, get_a
 from ..ir.frontend import UINode, UIEvent, FrontendState, UIFunction, ValueSource
 from ..ir.backend import BackendTypeDefinition
 from ..ir.integration import PendingCapability
+from ..frontend_semantics import UI_SEMANTIC_CONTRACT
 
 TABLE_TYPES = {"ui": UINode, "data": FrontendState,
                "functions": UIFunction, "types": BackendTypeDefinition,
@@ -144,6 +145,8 @@ NON_LEAF requirements integrate completed child designs; add only explicitly des
 navigation, page composition or small local interactions. Preserve child behavior and its scope;
 do not redesign child workflows or activate every control visible in the page analysis.
 """
+
+COMMON += UI_SEMANTIC_CONTRACT
 
 VALUES = """Bindings use {kind:literal,value:JSON} or {kind:data|item,id,path?:[string|integer]}.
 Types use scalar/array/named; named IDs must exist in supplied or newly defined types.

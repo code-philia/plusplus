@@ -9,6 +9,7 @@ from typing import Any, Callable
 from model.structured import AgentInvocationResult, BaseStructuredAgent, StructuredModel
 from compiler.implementation.contracts import ProposedEdit, ProposedPatch
 from compiler.implementation.agents.implementation import IMPLEMENTATION_OUTPUT_SCHEMA
+from compiler.frontend_semantics import REACT_SEMANTIC_EXAMPLES
 
 
 ANALYSIS_SCHEMA = {
@@ -100,6 +101,17 @@ design contract or environment might be at fault, return NEEDS_DIAGNOSIS with
 edits:[]; a separate analysis will determine the broader repair scope.
 Do not guess a current-file repair when evidence is insufficient. Return JSON only.
 """
+
+
+ANALYSIS_INSTRUCTIONS += """
+For role/name locator failures, compare the requirement's explicit name/role against actual
+rendered element semantics: visible status text is not necessarily its accessible name,
+and main is not region. Do not classify a valid requirement-based assertion as TEST merely
+because implementation used a different role or omitted aria-label/aria-labelledby. For an
+inert action, inspect both the child handler prop and its parent wiring/dialog rendering.
+"""
+REPAIR_INSTRUCTIONS += REACT_SEMANTIC_EXAMPLES
+DIRECT_REPAIR_INSTRUCTIONS += REACT_SEMANTIC_EXAMPLES
 
 
 class TestFailureAnalysisAgent:
