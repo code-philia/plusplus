@@ -244,7 +244,6 @@ class ImplementationAgent:
         owned = [
             row for row in resolved["owned_targets"]
             if (not requested or row["module_id"] in requested)
-            and request.requirement_id in row.get("owner_requirements", [])
             and (self._allowed_kinds is None or row["kind"] in self._allowed_kinds)
         ]
         if requested - {row["module_id"] for row in owned}:
@@ -274,7 +273,7 @@ class ImplementationAgent:
         if self._trace:
             self._trace(file_selection_log(request.requirement_id, "implementation", editable_files, "current_targets"))
             self._trace(file_selection_log(request.requirement_id, "implementation", related_files,
-                                           "direct_ui_parents_types_test_tools_and_explicit_file_requests"))
+                                           "ui_ancestors_to_page_types_test_tools_and_explicit_file_requests"))
         from compiler.implementation.frontend_context import implementation_requirement
         requirement, missing_visuals = implementation_requirement(
             request.requirement, self.output_root, frontend=request.frontend_ir is not None)
@@ -288,6 +287,7 @@ class ImplementationAgent:
             "editable_files": editable_files,
             "related_files": related_files,
             "source_targets": scope["targets"],
+            "authorized_target_ids": sorted(row["module_id"] for row in owned),
             "file_catalog": scope["file_catalog"],
             "file_scope": scope["reasons"],
             "preserve_requirements": scope["preserve_requirements"],

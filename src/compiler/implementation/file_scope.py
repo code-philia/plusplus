@@ -99,11 +99,13 @@ class RequirementFileScope:
         if target_ids is not None:
             if target_ids - {row["module_id"] for row in resolved["owned_targets"]}:
                 raise ValueError("Requested target is not owned or structurally used by this requirement")
-            targets = set(target_ids)
+            # Authorization includes structural targets, but initial source loading
+            # includes only direct associations. Other targets remain requestable.
+            targets &= target_ids
         test_imports = {path for relative in test_files for path in import_paths(self.root, relative, self.read(relative))}
         targets.update(row["module_id"] for path in (extra_files or set())
                        for row in self.by_file.get(path, []))
-        direct_parents = set()
+        ui_ancestors = set()
         if self.frontend_ir:
             ui = {row["id"]: row for row in self.frontend_ir["ui"]}
             parents = {child: row["id"] for row in ui.values() for child in row["children"]}
@@ -111,11 +113,21 @@ class RequirementFileScope:
             associated = {key for key, row in ui.items()
                           if requirement_id in row.get("requirement_ids", []) and key in self.bindings}
             if mode != "backend":
-                targets.update(associated)
+                targets.update(associated & target_ids if target_ids is not None else associated)
             controls = {key for key in targets if key in ui}
             controls.update(event["ui_id"] for event in frontend_events(self.frontend_ir) if event["id"] in targets)
-            direct_parents = {parents[key] for key in controls if key in parents and parents[key] in self.bindings}
-        selected = (targets | direct_parents) & self.bindings.keys()
+            if mode != "backend":
+                # Include the full composition path to the screen, without
+                # expanding siblings, descendants or other page subtrees.
+                for key in controls:
+                    visited = set()
+                    while key in ui and key not in visited:
+                        visited.add(key)
+                        if ui[key]["kind"] == "screen" or key not in parents:
+                            break
+                        key = parents[key]
+                        ui_ancestors.add(key)
+        selected = (targets | ui_ancestors) & self.bindings.keys()
         reasons: dict[str, set[str]] = {}
         def add(path: str, reason: str) -> None:
             if path and readable_path(path) and (self.root / path).is_file():
@@ -125,7 +137,7 @@ class RequirementFileScope:
                 add(path, "test_support_import")
         for key in selected:
             row = self.bindings[key]
-            add(row["file"], "requirement_target" if key in targets else "direct_ui_parent")
+            add(row["file"], "requirement_target" if key in targets else "ui_ancestor_to_page")
             for reference in [*[row.get(key) for key in TYPE_KEYS], *row.get("store_types", [])]:
                 if isinstance(reference, dict):
                     add(reference.get("file", ""), "type_contract")

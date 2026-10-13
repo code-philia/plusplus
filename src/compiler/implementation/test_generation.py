@@ -648,7 +648,7 @@ class RequirementTestGenerationPass:
         artifacts: dict[str, str] = {}
         from compiler.implementation.file_context import file_selection_log
         self._trace(file_selection_log(requirement_id, "test_generation", context_pack["source_files"],
-                                       "current_requirement_modules_direct_ui_parents_types_and_test_tools"))
+                                       "current_requirement_modules_ui_ancestors_to_page_types_and_test_tools"))
         decision, sources, errors = self._generate_and_validate(
             requirement_id,
             context_pack,
