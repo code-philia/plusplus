@@ -73,7 +73,7 @@ INSTRUCTIONS = """Generate database seed code for external validation AFTER appl
 This is not internal TDD and you cannot see or modify external validation tests.
 Use seed_data only: instantiate every lifecycle SEED record and no CREATED/DERIVED records.
 Requirement data.requires is only an association, not additional rows to insert.
-The final generated schema, DDL and current database/business source are authoritative for physical
+The current database DDL, schema source and database/business implementation are authoritative for physical
 table/column names, foreign keys, enum representation and credentials/password hashing.
 Do not hardcode example-specific behavior into the application or change any existing source.
 Return a complete TypeScript module for backend/src/validation/seed.ts exporting:
@@ -173,8 +173,7 @@ class ValidationPreparationPass:
             raise ValueError("Each ROOT.data record must be an object")
         seed_data = [row for row in requirement_ir.get("data", []) if row.get("lifecycle") == "SEED"]
         environment = normalize_environment(requirement_ir.get("environment", {}))
-        schema_path = self.root / ".arc/design/database/schema.json"
-        if not schema_path.is_file() or not (self.root / "backend/src/server.ts").is_file():
+        if not (self.root / "backend/src/server.ts").is_file():
             raise ValueError("Validation preparation requires an implemented, initialized application")
         backend_package = self.root / "backend/package.json"
         package = json.loads(backend_package.read_text(encoding="utf-8"))
@@ -202,7 +201,7 @@ class ValidationPreparationPass:
             if path in catalog:
                 loaded.add(path)
         fingerprint = hashlib.sha256(json.dumps({"data": seed_data, "environment": environment,
-            "schema": json.loads(schema_path.read_text(encoding="utf-8"))}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            "database_sources": {path: catalog[path].read_text(encoding="utf-8") for path in sorted(catalog) if path.startswith(("backend/src/db/", "backend/sql/"))}}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         seed_fingerprint = fingerprint
         originals = {path: (self.root / path).read_bytes() if (self.root / path).is_file() else None
                      for path in (SEED_PATH, START_PATH, RUNTIME_PATH, "backend/package.json", "package.json",
@@ -242,7 +241,7 @@ class ValidationPreparationPass:
 
         try:
             for expansion in range(6):
-                context = {"seed_data": seed_data, "database_schema": json.loads(schema_path.read_text(encoding="utf-8")),
+                context = {"seed_data": seed_data, "database_schema": "Read the authoritative physical schema and initialization from source_files; no design IR exists",
                     "source_files": {path: catalog[path].read_text(encoding="utf-8") for path in sorted(loaded)},
                     "file_catalog": sorted(catalog),
                     "package": package, "tsconfig": json.loads((self.root / "backend/tsconfig.json").read_text(encoding="utf-8"))}

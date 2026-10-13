@@ -17,8 +17,6 @@ from cli.output import (
     print_compilation_summary,
 )
 from compiler import CompilationRequest, Compiler
-from compiler.runtime.checkpoints import START_FROM, prepare_restart, install_restart_dependencies
-from compiler.runtime.history import GitStageError
 
 
 def _get_repo_root() -> str:
@@ -71,7 +69,7 @@ def build_compile_parser(subparsers) -> None:
     parser = subparsers.add_parser(
         "compile",
         help="Compile requirements into a working application",
-        description="Compile a requirement tree through design and lowering, optionally starting from a Git checkpoint.",
+        description="Implement requirements directly in application source, with compilation feedback and optional frozen acceptance tests.",
     )
     parser.add_argument(
         "requirement_path",
@@ -94,14 +92,8 @@ def build_compile_parser(subparsers) -> None:
         action="store_true",
         help="Remove existing output directory before compilation",
     )
-    parser.add_argument("--start-from", choices=START_FROM, default="zero",
-                        help="Resume after a completed stage in an isolated Git worktree")
-    parser.add_argument("--checkpoint-ref", help="Exact checkpoint commit/tag; default: latest matching checkpoint")
-    parser.add_argument("--restart-output", help="New worktree directory; default: sibling of the source project")
     parser.add_argument("--resume", action="store_true",
-                        help="Continue only unstarted TDD requirements in the existing output project")
-    parser.add_argument("--stop-after-lowering", action="store_true",
-                        help="Stop after database/backend/frontend design and lowering, before test generation and TDD")
+                        help="Resume direct-source implementation in the existing output project")
     parser.add_argument("--prepare-validation", action="store_true",
                         help="After implementation, use the model to generate SEED data code and install automatic validation startup")
     parser.set_defaults(func=cmd_compile)
@@ -110,20 +102,18 @@ def build_compile_parser(subparsers) -> None:
 async def cmd_compile(args: argparse.Namespace) -> int:
     """Execute compile subcommand."""
     _ensure_dotenv_loaded()
-    if args.prepare_validation and args.stop_after_lowering:
-        raise ValueError("--prepare-validation requires completed implementation; cannot combine with --stop-after-lowering")
     web_port = _resolve_web_port(args.port)
     
     # Normalize paths
     requirement_path = _locate_requirement_file(args.requirement_path)
     output_dir = os.path.abspath(args.output_dir)
     if args.resume:
-        if args.start_from != "zero" or args.clean or args.checkpoint_ref or args.restart_output:
-            raise ValueError("--resume cannot be combined with --start-from, --clean, --checkpoint-ref or --restart-output")
+        if args.clean:
+            raise ValueError("--resume cannot be combined with --clean")
         try:
-            snapshot = json.loads((Path(output_dir) / ".arc/checkpoints/current.json").read_text(encoding="utf-8"))
-            if not isinstance(snapshot, dict) or snapshot.get("stage") != "lowered":
-                raise ValueError("--resume requires a project that completed lowering")
+            snapshot = json.loads((Path(output_dir) / ".arc/implementation/direct_workspace.json").read_text(encoding="utf-8"))
+            if not isinstance(snapshot, dict) or snapshot.get("mode") != "direct-source":
+                raise ValueError("--resume requires a direct-source workspace")
             saved_port = int(snapshot["web_port"])
             if args.port is not None and web_port != saved_port:
                 raise ValueError(f"--resume requires --port {saved_port}")
@@ -132,26 +122,6 @@ async def cmd_compile(args: argparse.Namespace) -> int:
             print(f"Resume error: {exc}", file=sys.stderr)
             return 1
     
-    if args.start_from == "zero" and (args.checkpoint_ref or args.restart_output):
-        raise ValueError("--checkpoint-ref/--restart-output require a non-zero --start-from")
-    if args.start_from != "zero" and args.clean:
-        raise ValueError("--clean cannot be combined with a restart")
-    restart_commit = None
-    if args.start_from != "zero":
-        try:
-            restarted, checkpoint_port, restart_commit = prepare_restart(
-                Path(output_dir), args.start_from, args.checkpoint_ref,
-                Path(args.restart_output) if args.restart_output else None,
-                requirement_path=Path(requirement_path), requested_port=web_port if args.port is not None else None,
-            )
-            output_dir = str(restarted)
-            if args.port is not None and web_port != checkpoint_port:
-                raise GitStageError(f"Checkpoint requires --port {checkpoint_port}; worktree retained at {output_dir}")
-            web_port = checkpoint_port
-        except GitStageError as exc:
-            print(f"Checkpoint error: {exc}", file=sys.stderr)
-            return 1
-
     # Handle --clean
     if args.clean and os.path.exists(output_dir):
         shutil.rmtree(output_dir)
@@ -170,15 +140,6 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         web_port=web_port,
     )
     
-    if restart_commit:
-        print(f"Starting from {args.start_from} at {restart_commit}; worktree: {output_dir}")
-        print("Installing locked dependencies in the restart worktree (npm ci)...")
-        try:
-            await asyncio.to_thread(install_restart_dependencies, Path(output_dir))
-        except GitStageError as exc:
-            print(str(exc), file=sys.stderr)
-            return 1
-
     # Run compilation
     start_time = time.time()
     compiler = Compiler(log_cb=cli_log)
@@ -186,9 +147,7 @@ async def cmd_compile(args: argparse.Namespace) -> int:
         output_dir=Path(output_dir),
         requirement_path=Path(requirement_path),
         web_port=web_port,
-        start_from=args.start_from,
         resume=args.resume,
-        stop_after_lowering=args.stop_after_lowering,
         prepare_validation=args.prepare_validation,
     ))
     result = outcome.to_dict()
@@ -196,9 +155,8 @@ async def cmd_compile(args: argparse.Namespace) -> int:
     elapsed = time.time() - start_time
     print_compilation_summary(result, output_dir, elapsed)
     
-    # Completion of the compilation run is the process-level success signal.
-    # Requirement failures remain available in the result, summary and debug log.
-    return 0
+    # Failure must reach benchmark automation through the exit status.
+    return 0 if outcome.ok else 1
 
 
 def _resolve_web_port(cli_port: int | None) -> int:
