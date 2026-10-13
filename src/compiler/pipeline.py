@@ -83,6 +83,7 @@ class Compiler:
         if request.prepare_validation and request.stop_after_lowering:
             raise ValueError("Validation preparation requires completed implementation")
         from compiler.validation_preparation import ValidationPreparationPass, disable_validation_startup
+        from compiler.validation_preparation.stage import check_validation_readiness
         # A previously prepared deployment must not seed during internal TDD.
         disable_validation_startup(request.output_dir.expanduser().resolve())
         run_id = uuid.uuid4().hex
@@ -97,9 +98,11 @@ class Compiler:
         runtime.events.mark_run_started("ARC compilation started.", phase="PROJECT")
         await self._log("Compiler", "ARC compilation started.")
         result = await self._run_compile(request)
-        if result.ok and request.prepare_validation:
-            await self._log("Compiler", "Generating external validation seed code from the completed application.")
+        if request.prepare_validation:
             try:
+                await self._log("Compiler", "Checking application build and startup before validation seed preparation.")
+                await asyncio.to_thread(check_validation_readiness, request.output_dir)
+                await self._log("Compiler", "Application readiness passed; generating external validation seed code.")
                 model = self._model or Model.from_env()
                 if hasattr(model, "set_usage_path"):
                     model.set_usage_path(request.output_dir / ".arc/model_usage.jsonl")

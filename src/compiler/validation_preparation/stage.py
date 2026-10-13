@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import socket
+import subprocess
+import tempfile
+import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +23,45 @@ SEED_PATH = "backend/src/validation/seed.ts"
 START_PATH = "backend/src/validation/start.ts"
 MARKER = ".arc/validation/preparation.json"
 START_COMMAND = "npm run build -w @arc/shared && npm run build && node ./dist/validation/start.js"
+
+
+def check_validation_readiness(root: Path) -> None:
+    """Check deployable artifacts without using or seeding the application database."""
+    root = root.expanduser().resolve()
+    build = ProjectBuilder(root).build()
+    if not build.ok:
+        raise ValueError('Validation preparation readiness build failed: ' + '; '.join(build.errors))
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1', 0))
+        port = reservation.getsockname()[1]
+    with tempfile.TemporaryDirectory(prefix='arc-validation-readiness-') as directory:
+        environment = {**os.environ, 'PORT': str(port), 'NODE_ENV': 'test',
+                       'DATABASE_URL': str(Path(directory) / 'probe.db')}
+        with tempfile.TemporaryFile() as output:
+            process = subprocess.Popen(['node', 'dist/server.js'], cwd=root / 'backend',
+                                       env=environment, stdout=output, stderr=subprocess.STDOUT)
+            try:
+                deadline = time.monotonic() + 30
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                while process.poll() is None and time.monotonic() < deadline:
+                    try:
+                        with opener.open(f'http://127.0.0.1:{port}/__arc/health', timeout=1) as response:
+                            if response.status == 200 and process.poll() is None:
+                                return
+                    except (OSError, urllib.error.URLError):
+                        pass
+                    time.sleep(0.2)
+                output.seek(0)
+                detail = output.read().decode('utf-8', errors='replace')[-4000:]
+                raise ValueError('Validation preparation readiness startup failed: ' + detail)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
 OUTPUT_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
