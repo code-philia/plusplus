@@ -1,35 +1,3 @@
-"""Shared, JSON-serializable intermediate representation contracts.
-
-Stage algorithms live outside this package. Add new IR families here so their
-producers and consumers can share the same definitions.
-"""
-
-from .integration import PendingCapability
-from .database import (
-    ERAttribute, EREntity, ERModelIR, ERRelationship,
-    SchemaColumn, SchemaConstraint, SchemaDefault, SchemaIR, SchemaTable,
-    SchemaDataType, SchemaColumnConstraint, table_constraints,
-)
-from .backend import (
-    BackendIR, BackendModule, APIModule, FunctionModule,
-    DatabaseModule, ModuleBase, BackendField, BackendType, BackendTypeDefinition,
-    ModuleCall, DataAccess, APIRequestField, module_fields,
-)
-from .frontend import (
-    FrontendIR, UINode, FrontendState, UIEvent, UIFunction, UICall, ValueSource,
-    LiteralValue, ReferenceValue, UIRepeat, UIVisualReference, RequirementUIAssociation,
-)
-
-__all__ = [
-    "PendingCapability",
-    "ERAttribute", "EREntity", "ERModelIR", "ERRelationship", "SchemaDataType",
-    "SchemaColumnConstraint", "table_constraints", "SchemaColumn", "SchemaConstraint", "SchemaDefault",
-    "SchemaIR", "SchemaTable",
-    "BackendIR", "BackendModule", "APIModule",
-    "FunctionModule", "DatabaseModule", "ModuleBase", "BackendField",
-    "BackendType", "BackendTypeDefinition", "ModuleCall",
-    "DataAccess", "APIRequestField", "module_fields",
-    "FrontendIR", "UINode", "FrontendState", "UIEvent", "UIFunction", "UICall",
-    "ValueSource", "LiteralValue", "ReferenceValue", "UIRepeat", "UIVisualReference",
-    "RequirementUIAssociation",
-]
+"""Database and backend design IR contracts."""
+from .database import *
+from .backend import BackendIR, APIModule, FunctionModule, DatabaseModule, BackendTypeDefinition

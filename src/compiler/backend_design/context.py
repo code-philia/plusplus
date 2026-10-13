@@ -1,138 +1,40 @@
-"""Deterministic model context projections; canonical Schema IR only."""
-from __future__ import annotations
-
-import copy
+"""Small non-embedding retrieval and requirement-specific database context."""
 import json
 import re
-from typing import Any
 
 
-def required_types(payload: Any, definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    def names(value: Any) -> set[str]:
-        if isinstance(value, list):
-            return set().union(*(names(item) for item in value)) if value else set()
-        if not isinstance(value, dict):
-            return set()
-        own = {value['type_id']} if value.get('kind') == 'named' else set()
-        return own | set().union(*(names(item) for item in value.values()))
-
-    registry = {row['id']: row for row in definitions}
-    pending, found = list(names(payload)), set()
-    while pending:
-        key = pending.pop()
-        if key not in found:
-            found.add(key)
-            pending.extend(names(registry.get(key, {})) - found)
-    return [copy.deepcopy(row) for row in definitions if row['id'] in found]
+def terms(value):
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', json.dumps(value, ensure_ascii=False))
+    return set(re.findall(r'[a-z0-9]+|[\u4e00-\u9fff]', text.lower()))
 
 
-def module_contract(module: dict[str, Any]) -> dict[str, Any]:
-    """Project interfaces and their single authoritative behavior spec."""
-    result = {key: copy.deepcopy(module[key]) for key in
-              ('id', 'kind', 'path', 'method', 'authentication', 'request', 'response', 'status_code',
-               'content_type', 'parameters', 'returns', 'context', 'spec', 'data_access') if key in module}
-    return result
+def database_context(database, rid):
+    access = database.get('access', {}).get(rid, {'read': [], 'write': []})
+    entities = [row for row in database['entities'] if rid in row['requirement_ids']
+                or any(target.split('.')[0] == row['key'] for operation in ('read', 'write') for target in access.get(operation, []))]
+    return {'read': access.get('read', []), 'write': access.get('write', []), 'entities': entities}
 
 
-def requirement_reuse_candidates(ir: dict[str, Any], rid: str, nodes: dict[str, Any],
-                                 schema: dict[str, Any], *, kinds: set[str],
-                                 count: int = 6) -> list[dict[str, Any]]:
-    """Retrieve committed requirements by overlapping entities and business domains."""
-    from .validation import reachable
-    modules = {row['id']: row for row in ir['modules']}
-    tables = schema.get('tables', [])
-    links = schema.get('traceability', {}).get('requirements', {})
-
-    def tokens(value: Any) -> set[str]:
-        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', str(value))
-        return set(re.findall(r'[a-z0-9]+|[\u4e00-\u9fff]', text.lower()))
-
-    def features(key: str) -> tuple[set[str], set[str]]:
-        node = nodes.get(key, {})
-        text = tokens(node.get('name', '') + ' ' + node.get('description', ''))
-        entities = set(links.get(key, {}).get('tables', []))
-        entities.update(row['name'] for row in tables if key in row.get('requirement_ids', [])
-                        or tokens(row['name']) <= text)
-        owned = [row['id'] for row in modules.values() if key in row['requirement_ids']]
-        entities.update(access['table'] for target in reachable(owned, modules)
-                        for access in modules[target].get('data_access', []))
-        domains = {str(value) for field in ('domain', 'domains')
-                   for value in (node.get(field, []) if isinstance(node.get(field), list) else [node.get(field)]) if value}
-        parent = node.get('parent_id')
-        visited = set()
-        while parent in nodes and nodes[parent].get('parent_id') and parent not in visited:
-            visited.add(parent)
-            domains.add(parent)
-            parent = nodes[parent].get('parent_id')
-        return entities, domains
-
-    entities, domains = features(rid)
-    matches = []
-    owners = {owner for row in modules.values() for owner in row['requirement_ids'] if owner != rid}
-    for owner in owners:
-        other_entities, other_domains = features(owner)
-        common_entities, common_domains = entities & other_entities, domains & other_domains
-        if common_entities or common_domains:
-            matches.append({'requirement_id': owner, 'entity_overlap': sorted(common_entities),
-                            'domain_overlap': sorted(common_domains),
-                            'score': 20 * len(common_entities) + 10 * len(common_domains)})
-    matches.sort(key=lambda row: (-row['score'], row['requirement_id']))
-    matches = matches[:8]
-    scores = {row['requirement_id']: row['score'] for row in matches}
-    candidates = [row for row in modules.values() if row['kind'] in kinds and set(row['requirement_ids']) & scores.keys()]
-    # Prefer the module's own resource/responsibility over setup APIs inherited by its owner.
-    query = tokens(nodes.get(rid, {}).get('name', '') + ' ' + nodes.get(rid, {}).get('description', ''))
-    def module_score(row: dict[str, Any]) -> int:
-        direct = {access['table'] for access in row.get('data_access', [])}
-        own = tokens(row['id'].split('::')[-1] + ' ' + row.get('path', ''))
-        return (100 * len(entities & direct) + 5 * len(query & own)
-                + max(scores.get(owner, 0) for owner in row['requirement_ids']))
-    candidates.sort(key=lambda row: (-module_score(row), row['id']))
-    return copy.deepcopy(candidates[:count])
-
-
-def reuse_context(ir: dict[str, Any], modules: list[dict[str, Any]], query: Any,
-                  requested_type_ids: set[str] | None = None, *,
-                  kinds: set[str], upstream: list[dict[str, Any]]) -> dict[str, Any]:
-    """Layer-local contracts; load only referenced or explicitly requested types."""
-    terms = lambda value: set(re.findall(r'[a-z0-9_]+|[\u4e00-\u9fff]',
-                                        json.dumps(value, ensure_ascii=False).lower()))
-    wanted = terms(query)
-    loaded = {row['id'] for row in modules}
-    catalog = sorted([row for row in ir['modules'] if row['kind'] in kinds and row['id'] not in loaded],
-                     key=lambda row: (-len(wanted & terms(row)), row['id']))[:32]
-    seeds = [*modules, *upstream,
-             *[{'kind': 'named', 'type_id': key} for key in sorted(requested_type_ids or set())]]
-    types = required_types(seeds, ir['types'])
-    loaded_types = {row['id'] for row in types}
-    type_catalog = sorted([row for row in ir['types'] if row['id'] not in loaded_types],
-                          key=lambda row: (-len(wanted & terms(row)), row['id']))[:16]
-    return {
-        'modules': [module_contract(row) for row in modules], 'types': types,
-        'module_catalog': [{key: copy.deepcopy(row[key]) for key in ('id', 'kind', 'path', 'method') if key in row}
-                           | {'spec': row['spec'][:240]} for row in catalog],
-        'type_catalog': [{'id': row['id'], 'kind': row['kind']} for row in type_catalog],
-    }
-
-
-def requirement_contracts(ir: dict[str, Any], requirement_ids: list[str]) -> dict[str, Any]:
-    """Derived summaries only: module contracts remain the authoritative records."""
-    result = {}
-    for rid in requirement_ids:
-        modules = [row for row in ir['modules'] if rid in row['requirement_ids']]
-        operations: dict[str, dict[str, Any]] = {}
-        for module in modules:
-            for access in module.get('data_access', []):
-                merged = operations.setdefault(access['table'], {'table': access['table'],
-                    'read': set(), 'create': set(), 'update': set(), 'delete': False})
-                for key in ('read', 'create', 'update'):
-                    merged[key].update(access[key])
-                merged['delete'] |= access['delete']
-        result[rid] = {
-            'module_ids': sorted(row['id'] for row in modules),
-            'api_ids': sorted(row['id'] for row in modules if row['kind'] == 'API'),
-            'type_ids': sorted(row['id'] for row in required_types(modules, ir['types'])),
-            'data_access': [{key: sorted(value) if isinstance(value, set) else value
-                             for key, value in operations[table].items()} for table in sorted(operations)],
-        }
-    return {'derived_from': 'backend_ir.json', 'requirements': result}
+def retrieve(ir, kind, requirement, data, accesses, k=6):
+    query = terms({key: requirement[key] for key in ('name', 'description', 'scenarios') if key in requirement})
+    wanted = set(data['read']) | set(data['write'])
+    scores = {}
+    for rid, access in accesses.items():
+        other = set(access.get('read', [])) | set(access.get('write', []))
+        fields = wanted & other
+        entities = {key.split('.')[0] for key in wanted} & {key.split('.')[0] for key in other}
+        all_entities = {key.split('.')[0] for key in wanted | other}
+        scores[rid] = (20 * len(fields) / max(1, len(wanted | other))
+                       + 5 * len(entities) / max(1, len(all_entities)))
+    candidates = []
+    for row in ir['modules']:
+        if row['kind'] != kind:
+            continue
+        score = max((scores.get(rid, 0) for rid in row['reqs']), default=0)
+        score += len(query & terms(row['name'] + ' ' + row['spec']))
+        if row['shared']:
+            score += 2
+        if score:
+            candidates.append((score, row))
+    candidates.sort(key=lambda pair: (-pair[0], pair[1]['id']))
+    return [row for _, row in candidates[:k]]

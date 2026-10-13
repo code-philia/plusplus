@@ -1,7 +1,4 @@
-"""Run backend design against an existing database-design output workspace.
-
-Usage: python scripts/design_backend.py requirements.yaml -o output-directory
-"""
+"""Design leaf backend API/FUNC/DB modules from an existing database IR."""
 from __future__ import annotations
 
 import argparse
@@ -10,76 +7,55 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-# Allow direct execution without installing the compiler package.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from cli.commands import build_compile_parser, _ensure_dotenv_loaded, _locate_requirement_file
-from compiler.runtime.artifacts import CompilerArtifactStore
+from cli.commands import _ensure_dotenv_loaded, _locate_requirement_file
 from compiler.backend_design import BackendDesignPass
-from model.client import Model
+from compiler.preprocessing.stage import RequirementPreprocessor
+from model.client import Model, ModelConfigurationError
+from utils.jsonio import write_json_atomic
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers()
-    build_compile_parser(subparsers)
-    command = subparsers.choices["compile"]
-    command.prog = parser.prog
-    command.description = (
-        "Generate only backend design using existing preprocessing and database "
-        "artifacts. Arguments match the original compile command; --port is "
-        "accepted but unused. Existing backend design results are overwritten."
-    )
-    args = command.parse_args(argv)
-    if args.clean or args.resume or args.start_from != "zero" or args.checkpoint_ref or args.restart_output:
-        command.error(
-            "Backend-only design reads the existing output directory directly; "
-            "--clean, --resume and checkpoint/restart options are not supported."
-        )
-
+    parser = argparse.ArgumentParser(description='Design backend modules for leaf requirements only')
+    parser.add_argument('requirement_path', nargs='?', help='Requirements directory or YAML file; optional with existing preprocessing')
+    parser.add_argument('-o', '--output-dir', required=True)
+    args = parser.parse_args(argv)
     try:
         _ensure_dotenv_loaded()
-        requirement = Path(_locate_requirement_file(args.requirement_path))
-        output = Path(args.output_dir).resolve()
-        store = CompilerArtifactStore(output)
-
-        def read(relative: str) -> dict:
-            path = store.root / relative
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(value, dict):
-                raise ValueError(f"Expected a JSON object: {path}")
-            return value
-
-        requirements = read("preprocessing/requirement_ir.json")
-        dependencies = read("preprocessing/dependency_graph.json")
-        schema = read("design/database/schema.json")
-        digest = hashlib.sha256(requirement.read_bytes()).hexdigest()
-        if requirements.get("source", {}).get("sha256") != digest:
-            raise ValueError(
-                "Requirement file differs from the existing preprocessing artifacts; "
-                "use the original requirement file or regenerate database design."
-            )
-        if schema.get("status") != "RESOLVED" or not isinstance(schema.get("tables"), list):
-            raise ValueError("Existing schema.json must be a RESOLVED database-neutral schema.")
-
-        model = Model.from_env()
-        model.set_usage_path(store.root / "backend_design_usage.jsonl")
-        print(f"Backend design workspace: {output}", flush=True)
-        result = BackendDesignPass(model, store.root).compile(requirements, dependencies, schema)
-        store.write_design(design_ir=result.design_ir)
-        print(f"Backend design completed: {result.ok}")
-        print(f"IR: {store.backend_design_root / 'backend_ir.json'}")
-        print(f"Report: {store.backend_design_root / 'report.json'}")
+        arc = Path(args.output_dir).expanduser().resolve() / '.arc'
+        req_path = arc / 'preprocessing/requirement_ir.json'
+        dep_path = arc / 'preprocessing/dependency_graph.json'
+        source = (Path(_locate_requirement_file(str(Path(args.requirement_path).expanduser())))
+                  if args.requirement_path else None)
+        if req_path.exists() or dep_path.exists():
+            if not req_path.is_file() or not dep_path.is_file():
+                raise ValueError('Existing preprocessing artifacts are incomplete; they will not be overwritten')
+            requirements = json.loads(req_path.read_text(encoding='utf-8'))
+            if source and requirements.get('source', {}).get('sha256') != hashlib.sha256(source.read_bytes()).hexdigest():
+                raise ValueError('Requirements differ from existing preprocessing; use a new workspace')
+        else:
+            if source is None:
+                raise ValueError('Provide requirement_path when preprocessing artifacts do not exist')
+            parsed = RequirementPreprocessor().compile(source)
+            if not parsed.ok:
+                raise ValueError('; '.join(parsed.errors))
+            requirements = parsed.requirement_ir
+            write_json_atomic(req_path, requirements)
+            write_json_atomic(dep_path, parsed.dependency_graph)
+        database = json.loads((arc / 'design/database/er_model.json').read_text(encoding='utf-8'))
+        result = BackendDesignPass(Model.from_env(), arc).compile(requirements, database)
         for warning in result.warnings:
-            print(f"WARNING: {warning}")
+            print('WARNING:', warning)
         for error in result.errors:
-            print(f"ERROR: {error}", file=sys.stderr)
+            print('ERROR:', error, file=sys.stderr)
+        print(f'Backend IR: {arc / "design/backend/backend_ir.json"}')
+        print(f'Report: {arc / "design/backend/report.json"}')
         return 0 if result.ok else 1
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        print(f"Backend design error: {exc}", file=sys.stderr)
+    except (ModelConfigurationError, OSError, ValueError, KeyError, TypeError) as exc:
+        print('Backend design error:', exc, file=sys.stderr)
         return 1
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())
