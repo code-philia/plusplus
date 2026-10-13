@@ -64,41 +64,17 @@ def frontend_subgraph(ir: dict[str, Any], requirement_id: str, target_ids: set[s
         parents = {child: row["id"] for row in ui.values() for child in row["children"]}
         selected = (target_ids & rows.keys()) | {key for key, row in rows.items()
                                                 if requirement_id in row.get("requirement_ids", [])}
-        selected.update(set(ir.get('requirement_links', {}).get(requirement_id, {}).get('uses', [])) & rows.keys())
-        # A component can contain UI from several requirements. Supply its whole
-        # planned region so edits preserve the other surfaces and local handlers.
-        from compiler.frontend_lowering.planning import plan_ui_units
-        plan = plan_ui_units(ir)
-        components = {plan["ui_units"][key] for key in selected if key in ui}
-        components.update(plan["ui_units"][event["ui_id"]] for event in frontend_events(ir)
-                          if event["id"] in selected)
-        selected.update(key for unit in plan["units"] if unit["id"] in components for key in unit["ui_ids"])
-        structural = set()
-        for key in list(selected):
-            seen = set()
-            while key in parents and key not in seen:
-                seen.add(key)
-                key = parents[key]
-                if key not in selected:
-                    structural.add(key)
-        selected.update(row["id"] for row in ir["data"] if row["scope_ui_id"] in selected)
-        pending = list(selected)
-        visited = set()
-        while pending:
-            key = pending.pop()
-            if key in visited or key not in rows:
-                continue
-            visited.add(key)
+        controls = selected & ui.keys()
+        controls.update(event['ui_id'] for event in frontend_events(ir) if event['id'] in selected)
+        structural = {parents[key] for key in controls if key in parents} - selected
+        # Keep only directly referenced data and events, never function/callee closure.
+        direct = set()
+        for key in selected:
             row = rows[key]
-            refs = value_references(row, "data") | value_references(row, "item")
-            refs.update(row.get("reads", []))
-            refs.update(row.get("writes", []))
-            refs.update(call["target_id"] for call in [*row.get("calls", []), *row.get("handlers", [])]
-                        if call["kind"] == "FUNC")
-            refs.update(event["id"] for event in frontend_events(ir) if event["ui_id"] == key)
-            new = refs - selected
-            selected.update(new)
-            pending.extend(new)
+            direct.update(value_references(row, 'data') | value_references(row, 'item'))
+            direct.update(row.get('reads', []))
+            direct.update(row.get('writes', []))
+        selected.update(key for key in direct if key in rows and key not in ui)
         result = {table: [copy.deepcopy(row) for row in (frontend_events(ir) if table == "events" else ir[table]) if row["id"] in selected] for table in tables}
         result['structural_ui'] = [copy.deepcopy(row) for row in ir['ui'] if row['id'] in structural - selected]
         result['requirement_links'] = copy.deepcopy(ir.get('requirement_links', {}).get(requirement_id, {}))

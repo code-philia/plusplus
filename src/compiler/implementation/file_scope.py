@@ -1,4 +1,4 @@
-"""Requirement-scoped source discovery, import closure and per-call file permissions."""
+"""Minimal requirement sources with explicit file discovery and permissions."""
 from __future__ import annotations
 
 import posixpath
@@ -94,101 +94,71 @@ class RequirementFileScope:
     def select(self, requirement_id: str, *, mode: str, target_ids: set[str] | None = None,
                extra_files: set[str] | None = None, test_files: tuple[str, ...] = ()) -> dict[str, Any]:
         resolved = CodeTargetResolver(self.registry).resolve_requirement_targets(requirement_id)
-        targets = {row["module_id"] for row in resolved["owned_targets"]}
+        targets = {row["module_id"] for row in resolved["owned_targets"]
+                   if requirement_id in row.get("owner_requirements", [])}
         if target_ids is not None:
-            if target_ids - targets:
+            if target_ids - {row["module_id"] for row in resolved["owned_targets"]}:
                 raise ValueError("Requested target is not owned or structurally used by this requirement")
             targets = set(target_ids)
         test_imports = {path for relative in test_files for path in import_paths(self.root, relative, self.read(relative))}
-        targets.update(row["module_id"] for path in (extra_files or set()) | test_imports for row in self.by_file.get(path, []))
-        relevant_frontend = set(targets)
-        # Frontend uses and composition are relevant even when they establish no
-        # direct semantic ownership (shell, outlet, reused state or handlers).
+        targets.update(row["module_id"] for path in (extra_files or set())
+                       for row in self.by_file.get(path, []))
+        direct_parents = set()
         if self.frontend_ir:
             ui = {row["id"]: row for row in self.frontend_ir["ui"]}
             parents = {child: row["id"] for row in ui.values() for child in row["children"]}
-            association = self.frontend_ir.get("requirement_links", {}).get(requirement_id, {})
-            targets.update(key for key in [*association.get("implements", []), *association.get("uses", [])] if key in self.bindings)
-            relevant_frontend.update(targets)
+            # Association is explicit ownership, not structural uses or dependency ownership.
+            associated = {key for key, row in ui.items()
+                          if requirement_id in row.get("requirement_ids", []) and key in self.bindings}
+            if mode != "backend":
+                targets.update(associated)
             controls = {key for key in targets if key in ui}
             controls.update(event["ui_id"] for event in frontend_events(self.frontend_ir) if event["id"] in targets)
-            for key in list(controls):
-                seen = set()
-                while key in parents and key not in seen:
-                    seen.add(key)
-                    key = parents[key]
-                    targets.add(key)
-        # Explicit callee closure crosses API_CLIENT -> API -> FUNC -> DB for
-        # reading; the agent's phase determines which layers can be edited.
-        pending, selected = list(targets), set()
-        while pending:
-            key = pending.pop()
-            if key in selected or key not in self.bindings:
-                continue
-            selected.add(key)
-            row = self.bindings[key]
-            for dependency in row.get("callees", []):
-                target = self.bindings.get(dependency, {})
-                if row["kind"] == "UI" and target.get("kind") in {"UI", "UI_EVENT"} and dependency not in relevant_frontend:
-                    continue
-                pending.append(dependency)
+            direct_parents = {parents[key] for key in controls if key in parents and parents[key] in self.bindings}
+        selected = (targets | direct_parents) & self.bindings.keys()
         reasons: dict[str, set[str]] = {}
         def add(path: str, reason: str) -> None:
             if path and readable_path(path) and (self.root / path).is_file():
                 reasons.setdefault(path, set()).add(reason)
         for path in test_imports:
-            add(path, "test_import")
+            if path.startswith("tests/support/"):
+                add(path, "test_support_import")
         for key in selected:
             row = self.bindings[key]
-            add(row["file"], "requirement_target" if key in targets else "callee")
+            add(row["file"], "requirement_target" if key in targets else "direct_ui_parent")
             for reference in [*[row.get(key) for key in TYPE_KEYS], *row.get("store_types", [])]:
                 if isinstance(reference, dict):
                     add(reference.get("file", ""), "type_contract")
-        layers = {path.split("/", 1)[0] for path in reasons}
-        if mode == "frontend":
-            layers.add("frontend")
-        elif mode == "backend":
-            layers.add("backend")
-        support = {
-            "backend": ("backend/src/server.ts", "backend/src/app.ts", "backend/src/generated/router.ts",
-                        "backend/src/generated/context.ts", "backend/src/runtime/context.ts", "backend/package.json", "backend/tsconfig.json"),
-            "frontend": ("frontend/src/App.tsx", "frontend/src/main.tsx", "frontend/src/index.css", "frontend/vite.config.ts",
-                         "frontend/package.json", "frontend/tsconfig.json", "frontend/tsconfig.app.json"),
-        }
-        for layer in layers:
-            for path in support.get(layer, ()):
-                add(path, "integration_support")
         known = {row["file"] for row in self.catalog(mode)}
         for path in extra_files or set():
             if path not in known:
                 raise ValueError(f"File request is outside the application source catalog: {path}")
             add(path, "model_file_request")
-        pending, visited = list(reasons), set()
-        while pending:
-            path = pending.pop()
-            if path in visited:
-                continue
-            visited.add(path)
+        # Imported implementation dependencies stay in the catalog until requested.
+        # Direct type imports are sufficient to interpret the loaded signatures.
+        for path in list(reasons):
             source = self.read(path)
             type_source = "\n".join(re.findall(r"(?:import|export)\s+type\b[^;]*;", source, re.DOTALL))
-            type_imports = import_paths(self.root, path, type_source)
-            for dependency in import_paths(self.root, path, source):
-                # Do not expand a shared entrypoint into every unrelated page or
-                # route module. They remain discoverable through the catalog.
-                if dependency in self.by_file and dependency not in reasons and dependency not in type_imports:
-                    continue
-                if dependency not in reasons:
-                    pending.append(dependency)
-                add(dependency, "source_import")
+            for dependency in import_paths(self.root, path, type_source):
+                if dependency not in self.by_file:
+                    add(dependency, "direct_type_import")
         writable = {path for path in reasons if self.editable(path, mode)}
         module_rows = [row for row in self.bindings.values() if row["file"] in reasons]
         preserve = sorted({owner for row in module_rows for owner in row.get("owner_requirements", []) if owner != requirement_id})
         design_context: dict[str, Any] = {}
-        requirement_path = self.root / ".arc/preprocessing/requirement_ir.json"
-        if requirement_path.is_file():
-            nodes = json.loads(requirement_path.read_text(encoding="utf-8")).get("nodes", {})
-            design_context["shared_requirements"] = [{"id": key, **{name: nodes[key][name] for name in
-                ("name", "description", "scenarios") if name in nodes[key]}} for key in preserve if key in nodes]
+        dependency_ids = {key for row in module_rows for key in row.get("callees", [])}
+        design_context["dependency_interfaces"] = [
+            {key: row[key] for key in ("module_id", "kind", "file", "symbol", "route", *TYPE_KEYS) if key in row}
+            for module_id in sorted(dependency_ids) if module_id in self.bindings
+            for row in [self.bindings[module_id]] if row["file"] not in reasons]
+        environment = {}
+        for layer in ("backend", "frontend", "shared"):
+            path = self.root / layer / "package.json"
+            if path.is_file():
+                package = json.loads(path.read_text(encoding="utf-8"))
+                environment[layer] = {key: package[key] for key in
+                                      ("type", "scripts", "dependencies", "devDependencies") if key in package}
+        design_context["environment_summary"] = environment
         backend_path = self.root / ".arc/design/backend/backend_ir.json"
         if backend_path.is_file():
             backend = json.loads(backend_path.read_text(encoding="utf-8"))

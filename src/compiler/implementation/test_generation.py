@@ -648,7 +648,7 @@ class RequirementTestGenerationPass:
         artifacts: dict[str, str] = {}
         from compiler.implementation.file_context import file_selection_log
         self._trace(file_selection_log(requirement_id, "test_generation", context_pack["source_files"],
-                                       "direct_requirement_and_child_modules_types_support_and_schema"))
+                                       "current_requirement_modules_direct_ui_parents_types_and_test_tools"))
         decision, sources, errors = self._generate_and_validate(
             requirement_id,
             context_pack,
@@ -940,12 +940,6 @@ def _build_context_pack(
         )
         if key in requirement
     }
-    database_tables = _database_source_cards(
-        output_root=output_root,
-        database_schema=database_schema,
-        requirement_id=requirement_id,
-        resolved_targets=resolved_targets,
-    )
     model_layers, source_files = _build_model_layers(
         output_root=output_root,
         required_layers=required_layers,
@@ -956,7 +950,6 @@ def _build_context_pack(
         test_targets=associated_targets,
         pure_function_ids=pure_function_ids,
     )
-    source_files.update((row["path"], row["source"]) for row in database_tables)
     # Reading a lowered module is context, not permission to import it in a
     # test. Keep source selection independent of the layer's public seams.
     for target in associated_targets:
@@ -984,6 +977,10 @@ def _build_context_pack(
         "source_files": source_files,
         "layers": model_layers,
         "api_contracts": api_contracts,
+        "file_catalog": scope["file_catalog"],
+        "file_scope": scope["reasons"],
+        "environment_summary": scope["design_context"].get("environment_summary", {}),
+        "dependency_interfaces": scope["design_context"].get("dependency_interfaces", []),
     }
     if "E2E" in required_layers and prerequisite_flows:
         model_context["prerequisite_flows"] = prerequisite_flows
@@ -1054,11 +1051,7 @@ def _requirement_source_targets(
     design_ir: dict[str, Any], bindings: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Select direct ownership only, never the transitive dependency closure."""
-    requirement_ids = {requirement_id, *requirement.get("children_ids", [])}
-    requirement_ids.update(
-        child["id"] for child in requirement.get("children", [])
-        if isinstance(child, dict) and child.get("id")
-    )
+    requirement_ids = {requirement_id}
     module_ids = {
         row["id"] for row in design_ir.get("modules", [])
         if requirement_ids.intersection(row.get("requirement_ids", []))
