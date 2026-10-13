@@ -37,10 +37,7 @@ from compiler.project_initialization.stage import (
     ProjectInitializer,
     validate_frontend_environment,
 )
-from compiler.implementation.stage import NodeTDDOrchestrator
-from compiler.implementation.progress import TDDProgress, load_tdd_manifest
-from compiler.implementation.test_generation import RequirementTestGenerationPass, TestEnvironmentInitializer
-from compiler.implementation.test_runner import TestRunner
+from compiler.implementation.progress import CompilationProgress
 from compiler.preprocessing.visual import (
     VisualReferenceAnalyzer, VisualReferenceAnalysisResult, VisualReferenceResolver,
 )
@@ -55,7 +52,7 @@ async def _default_log_cb(agent_name: str, message: str, status: str | None = No
     write_terminal_log(agent_name, message, status=status, node_id=node_id)
 
 
-def _tdd_postorder(requirement_ir: dict[str, Any]) -> list[str]:
+def _implementation_postorder(requirement_ir: dict[str, Any]) -> list[str]:
     """Use the same document-order DFS postorder as all design passes."""
     targets = set(requirement_ir.get("atomic_units", [])) | set(requirement_ir.get("folder_nodes", []))
     order = postorder(requirement_ir)
@@ -173,7 +170,7 @@ class Compiler:
             }.items():
                 if (request.output_dir / relative).is_file():
                     artifacts[name] = str(request.output_dir / relative)
-            await self._log("Compiler", "Resuming unstarted TDD requirements in the existing project."
+            await self._log("Compiler", "Resuming compilation-driven implementation in the existing project."
                             if request.resume else f"Starting after completed checkpoint: {request.start_from}")
 
         if rank == 0:
@@ -197,8 +194,8 @@ class Compiler:
             try:
                 history.initialize()
                 history.commit("0 project initialization", [
-                    ".gitignore", ".env.example", "README.md", "package.json", "package-lock.json",
-                    "backend", "frontend", "shared", "tests", ".arc/project",
+                    ".gitignore", ".env.example", "package.json", "package-lock.json",
+                    "backend", "frontend", "shared", ".arc/project",
                 ])
             except GitStageError as exc:
                 await self._log("Compiler", str(exc), "error")
@@ -572,7 +569,7 @@ class Compiler:
             await self._log(
                 "Compiler",
                 "Frontend build/typecheck failed; stopping for inspection."
-                if request.stop_after_lowering else "Frontend build/typecheck failed; continuing to TDD for repair.",
+                if request.stop_after_lowering else "Frontend build/typecheck failed; continuing to compilation-driven repair.",
                 "warning",
             )
         history.commit("4.3 frontend build accepted", [".arc/lowering/frontend"])
@@ -583,7 +580,7 @@ class Compiler:
             "Frontend React lowering completed; build and typecheck passed."
             if failed_gate is None
             else ("Frontend React lowering completed; build/typecheck failed."
-                  if request.stop_after_lowering else "Frontend React lowering completed; build/typecheck feedback deferred to TDD."),
+                  if request.stop_after_lowering else "Frontend React lowering completed; build/typecheck feedback deferred to implementation."),
             "success" if failed_gate is None else "warning",
         )
         if request.stop_after_lowering:
@@ -606,7 +603,7 @@ class Compiler:
         model=None,
     ) -> CompilationResult:
         """Restore deterministic binding metadata without regenerating installed source files."""
-        await self._log("Compiler", "Preparing code bindings; continuing to test generation and TDD.")
+        await self._log("Compiler", "Preparing code bindings; continuing to compilation-driven implementation.")
         try:
             model = model or self._model or Model.from_env()
             if hasattr(model, "set_usage_path"):
@@ -633,14 +630,13 @@ class Compiler:
                 frontend_lowering_report=report,
             ))
         except (ModelConfigurationError, OSError, ValueError, KeyError) as exc:
-            await self._log("Compiler", f"TDD handoff failed: {exc}", "error")
+            await self._log("Compiler", f"Implementation handoff failed: {exc}", "error")
             return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
         artifacts["code_bindings"] = artifact_store.write_code_bindings(bindings.registry)
         ProjectGitHistory(request.output_dir).commit("4.4 code bindings", [".arc/lowering/code_bindings.json"])
-        return await self._run_tdd(
-            request=request, artifact_store=artifact_store, requirement_ir=preprocessing.requirement_ir,
-            dependency_graph=preprocessing.dependency_graph, database_schema=database_schema,
-            design_ir=design_ir, frontend_ir=frontend_ir, code_binding_registry=bindings.registry,
+        return await self._run_compile_only(
+            request=request, requirement_ir=preprocessing.requirement_ir,
+            frontend_ir=frontend_ir, code_binding_registry=bindings.registry,
             model=model, root_id=root_id, states=states, artifacts=artifacts,
         )
 
@@ -659,244 +655,54 @@ class Compiler:
             return CompilationResult(
                 ok=False, root_id=root_id, states=states, artifacts=artifacts,
             )
-        # The build already type-checks shared, frontend and backend; tests are
-        # the only workspace omitted from the root build script.
-        typecheck = TestRunner(request.output_dir).run_workspace_typecheck("tests")
-        if typecheck.status != "PASSED":
-            for output in [typecheck.stdout, typecheck.stderr, typecheck.error or ""]:
-                if output:
-                    await self._log("Compiler", f"{stage}: {output}", "warning")
-            return CompilationResult(
-                ok=False, root_id=root_id, states=states, artifacts=artifacts,
-            )
-        await self._log("Compiler", f"{stage}: build and tests typecheck passed.")
+        await self._log("Compiler", f"{stage}: application compilation passed.")
         return None
 
-    async def _run_tdd(
-        self,
-        *,
-        request: CompilationRequest,
-        artifact_store: CompilerArtifactStore,
-        requirement_ir: dict[str, Any],
-        dependency_graph: dict[str, Any],
-        database_schema: dict[str, Any],
-        design_ir: dict[str, Any],
-        frontend_ir: dict[str, Any],
-        code_binding_registry: dict[str, Any],
-        model: StructuredModel,
-        root_id: str | None,
-        states: dict[str, str],
-        artifacts: dict[str, str],
-    ) -> CompilationResult:
-        # ===================================================================
-        #               Stage 5: Test Generation
-        # ===================================================================
-
-        self._runtime.events.mark_phase_started(
-            "TEST_GENERATION", "ARC test generation stage started."
-        )
-
-        await self._log(
-            "Compiler",
-            "Preparing the compiler-owned Vitest, Supertest, and Playwright test environment.",
-        )
-        test_environment = TestEnvironmentInitializer(
-            request.output_dir,
-            backend_port=request.web_port,
-        ).initialize()
-        for error in test_environment.errors:
-            await self._log("Compiler", error, "error")
-        if not test_environment.ok:
-            await self._log("Compiler", "TEST_ENVIRONMENT initialization failed.", "error")
-            return CompilationResult(
-                ok=False,
-                root_id=root_id,
-                states=states,
-                artifacts=artifacts,
-            )
-        await self._log(
-            "Compiler",
-            "TEST_ENVIRONMENT_READY: test workspace and browser prerequisites are available.",
-        )
-
-        atomic_ids = {
-            str(value) for value in requirement_ir.get("atomic_units", []) if str(value)
-        }
-        folder_ids = {
-            str(value) for value in requirement_ir.get("folder_nodes", []) if str(value)
-        }
-        try:
-            order = _tdd_postorder(requirement_ir)
-        except ValueError as exc:
-            await self._log("Compiler", f"ARC4548 TDD_ORDER_INVALID: {exc}", "error")
-            return CompilationResult(
-                ok=False, root_id=root_id, states=states,
-                artifacts=artifacts,
-            )
-        await self._log("Compiler", f"TDD post-order DFS (dependency waves ignored): {order}")
-
+    async def _run_compile_only(self, *, request, requirement_ir, frontend_ir,
+                                code_binding_registry, model, root_id, states, artifacts) -> CompilationResult:
+        from compiler.implementation.compile_only import CompileOnlyOrchestrator
+        order = _implementation_postorder(requirement_ir)
+        progress = CompilationProgress(request.output_dir, requirement_ir, order, resume=request.resume)
+        artifacts["compile_only_progress"] = str(progress.path)
         history = ProjectGitHistory(request.output_dir)
-        test_generation = RequirementTestGenerationPass(
-            model, request.output_dir, artifact_store,
-        )
-        try:
-            existing_manifest = load_tdd_manifest(request.output_dir) if request.resume else None
-            progress = TDDProgress(request.output_dir, requirement_ir, order, resume=request.resume)
-        except (OSError, ValueError, TypeError, KeyError) as exc:
-            await self._log("Compiler", f"Cannot restore TDD progress: {exc}", "error")
-            return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
-        artifacts["tdd_progress"] = str(progress.path)
-        if existing_manifest is not None:
-            artifacts["test_manifest"] = str(artifact_store.tests_root / "test_manifest.json")
-            self._runtime.traceability.merge_test_links(existing_manifest)
-        previous_nodes = dict(progress.nodes) if request.resume else {}
-        if request.resume:
-            if existing_manifest is None and any(row["status"] == "TESTS_PASSED" for row in previous_nodes.values()):
-                await self._log("Compiler", "Cannot resume: completed TDD nodes have no saved test manifest.", "error")
-                return CompilationResult(ok=False, root_id=root_id, states=states, artifacts=artifacts)
-            await self._log("Compiler", f"TDD resume: {len(previous_nodes)} already-started nodes retained; "
-                            f"{len(order) - len(previous_nodes)} unstarted nodes remain.")
-        orchestrator = NodeTDDOrchestrator(
-            model,
-            request.output_dir,
-            requirement_ir=requirement_ir,
-            code_binding_registry=code_binding_registry,
-            frontend_ir=frontend_ir,
-            test_manifest=existing_manifest,
-        )
-        self._runtime.events.mark_phase_started(
-            "TDD", "ARC node-by-node test-driven implementation started.",
-        )
-        failed_requirements: set[str] = set()
-        for rid, row in previous_nodes.items():
-            states[rid] = row["status"]
-            if row["status"] in {"STARTED", "FAILED"}:
-                failed_requirements.add(rid)
-
-        async def warn_node_failure(requirement_id, stage, result):
-            failed = set(result.failed_requirements) if hasattr(result, "failed_requirements") else set()
-            failed.add(requirement_id)
-            failed_requirements.update(failed)
-            for failed_id in failed:
-                states[failed_id] = "FAILED"
-                if failed_id in progress.data["order"]:
-                    progress.mark(failed_id, "FAILED", stage)
-            await self._log(
-                "Compiler",
-                f"{requirement_id}: {stage} failed; continuing with remaining stages where possible. "
-                "Accepted changes are retained; rejected patches remain rolled back.",
-                "warning",
-            )
-
-        for requirement_id in order:
-            if requirement_id in previous_nodes:
-                await self._log("Compiler", f"Resume skips already-started requirement {requirement_id}: "
-                                f"{previous_nodes[requirement_id]['status']}")
+        orchestrator = CompileOnlyOrchestrator(model, request.output_dir,
+            requirement_ir=requirement_ir, code_binding_registry=code_binding_registry, frontend_ir=frontend_ir)
+        self._runtime.events.mark_phase_started("IMPLEMENTATION", "Compile-only requirement implementation started.")
+        await self._log("Compiler", "Compile-only ablation: no test preparation, generation or execution; application build feedback only.")
+        failed = set()
+        for rid in order:
+            if request.resume and progress.nodes.get(rid, {}).get("status") == "COMPILED":
+                states[rid] = "COMPILED"
                 continue
-            progress.mark(requirement_id, "STARTED", "test generation")
-            if requirement_id in folder_ids:
-                targets = CodeTargetResolver(code_binding_registry).resolve_requirement_targets(
-                    requirement_id,
-                )
-                has_screen = any(
-                    isinstance(screen, dict)
-                    and requirement_id in screen.get("requirement_ids", [])
-                    for screen in frontend_ir.get("ui", [])
-                )
-                if not targets["owned_targets"] and not has_screen:
-                    states[requirement_id] = "AGGREGATE_NO_UI"
-                    progress.mark(requirement_id, "AGGREGATE_NO_UI", "no owned UI")
-                    await self._log(
-                        "Compiler",
-                        f"{requirement_id} has no owned targets or associated UI screen; "
-                        "its child requirements are verified independently.",
-                        "warning",
-                    )
-                    continue
-            await self._log("Compiler", f"Generating and freezing tests for {requirement_id}.")
-            generated_tests = test_generation.generate_requirement(
-                requirement_id=requirement_id,
-                requirement_ir=requirement_ir,
-                database_schema=database_schema,
-                design_ir=design_ir,
-                frontend_ir=frontend_ir,
-                code_binding_registry=code_binding_registry,
-                environment_manifest=test_environment.manifest,
-                existing_manifest=orchestrator.test_manifest,
-            )
-            artifacts.update(generated_tests.artifacts)
-            states.update(generated_tests.node_states)
-            for error in generated_tests.errors:
-                await self._log("Compiler", error, "warning")
-            if not generated_tests.ok:
-                await warn_node_failure(requirement_id, "test generation", generated_tests)
-                continue
-            orchestrator.test_manifest = generated_tests.manifest
-            self._runtime.traceability.merge_test_links(generated_tests.manifest)
-            history.commit(f"5 test generation {requirement_id}", [".arc", "tests"])
-
-            if requirement_id in atomic_ids:
-                backend_implementation = orchestrator.implement_backend([requirement_id])
-                for error in backend_implementation.errors:
-                    await self._log("NodeTDDOrchestrator", error, "warning")
-                if not backend_implementation.ok:
-                    await warn_node_failure(requirement_id, "backend implementation", backend_implementation)
-                else:
-                    states[requirement_id] = "BACKEND_IMPLEMENTED"
-                if backend_implementation.changed_files:
-                    history.commit(
-                        f"6.1 backend implementation {requirement_id}",
-                        backend_implementation.changed_files,
-                    )
-
-            frontend_implementation = orchestrator.implement_frontend([requirement_id])
-            for error in frontend_implementation.errors:
-                await self._log("NodeTDDOrchestrator", error, "warning")
-            if not frontend_implementation.ok:
-                await warn_node_failure(requirement_id, "frontend implementation", frontend_implementation)
-            else:
-                states[requirement_id] = "FRONTEND_IMPLEMENTED"
-            if frontend_implementation.changed_files:
-                history.commit(
-                    f"6.2 frontend implementation {requirement_id}",
-                    frontend_implementation.changed_files,
-                )
-
-            # Both initial implementations precede any behavioral test execution.
-            tests = orchestrator.run_test_layers([requirement_id])
-            for error in tests.errors:
-                await self._log("NodeTDDOrchestrator", error, "warning")
-            if not tests.ok:
-                await warn_node_failure(requirement_id, "test-driven repair", tests)
-                continue
-            failed_requirements.discard(requirement_id)
-            states[requirement_id] = "TESTS_PASSED"
-            progress.mark(requirement_id, "TESTS_PASSED", "test layers")
-            await self._log("Compiler", f"TDD completed for {requirement_id}.")
-            if "." not in requirement_id:
-                stage_checkpoint(request.output_dir, requirement_id)
-
-        failed_nodes = sorted(failed_requirements)
-        for failed_id in failed_nodes:
-            states[failed_id] = "FAILED"
-        if failed_nodes:
-            await self._log(
-                "Compiler",
-                "TDD traversal finished with failed requirements: " + ", ".join(failed_nodes),
-                "warning",
-            )
-        final_validation_errors = orchestrator.validate_final()
-        if final_validation_errors:
-            for error in final_validation_errors:
-                await self._log("Compiler", f"Final validation: {error}", "error")
-            return CompilationResult(
-                ok=False, root_id=root_id, states=states,
-                failed_nodes=failed_nodes, artifacts=artifacts,
-            )
-        return CompilationResult(
-            ok=not failed_nodes, root_id=root_id, states=states,
-            failed_nodes=failed_nodes, artifacts=artifacts,
-        )
+            progress.mark(rid, "STARTED", "compile-only implementation")
+            # Repair any inherited compiler errors before requiring each new
+            # implementation patch to pass the complete application build.
+            baseline = orchestrator.repair_compilation(rid)
+            changed_files = set(baseline.changed_files)
+            for error in baseline.errors:
+                await self._log("Compilation", error, "warning")
+            stages = [orchestrator.implement_backend([rid]), orchestrator.implement_frontend([rid])]
+            for stage in stages:
+                changed_files.update(stage.changed_files)
+                for error in stage.errors:
+                    await self._log("Compilation", error, "warning")
+            compiled = orchestrator.repair_compilation(rid)
+            changed_files.update(compiled.changed_files)
+            for error in compiled.errors:
+                await self._log("Compilation", error, "warning")
+            passed = all(stage.ok for stage in stages) and compiled.ok
+            states[rid] = "COMPILED" if passed else "FAILED"
+            progress.mark(rid, states[rid], "application build")
+            if not passed:
+                failed.add(rid)
+            history.commit(f"6 compile-only implementation {rid}",
+                           [*sorted(changed_files), ".arc/compile_only/progress.json"])
+            await self._log("Compiler", f"{rid}: {states[rid]} (compile-only)", None if passed else "warning")
+        final_errors = orchestrator.validate_final()
+        for error in final_errors:
+            await self._log("Compilation", error, "error")
+        return CompilationResult(ok=not failed and not final_errors, root_id=root_id, states=states,
+                                 failed_nodes=sorted(failed), artifacts=artifacts)
 
     async def _log(
         self,

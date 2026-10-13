@@ -248,9 +248,9 @@ class ImplementationAgent:
         ]
         if requested - {row["module_id"] for row in owned}:
             raise ValueError("Requested target is not writable by this requirement and agent.")
-        if not owned:
+        mode = getattr(self, "_scope_mode", None) or ("frontend" if self._allowed_kinds and "UI" in self._allowed_kinds else "backend")
+        if not owned and mode != "repair":
             raise ValueError("No writable source files for this requirement.")
-        mode = "frontend" if self._allowed_kinds and "UI" in self._allowed_kinds else "backend"
         file_scope = RequirementFileScope(self.output_root, request.code_binding_registry, request.frontend_ir)
         scope = file_scope.select(request.requirement_id, mode=mode,
                                   target_ids={row["module_id"] for row in owned}, extra_files=requested_files, test_files=request.test_files)

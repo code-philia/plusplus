@@ -149,6 +149,8 @@ class RequirementFileScope:
             layers.add("frontend")
         elif mode == "backend":
             layers.add("backend")
+        elif mode == "repair":
+            layers.update(("backend", "frontend"))
         support = {
             "backend": ("backend/src/server.ts", "backend/src/app.ts", "backend/src/generated/router.ts",
                         "backend/src/generated/context.ts", "backend/src/runtime/context.ts", "backend/package.json", "backend/tsconfig.json"),

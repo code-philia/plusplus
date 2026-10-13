@@ -125,7 +125,7 @@ class NodeTDDOrchestrator:
         build = ProjectBuilder(self.output_root).build()
         if not build.ok:
             return list(build.errors) or ["PROJECT_BUILD_FAILED: build did not pass."]
-        return self._typecheck_errors(self.test_runner.run_workspace_typecheck("tests"))
+        return []
 
     @staticmethod
     def _typecheck_errors(result: Any) -> list[str]:
@@ -137,25 +137,7 @@ class NodeTDDOrchestrator:
         ) if part]
 
     def _patch_validation_errors(self, changed_files: list[str]) -> tuple[list[str], bool]:
-        paths = [str(path).replace("\\", "/").lstrip("./") for path in changed_files]
-        source_suffixes = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".css", ".scss"}
-        source_roots = (
-            "frontend/src/", "backend/src/", "tests/unit/",
-            "tests/integration/", "tests/e2e/", "tests/support/",
-        )
-        source_only = bool(paths) and all(
-            Path(path).suffix in source_suffixes
-            and path.startswith(source_roots)
-            for path in paths
-        )
-        if not source_only:
-            return self._full_validation_errors(), True
-        errors: list[str] = []
-        for result in self.test_runner.run_changed_typechecks(paths):
-            errors.extend(self._typecheck_errors(result))
-            if errors:
-                break
-        return errors, False
+        return self._full_validation_errors(), True
 
     def _trace_frontend_implementation(self, message: str) -> None:
         self._trace_implementation(message, frontend=True)
@@ -272,12 +254,7 @@ class NodeTDDOrchestrator:
         agent: ImplementationAgent,
     ) -> TDDStageResult:
         result = TDDStageResult(stage, status="IMPLEMENTED")
-        if not self.test_manifest or self.test_manifest.get("status") != "TESTS_FROZEN":
-            return self._fail(result, "Tests must be frozen before implementation.")
         for requirement_id in requirement_ids:
-            if not any(self._has_test(requirement_id, layer) for layer in TEST_LAYERS):
-                result.failed_requirements.append(requirement_id)
-                return self._fail(result, f"No frozen tests for: {requirement_id}")
             targets = [
                 row for row in self._owned_targets(requirement_id)
                 if row.get("kind") in allowed_kinds
@@ -488,7 +465,9 @@ class NodeTDDOrchestrator:
                 requirement_id=requirement_id, requirement=requirement,
                 code_binding_registry=self.code_binding_registry,
                 target_module_ids=target_ids, test_files=test_files,
-                frontend_ir=self.frontend_ir if agent is self.frontend_implementation_agent else None,
+                frontend_ir=self.frontend_ir,
+                iteration=iteration,
+                implementation_feedback="\n".join(result.errors),
             ), accept_patch=accept_patch)
         event = {
             "event": ("direct_repair" if direct_repair else "repair") if repair_context is not None

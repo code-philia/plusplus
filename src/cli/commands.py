@@ -99,9 +99,9 @@ def build_compile_parser(subparsers) -> None:
     parser.add_argument("--checkpoint-ref", help="Exact checkpoint commit/tag; default: latest matching checkpoint")
     parser.add_argument("--restart-output", help="New worktree directory; default: sibling of the source project")
     parser.add_argument("--resume", action="store_true",
-                        help="Continue only unstarted TDD requirements in the existing output project")
+                        help="Resume implementation in place and retry unfinished requirements")
     parser.add_argument("--stop-after-lowering", action="store_true",
-                        help="Stop after database/backend/frontend design and lowering, before test generation and TDD")
+                        help="Stop after database/backend/frontend design and lowering, before implementation")
     parser.add_argument("--prepare-validation", action="store_true",
                         help="After implementation, use the model to generate SEED data code and install automatic validation startup")
     parser.set_defaults(func=cmd_compile)
