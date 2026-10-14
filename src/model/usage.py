@@ -3,14 +3,19 @@ from __future__ import annotations
 
 import json
 import os
+import math
+from threading import RLock
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from utils.archive import snapshot_workspace
+from utils.logging import SynchronousLog
+
+_usage_lock = RLock()
 
 
 def enabled() -> bool:
-    return os.environ.get("ARC_COST_STACK", "0").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("ARC_COST_STACK", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def pricing(model: str) -> tuple[str, float, float, float]:
@@ -24,6 +29,11 @@ def pricing(model: str) -> tuple[str, float, float, float]:
 
 
 def record_usage(root: Path, model: str, usage: dict[str, Any]) -> None:
+    with _usage_lock:
+        _record_usage(root, model, usage)
+
+
+def _record_usage(root: Path, model: str, usage: dict[str, Any]) -> None:
     if not enabled():
         return
     path = root / ".arc" / "cost_stack.json"
@@ -49,19 +59,25 @@ def record_usage(root: Path, model: str, usage: dict[str, Any]) -> None:
             handle.write(json.dumps({"timestamp": state["updated_at"], "model": model,
                                      "currency": currency, "cost": amount,
                                      "totals": totals}, ensure_ascii=False, separators=(",", ":")) + "\n")
-        print("COST_STACK " + json.dumps({"currency": currency, "cost": amount,
-              "total": totals[currency]}, ensure_ascii=False))
+        SynchronousLog('Cost', workspace_root=root).info("COST_STACK " + json.dumps(
+            {"currency": currency, "cost": amount, "total": totals[currency]}, ensure_ascii=False))
         _threshold_snapshot(root, state)
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return
 
 
 def _threshold_snapshot(root: Path, state: dict[str, Any]) -> None:
-    step = float(os.environ.get("ARC_COST_SNAPSHOT_STEP", "10") or 10)
-    if step <= 0:
-        return
+    rate = float(os.environ.get('ARC_USD_TO_CNY', '7.2'))
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError('ARC_USD_TO_CNY must be a positive finite exchange rate')
+    totals = state.get('totals', {})
+    amounts = {'CNY': float(totals.get('CNY', 0)) + float(totals.get('USD', 0)) * rate,
+               'USD': float(totals.get('USD', 0))}
+    state['exchange_rate_usd_to_cny'] = rate
+    state['snapshot_totals'] = amounts
+    step = 10
     thresholds = state.setdefault("thresholds", {})
-    for currency, value in state.get("totals", {}).items():
+    for currency, value in amounts.items():
         current = int(float(value) // step)
         previous = int(thresholds.get(currency, 0))
         for threshold in range(previous + 1, current + 1):

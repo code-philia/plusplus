@@ -3,10 +3,19 @@ from __future__ import annotations
 
 import re
 import zipfile
+from threading import RLock
 from pathlib import Path
+from utils.logging import SynchronousLog
+
+_archive_lock = RLock()
 
 
 def snapshot_workspace(root: Path, trigger: str) -> None:
+    with _archive_lock:
+        _snapshot_workspace(root, trigger)
+
+
+def _snapshot_workspace(root: Path, trigger: str) -> None:
     parent = root.parent
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(trigger)).strip("._") or "checkpoint"
     # Keep trace archives beside, not inside, the generated workspace. This
@@ -18,12 +27,17 @@ def snapshot_workspace(root: Path, trigger: str) -> None:
         return
     try:
         trace_dir.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+        temporary = archive.with_suffix('.zip.tmp')
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as output:
             for path in root.rglob("*"):
-                if not path.is_file() or "node_modules" in path.parts:
+                if not path.is_file() or path.is_symlink() or "node_modules" in path.parts:
                     continue
-                output.write(path, path.relative_to(root.parent))
-    except OSError:
-        return
-
+                try:
+                    output.write(path, path.relative_to(root.parent))
+                except FileNotFoundError:
+                    continue
+        temporary.replace(archive)
+        SynchronousLog('Snapshot', workspace_root=root).info(f'SNAPSHOT trigger={trigger} path={archive}')
+    except OSError as exc:
+        SynchronousLog('Snapshot', workspace_root=root).warning(f'Snapshot failed: {trigger}: {exc}')
 

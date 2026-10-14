@@ -11,6 +11,7 @@ from compiler.lowering.planning import slug, token
 from model.client import describe_model_error
 from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
+from utils.archive import snapshot_workspace
 from .contracts import SCHEMA, PROMPTS
 from .file_context import FileContext
 from .patcher import apply_edits, read_source, restore
@@ -136,6 +137,8 @@ class NodeTDDOrchestrator:
                 states[rid] = 'IMPLEMENTED'
                 self.log.info('Leaf TDD: COMPLETED', node_id=rid)
                 completed_tests.extend(targets)
+                self._report(states, errors, warnings)
+                snapshot_workspace(self.root, rid)
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 restore(self.root, snapshots)
                 states[rid] = 'FAILED_ROLLED_BACK'
