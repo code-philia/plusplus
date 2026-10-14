@@ -21,8 +21,8 @@ def ts_type(schema, namespace=""):
     return {'string': 'string', 'integer': 'number', 'number': 'number', 'boolean': 'boolean', 'null': 'null'}[kind]
 
 
-def contract(raw, definitions, interface=True, namespace=""):
-    return ts_type(parse_contract(raw, 'lowering contract', definitions, interface=interface), namespace)
+def contract(raw, definitions, interface=True, namespace="", *, payload=False):
+    return ts_type(parse_contract(raw, 'lowering contract', definitions, interface=interface, payload=payload), namespace)
 
 
 def refs(raw):

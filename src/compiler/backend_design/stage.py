@@ -13,7 +13,7 @@ from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
 from .contracts import PROMPTS, SCHEMAS
 from .context import database_context, retrieve
-from .validation import shape_errors, validate_ir, parse_contract
+from .validation import shape_errors, validate_ir, parse_contract, normalize_contract
 
 
 @dataclass
@@ -150,6 +150,12 @@ class BackendDesignPass:
 
     @staticmethod
     def _materialize(base, kind, rid, upstream, output, payload):
+        output = copy.deepcopy(output)
+        for definition in output['new_types']:
+            definition['schema'] = normalize_contract(definition['schema'])
+        for module in output['new_modules']:
+            for field in (('payload', 'response') if kind == 'API' else ('input', 'output')):
+                module[field] = normalize_contract(module[field])
         trial = copy.deepcopy(base)
         modules = {row['id']: row for row in trial['modules']}
         types = {row['name']: row['schema'] for row in trial['types']}

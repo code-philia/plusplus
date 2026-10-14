@@ -35,7 +35,7 @@ class BackendLoweringPass:
             imports = ('import type * as Contracts from ' + json.dumps(relative_import(path, types_path)) + ';\n') if needed else ''
             input_name, output_name = row['name'] + 'Input', row['name'] + 'Output'
             files[path] = ('// Generated contract skeleton.\n' + imports
-                + f'export type {input_name} = {contract(inp, definitions, namespace="Contracts.")};\n'
+                + f'export type {input_name} = {contract(inp, definitions, namespace="Contracts.", payload=row["kind"] == "API")};\n'
                 + f'export type {output_name} = {contract(out, definitions, namespace="Contracts.")};\n'
                 + f'export async function {row["name"]}(_input: {input_name}): Promise<{output_name}> {{\n'
                 + '  throw new Error("Not implemented");\n}\n')

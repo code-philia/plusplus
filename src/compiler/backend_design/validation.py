@@ -21,10 +21,33 @@ def shape_errors(value, schema, path='$'):
     return errors
 
 
+def normalize_contract(raw):
+    """Fill omitted object defaults without overriding explicit model decisions."""
+    value = json.loads(raw)
+    def visit(schema):
+        if not isinstance(schema, dict):
+            return
+        if schema.get('type') == 'object':
+            schema.setdefault('properties', {})
+            schema.setdefault('required', [])
+            schema.setdefault('additionalProperties', False)
+        properties = schema.get('properties')
+        if isinstance(properties, dict):
+            for child in properties.values():
+                visit(child)
+        if 'items' in schema:
+            visit(schema['items'])
+        if isinstance(schema.get('anyOf'), list):
+            for child in schema['anyOf']:
+                visit(child)
+    visit(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
 def parse_contract(raw, label, definitions, *, interface=True, payload=False):
     if not isinstance(raw, str):
         raise ValueError(f'{label} must be a JSON string')
-    value = json.loads(raw)
+    value = json.loads(normalize_contract(raw))
     if interface and (not isinstance(value, dict) or value.get('type') != 'object'):
         raise ValueError(f'{label} must contain an object JSON Schema')
     def visit(schema, active=frozenset(), *, parameter=False):
@@ -62,7 +85,7 @@ def parse_contract(raw, label, definitions, *, interface=True, payload=False):
             name = key[8:]
             if name in active:
                 raise ValueError(f'{label}: recursive type {name}')
-            visit(json.loads(definitions[name]), active | {name})
+            visit(json.loads(normalize_contract(definitions[name])), active | {name})
         elif 'anyOf' in schema:
             if schema.keys() - {'anyOf', 'description', 'source'}:
                 raise ValueError(f'{label}: anyOf cannot redefine its alternatives')
@@ -73,7 +96,7 @@ def parse_contract(raw, label, definitions, *, interface=True, payload=False):
         elif schema.get('type') == 'object':
             props, required = schema.get('properties'), schema.get('required')
             if not isinstance(props, dict) or not isinstance(required, list) or any(not isinstance(key, str) for key in required) or set(required) - props.keys() or len(set(required)) != len(required) or schema.get('additionalProperties') is not False:
-                raise ValueError(f'{label}: object needs properties, unique required names and additionalProperties:false')
+                raise ValueError(f'{label}: properties must be an object, required must contain unique existing property names, and additionalProperties must be false')
             for key, child in props.items():
                 if not re.fullmatch(r'[a-z_][a-z0-9_]*', key):
                     raise ValueError(f'{label}: invalid parameter name {key}')

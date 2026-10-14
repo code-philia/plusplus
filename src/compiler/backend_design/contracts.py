@@ -37,10 +37,15 @@ requirements. State authentication, authorization and transaction requirements w
 do not invent unspecified policies, UI configuration endpoints or prerequisite functionality.
 The current task's ancestor descriptions constrain behavior, but are not independent features to implement.
 
-payload/response/input/output are JSON STRINGS containing JSON Schema objects with type:"object",
-properties:{parameter_name:schema}, required:[...], additionalProperties:false. Use snake_case names.
-Void is an empty object schema. Scalar schema types: string, integer, number, boolean, null.
-Use arrays with items, objects with properties/required, enum, and anyOf for nullable values.
+payload/response/input/output are JSON STRINGS containing JSON Schema objects with type:"object".
+Describe actual parameters in properties:{parameter_name:schema}; use snake_case names.
+List mandatory parameters in required:[...]; omit required when none are mandatory. All objects
+are closed in the IR: the compiler supplies additionalProperties:false, required:[] and properties:{}
+when omitted, including nested objects. Never set additionalProperties:true. Omission of required
+means all declared properties are optional; the compiler never guesses which parameters are mandatory.
+Void/no parameters may be written as {"type":"object"}; the compiler expands this to the canonical
+empty object. Scalar schema types: string, integer, number, boolean, null.
+Use arrays with items, objects with properties, enum, and anyOf for nullable values.
 Date, datetime and UUID are strings with format date/date-time/uuid. Never use arbitrary type names.
 For custom reusable DTOs emit new_types:[{name:"NoteView",schema:"<JSON Schema object>"}];
 refer with {"$ref":"#/types/NoteView"}. Reuse loaded definitions unchanged; new names cannot overwrite
