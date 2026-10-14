@@ -91,6 +91,10 @@ class Compiler:
 
             from cli.commands import _ensure_dotenv_loaded
             _ensure_dotenv_loaded()
+            await begin('project_initialization')
+            ProjectInitializer(output, web_port=request.web_port).initialize()
+            await finish(root / 'project/report.json')
+
             model = self.model if self.model is not None else Model.from_env()
             visual = FrontendDesignPass(model, root, reference_root=Path(request.requirement_path).resolve().parent)
             await begin('visual_analysis')
@@ -112,10 +116,6 @@ class Compiler:
             if database.schema['status'] != 'RESOLVED':
                 raise ValueError('Database design did not resolve its schema')
             await finish(root / 'design/database/schema.json', database.warnings)
-
-            await begin('project_initialization')
-            ProjectInitializer(output, web_port=request.web_port).initialize()
-            await finish(root / 'project/report.json')
 
             async def lower(name, lowerer, *args):
                 await begin(name + '_lowering')

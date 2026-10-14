@@ -6,15 +6,15 @@ from typing import Any
 from .preprocessing.traversal import postorder
 from utils.jsonio import write_json_atomic
 
-STAGES = ('visual_analysis', 'database_design', 'project_initialization', 'database_lowering',
+STAGES = ('project_initialization', 'visual_analysis', 'database_design', 'database_lowering',
           'backend_design', 'backend_lowering', 'frontend_design', 'frontend_lowering',
-          'code_binding', 'implementation', 'validation_preparation')
+          'code_binding', 'implementation', 'build', 'validation_preparation')
 ARTIFACT_DIRECTORIES = {
-    'visual_analysis': 'preprocessing/visual', 'database_design': 'design/database',
+    'visual_analysis': 'design/frontend', 'database_design': 'design/database',
     'project_initialization': 'project', 'database_lowering': 'lowering/database',
     'backend_design': 'design/backend', 'backend_lowering': 'lowering/backend',
     'frontend_design': 'design/frontend', 'frontend_lowering': 'lowering/frontend',
-    'code_binding': 'code_binding', 'implementation': 'implementation',
+    'code_binding': 'code_binding', 'implementation': 'implementation', 'build': 'build',
     'validation_preparation': 'validation_preparation',
 }
 

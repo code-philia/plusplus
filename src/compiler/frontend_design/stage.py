@@ -13,7 +13,7 @@ from compiler.preprocessing.traversal import children_by_id, postorder
 from model.client import describe_model_error
 from utils.jsonio import read_json, write_json_atomic
 from .context import region, related_apis, state_context, handler_context, tree_summary, select_types
-from .contracts import PROMPTS, SCHEMAS
+from .contracts import PROMPTS, SCHEMAS, VISUAL_FIELDS, VISUAL_ANALYSIS_VERSION
 from .delta import apply_ui, apply_data, apply_interaction, make_ui
 from .validation import ui_index, validate_ir
 from .visual import image_evidence
@@ -226,14 +226,20 @@ class FrontendDesignPass:
     def _analyze(self, name, reference, rid):
         digest, image = image_evidence(reference, self.reference_root)
         cached = self.visual_cache.get(reference)
-        if isinstance(cached, dict) and cached.get('sha256') == digest and isinstance(cached.get('analysis'), str) and cached['analysis'].strip():
+        if (isinstance(cached, dict) and cached.get('sha256') == digest
+                and cached.get('analysis_version') == VISUAL_ANALYSIS_VERSION
+                and isinstance(cached.get('analysis'), str) and cached['analysis'].strip()):
             return copy.deepcopy(cached)
         def accept(output):
-            if not output['analysis'].strip():
-                raise ValueError('Visual analysis must describe the full visible page')
-            return output['analysis']
-        analysis = self._invoke('visual', rid, {'current_task': {'page': {'name': name, 'reference': reference}}}, accept, image)
-        record = {'reference': reference, 'sha256': digest, 'analysis': analysis}
+            for field in VISUAL_FIELDS:
+                if not output[field] or any(not item.strip() for item in output[field]):
+                    raise ValueError(f'Visual analysis must include nonempty {field}')
+            return output
+        details = self._invoke('visual', rid, {'current_task': {'page': {'name': name, 'reference': reference}}}, accept, image)
+        analysis = '\n\n'.join(field + ':\n' + '\n'.join('- ' + item for item in details[field])
+                               for field in VISUAL_FIELDS)
+        record = {'reference': reference, 'sha256': digest, 'analysis_version': VISUAL_ANALYSIS_VERSION,
+                  'details': details, 'analysis': analysis}
         self.visual_cache[reference] = record
         write_json_atomic(self.root / 'visual_cache.json', self.visual_cache)
         return copy.deepcopy(record)
