@@ -85,6 +85,12 @@ class SynchronousLog:
     def info(self, message: str, *, node_id: str | None = None) -> None:
         self._write(message, status=None, node_id=node_id)
 
+    def warning(self, message: str, *, node_id: str | None = None) -> None:
+        self._write(message, status='warning', node_id=node_id)
+
+    def error(self, message: str, *, node_id: str | None = None) -> None:
+        self._write(message, status='error', node_id=node_id)
+
     def _write(self, message: str, *, status: str | None, node_id: str | None) -> None:
         append_debug_log(
             self._agent_name,

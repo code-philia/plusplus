@@ -10,6 +10,7 @@ from compiler.preprocessing.traversal import children_by_id, postorder
 from compiler.lowering.planning import slug, token
 from model.client import describe_model_error
 from utils.jsonio import write_json_atomic
+from utils.logging import SynchronousLog
 from .contracts import SCHEMA, PROMPTS
 from .file_context import FileContext
 from .patcher import apply_edits, read_source, restore
@@ -37,6 +38,7 @@ def budget(name, default):
 class NodeTDDOrchestrator:
     def __init__(self, model, output_root, *, runner=None, port=33100):
         self.model, self.root = model, Path(output_root).resolve()
+        self.log = SynchronousLog('NodeTDDOrchestrator', workspace_root=self.root)
         self.artifact = self.root / '.arc/implementation'
         self.attempts = budget('MODEL_ATTEMPT', 5)
         self.iterations = budget('ARC_TDD_MAX_ITERATIONS', 5)
@@ -87,9 +89,11 @@ class NodeTDDOrchestrator:
         states, errors, warnings, completed_tests = {}, [], [], []
         self.test_manifest = {}
         for rid in scheduled:
+            self.log.info('Leaf TDD: RUNNING', node_id=rid)
             if not self.context.direct_files(rid):
                 states[rid] = 'SKIPPED_NO_DESIGN'
                 warnings.append(f'{rid}: no associated lowered files; not treated as implemented')
+                self.log.warning(warnings[-1], node_id=rid)
                 continue
             loaded, snapshots = set(), {}
             evidence = []
@@ -129,11 +133,13 @@ class NodeTDDOrchestrator:
                 if not success:
                     raise ValueError(f'Acceptance/regression tests still fail after {self.iterations} implementation rounds')
                 states[rid] = 'IMPLEMENTED'
+                self.log.info('Leaf TDD: COMPLETED', node_id=rid)
                 completed_tests.extend(targets)
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 restore(self.root, snapshots)
                 states[rid] = 'FAILED_ROLLED_BACK'
                 errors.append(f'{rid}: {exc}')
+                self.log.error(errors[-1], node_id=rid)
             self._report(states, errors, warnings)
         final = self.runner.compile()
         self._gate('FINAL', 'compilation', final)
@@ -193,6 +199,7 @@ class NodeTDDOrchestrator:
     def _model_patch(self, phase, rid, loaded, targets, evidence, snapshots, accept):
         feedback, previous, requests = [], None, 0
         for attempt in range(self.attempts):
+            self.log.info(f'{phase} attempt {attempt + 1}/{self.attempts}', node_id=rid)
             while True:
                 payload = self.context.build(rid, phase, loaded, targets, evidence)
                 if feedback:
@@ -221,6 +228,7 @@ class NodeTDDOrchestrator:
                         if requests > self.load_rounds:
                             raise ValueError('File loading rounds exhausted; choose minimal necessary files')
                         loaded.update(paths)
+                        self.log.info('Loading requested files: ' + ', '.join(sorted(paths)), node_id=rid)
                         trace['errors'] = []
                         self._trace(trace)
                         continue
@@ -240,6 +248,7 @@ class NodeTDDOrchestrator:
                     if patch_snapshot:
                         restore(self.root, patch_snapshot)
                     feedback = [describe_model_error(exc)]
+                    self.log.warning(f'{phase} rejected: ' + '; '.join(feedback), node_id=rid)
                     trace['errors'] = feedback
                     self._trace(trace)
                     break
@@ -249,6 +258,7 @@ class NodeTDDOrchestrator:
         write_json_atomic(self.artifact / 'passes' / f'{self.sequence:05d}.json', trace)
 
     def _gate(self, rid, phase, results):
+        self.log.info(f'{phase}: ' + ('PASSED' if passed(results) else 'FAILED'), node_id=rid)
         write_json_atomic(self.artifact / 'gates' / f'{slug(rid)}-{phase}.json', results)
 
     def _report(self, states, errors, warnings):

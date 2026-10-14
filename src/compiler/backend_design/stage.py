@@ -10,6 +10,7 @@ from typing import Any
 from compiler.preprocessing.traversal import postorder, children_by_id
 from model.client import describe_model_error
 from utils.jsonio import write_json_atomic
+from utils.logging import SynchronousLog
 from .contracts import PROMPTS, SCHEMAS
 from .context import database_context, retrieve
 from .validation import shape_errors, validate_ir, parse_contract
@@ -32,6 +33,7 @@ class BackendDesignPass:
         self.model = model
         self.artifact_root = Path(artifact_root)
         self.root = self.artifact_root / 'design/backend'
+        self.log = SynchronousLog('BackendDesignPass', workspace_root=self.artifact_root.parent)
         try:
             self.attempts = max(1, min(20, int(os.getenv('MODEL_ATTEMPT', '5'))))
         except ValueError:
@@ -48,6 +50,7 @@ class BackendDesignPass:
         order = [rid for rid in postorder(requirements) if not children[rid]]
         states, warnings = {}, []
         for rid in order:
+            self.log.info('Leaf design: RUNNING', node_id=rid)
             trial = copy.deepcopy(ir)
             node = requirements['nodes'][rid]
             requirement = self._requirement(node, requirements['nodes'])
@@ -83,10 +86,12 @@ class BackendDesignPass:
                     raise ValueError('; '.join(errors))
                 ir = trial
                 states[rid] = 'DESIGNED'
+                self.log.info('Leaf design: COMPLETED', node_id=rid)
                 write_json_atomic(self.root / 'backend_ir.json', ir)
             except ValueError as exc:
                 states[rid] = 'SKIPPED'
                 warnings.append(f'{rid}: rolled back leaf design after failed attempts: {exc}')
+                self.log.warning(warnings[-1], node_id=rid)
         result = BackendDesignResult(ir, states, warnings=warnings)
         write_json_atomic(self.root / 'backend_ir.json', ir)
         write_json_atomic(self.root / 'report.json', {'status': 'GENERATED_WITH_WARNINGS' if warnings else 'GENERATED',
@@ -116,6 +121,7 @@ class BackendDesignPass:
     def _decision(self, kind, rid, base, upstream, payload, database):
         feedback, previous = [], None
         for attempt in range(self.attempts):
+            self.log.info(f'{kind} design attempt {attempt + 1}/{self.attempts}', node_id=rid)
             request = copy.deepcopy(payload)
             if feedback:
                 request['validation_feedback'], request['previous_output'] = feedback, previous
@@ -138,6 +144,7 @@ class BackendDesignPass:
             except Exception as exc:
                 feedback = [describe_model_error(exc)]
             trace['errors'] = feedback
+            self.log.warning(f'{kind} validation rejected: ' + '; '.join(feedback), node_id=rid)
             write_json_atomic(self.root / 'passes' / f'{self.sequence:05d}_{kind.lower()}.json', trace)
         raise ValueError(f'{kind}: ' + '; '.join(feedback))
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from .contracts import CompilationRequest, CompilationResult
 from .preprocessing import RequirementPreprocessor
 from .preprocessing.traversal import children_by_id, postorder
 from utils.jsonio import read_json, write_json_atomic
+from utils.logging import SynchronousLog, set_run_id
 
 
 class Compiler:
@@ -17,13 +19,13 @@ class Compiler:
         self.log_cb = log_cb
         self.model = model
 
-    async def _log(self, message):
+    async def _log(self, message, status=None):
         if self.log_cb:
-            result = self.log_cb('Compiler', message, None, None)
+            result = self.log_cb('Compiler', message, status, None)
             if inspect.isawaitable(result):
                 await result
         else:
-            print('[Compiler] ' + message, flush=True)
+            self.logger._write(message, status=status, node_id=None)
 
     async def compile(self, request: CompilationRequest) -> CompilationResult:
         if request.resume or request.start_from != 'zero':
@@ -35,6 +37,7 @@ class Compiler:
             raise ValueError('; '.join(parsed.errors))
         output = request.output_dir.expanduser().resolve()
         root = output / '.arc'
+        self.logger = SynchronousLog('Compiler', workspace_root=output)
         requirements = parsed.requirement_ir
         children = children_by_id(requirements)
         leaves = [rid for rid in postorder(requirements) if not children[rid]]
@@ -47,6 +50,7 @@ class Compiler:
         artifacts = {'requirements': str(root / 'preprocessing/requirement_ir.json')}
         reports, failed, errors = [], [], []
         run_id = uuid.uuid4().hex
+        set_run_id(run_id)
         summary = root / 'workflow/report.json'
         artifacts['workflow'] = str(summary)
         stage = 'preprocessing'
@@ -69,12 +73,15 @@ class Compiler:
             save('RUNNING')
             await self._log(stage + ': COMPLETED')
             for warning in warnings:
-                await self._log('WARNING: ' + warning)
+                await self._log(warning, 'warning')
 
         def require_result(result):
             if not result.ok:
                 raise ValueError('; '.join(result.errors))
 
+        visual_executor = None
+        visual_future = None
+        visual_report = None
         try:
             from model.client import Model
             from .database_design import DatabaseSchemaPass
@@ -98,13 +105,21 @@ class Compiler:
             model = self.model if self.model is not None else Model.from_env()
             visual = FrontendDesignPass(model, root, reference_root=Path(request.requirement_path).resolve().parent)
             await begin('visual_analysis')
-            for rid in leaves:
-                for page in requirements['nodes'][rid].get('pages', []):
-                    if page.get('reference'):
-                        visual._analyze(page['name'], page['reference'], rid)
-            # Backend/database contexts can use the same evidence before frontend tree design.
-            write_json_atomic(root / 'visual_cache.json', visual.visual_cache)
-            await finish(root / 'design/frontend/visual_cache.json')
+            visual_report = reports[-1]
+            def analyze_images():
+                seen = set()
+                for rid in leaves:
+                    for page in requirements['nodes'][rid].get('pages', []):
+                        reference = (page.get('reference') or '').replace('\\', '/')
+                        if reference and reference not in seen:
+                            visual._analyze(page['name'], reference, rid)
+                            seen.add(reference)
+                write_json_atomic(root / 'visual_cache.json', visual.visual_cache)
+            # Separate thread: synchronous database design must not block image analysis.
+            # One writer owns visual caches and pass traces; duplicate paths are analyzed once.
+            visual_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='arc-visual')
+            visual_future = visual_executor.submit(analyze_images)
+            await self._log('Visual analysis is running in the background alongside database design.')
 
             await begin('database_design')
             database = DatabaseSchemaPass(model, root).compile(requirements, parsed.dependency_graph)
@@ -127,6 +142,17 @@ class Compiler:
                 return plan
 
             database_plan = await lower('database', DatabaseLoweringPass(), database.schema)
+            await self._log('Waiting for visual evidence before backend design.')
+            try:
+                visual_future.result()
+            except Exception as exc:
+                visual_report.update(status='FAILED', errors=[str(exc)])
+                stage = 'visual_analysis'
+                raise
+            visual_report.update(status='COMPLETED', warnings=[])
+            artifacts['visual_analysis'] = str(root / 'design/frontend/visual_cache.json')
+            save('RUNNING')
+            await self._log('visual_analysis: COMPLETED')
             await begin('backend_design')
             backend = BackendDesignPass(model, root).compile(requirements, database.er_model)
             require_result(backend)
@@ -185,10 +211,19 @@ class Compiler:
         except Exception as exc:
             errors.append(f'{stage}: {exc}')
             if reports:
-                reports[-1].update(status='FAILED', errors=[str(exc)])
+                next(row for row in reversed(reports) if row['stage'] == stage).update(status='FAILED', errors=[str(exc)])
             if not failed:
                 failed.extend(rid for rid in leaves if states[rid] not in {'IMPLEMENTED', 'ALREADY_PASSED'})
             save('FAILED')
-            await self._log('FAILED: ' + errors[-1])
+            await self._log('FAILED: ' + errors[-1], 'error')
             return CompilationResult(ok=False, root_id=requirements['root_id'], states=states,
                 failed_nodes=failed, artifacts=artifacts, run_id=run_id)
+        finally:
+            if visual_executor is not None:
+                visual_executor.shutdown(wait=True, cancel_futures=True)
+                if visual_future is not None and visual_report['status'] == 'RUNNING':
+                    error = visual_future.exception() if not visual_future.cancelled() else 'Cancelled'
+                    visual_report.update(status='FAILED' if error else 'COMPLETED',
+                                         errors=[str(error)] if error else [])
+                    save('FAILED')
+            set_run_id(None)

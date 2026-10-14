@@ -12,6 +12,7 @@ from compiler.backend_design.validation import shape_errors
 from compiler.preprocessing.traversal import children_by_id, postorder
 from model.client import describe_model_error
 from utils.jsonio import read_json, write_json_atomic
+from utils.logging import SynchronousLog
 from .context import region, related_apis, state_context, handler_context, tree_summary, select_types
 from .contracts import PROMPTS, SCHEMAS, VISUAL_FIELDS, VISUAL_ANALYSIS_VERSION
 from .delta import apply_ui, apply_data, apply_interaction, make_ui
@@ -38,6 +39,8 @@ class FrontendDesignPass:
         self.visual_model = visual_model
         self.artifact_root = Path(artifact_root)
         self.root = self.artifact_root / 'design/frontend'
+        self.log = SynchronousLog('FrontendDesignPass', workspace_root=self.artifact_root.parent)
+        self.visual_log = SynchronousLog('VisualAnalysis', workspace_root=self.artifact_root.parent)
         self.reference_root = reference_root
         self.visual_cache = read_json(self.root / 'visual_cache.json', {})
         try:
@@ -63,10 +66,12 @@ class FrontendDesignPass:
         children = children_by_id(requirements)
         order = [rid for rid in postorder(requirements) if not children[rid]]
         for rid in order:
+            self.log.info('Leaf design: RUNNING', node_id=rid)
             trial, trial_pages = copy.deepcopy(ir), copy.deepcopy(page_states)
             requirement = self._requirement(requirements['nodes'][rid], requirements['nodes'])
             if not requirement.get('pages'):
                 states[rid] = 'NO_FRONTEND'
+                self.log.info('No frontend page; skipping leaf.', node_id=rid)
                 continue
             try:
                 evidence = {}
@@ -145,9 +150,11 @@ class FrontendDesignPass:
                 self._save(trial, trial_pages)
                 ir, page_states = trial, trial_pages
                 states[rid] = 'DESIGNED'
+                self.log.info('Leaf design: COMPLETED', node_id=rid)
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 states[rid] = 'SKIPPED'
                 warnings.append(f'{rid}: rolled back frontend leaf design: {exc}')
+                self.log.warning(warnings[-1], node_id=rid)
         self._save(ir, page_states)
         write_json_atomic(self.root / 'report.json', {
             'status': 'GENERATED_WITH_WARNINGS' if warnings else 'GENERATED',
@@ -191,6 +198,8 @@ class FrontendDesignPass:
     def _invoke(self, phase, rid, payload, accept, image_data_url=None):
         feedback, previous = [], None
         for attempt in range(1, self.attempts + 1):
+            logger = self.visual_log if phase == 'visual' else self.log
+            logger.info(f'{phase} design attempt {attempt}/{self.attempts}', node_id=rid)
             request = copy.deepcopy(payload)
             if feedback:
                 request['validation_feedback'], request['previous_output'] = feedback, previous
@@ -220,6 +229,7 @@ class FrontendDesignPass:
             except Exception as exc:
                 feedback = [describe_model_error(exc)]
             trace['errors'] = feedback
+            logger.warning(f'{phase} validation rejected: ' + '; '.join(feedback), node_id=rid)
             write_json_atomic(self.root / 'passes' / f'{self.sequence:05d}_{phase}.json', trace)
         raise ValueError(f'{phase}: exhausted {self.attempts} attempts: ' + '; '.join(feedback))
 
@@ -229,7 +239,9 @@ class FrontendDesignPass:
         if (isinstance(cached, dict) and cached.get('sha256') == digest
                 and cached.get('analysis_version') == VISUAL_ANALYSIS_VERSION
                 and isinstance(cached.get('analysis'), str) and cached['analysis'].strip()):
+            self.visual_log.info(f'Cache hit: {name} ({reference})', node_id=rid)
             return copy.deepcopy(cached)
+        self.visual_log.info(f'Analyzing: {name} ({reference})', node_id=rid)
         def accept(output):
             for field in VISUAL_FIELDS:
                 if not output[field] or any(not item.strip() for item in output[field]):
@@ -242,6 +254,7 @@ class FrontendDesignPass:
                   'details': details, 'analysis': analysis}
         self.visual_cache[reference] = record
         write_json_atomic(self.root / 'visual_cache.json', self.visual_cache)
+        self.visual_log.info(f'Analysis completed: {name} ({reference})', node_id=rid)
         return copy.deepcopy(record)
 
     def _save(self, ir, page_states):

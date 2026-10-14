@@ -6,12 +6,14 @@ import subprocess
 from pathlib import Path
 
 from utils.jsonio import write_json_atomic
+from utils.logging import SynchronousLog
 
 
 class ProjectInitializer:
     def __init__(self, output_root, *, web_port=3000):
         self.root = Path(output_root).resolve()
         self.port = web_port
+        self.log = SynchronousLog('ProjectInitializer', workspace_root=self.root)
 
     def initialize(self, *, install_dependencies=True):
         if not 1 <= self.port <= 65535:
@@ -90,7 +92,7 @@ class ProjectInitializer:
         try:
             with log.open('a', encoding='utf-8') as output:
                 for argv in commands:
-                    print('Project initialization: ' + ' '.join(argv), flush=True)
+                    self.log.info('Project initialization: ' + ' '.join(argv))
                     result = subprocess.run(argv, cwd=self.root, stdout=output,
                                             stderr=subprocess.STDOUT, timeout=600)
                     if result.returncode:

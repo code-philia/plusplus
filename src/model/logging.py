@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
+from utils.logging import SynchronousLog
 
 _active_log: ContextVar[tuple[Path, dict[str, Any]] | None] = ContextVar("design_model_log", default=None)
 
@@ -72,7 +73,7 @@ def log_design_call(method: Callable[..., Any]) -> Callable[..., Any]:
     def wrapped(self: Any, **kwargs: Any) -> Any:
         schema_name = kwargs.get("schema_name", "")
         usage_path = getattr(self, "_usage_path", None)
-        is_design = schema_name.startswith(("arc_database_", "arc_backend_", "frontend_")) or schema_name == "arc_visual_reference_analysis"
+        is_design = schema_name.startswith(("arc_database_", "arc_backend_", "backend_", "frontend_", "tdd_")) or schema_name == "arc_visual_reference_analysis"
         if usage_path is None or not is_design:
             return method(self, **kwargs)
         call_id = uuid.uuid4().hex
@@ -85,7 +86,8 @@ def log_design_call(method: Callable[..., Any]) -> Callable[..., Any]:
             "model": self.model, "attempts": [],
         }
         _save(path, record)
-        print(f"MODEL_LOG schema_name={schema_name} call_id={call_id} path={path}")
+        SynchronousLog('Model', workspace_root=Path(usage_path).parent.parent).info(
+            f"MODEL_LOG schema_name={schema_name} call_id={call_id} path={path}")
         token = _active_log.set((path, record))
         started = time.monotonic()
         try:
