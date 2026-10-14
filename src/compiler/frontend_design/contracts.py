@@ -53,6 +53,10 @@ Use JSON STRINGS containing JSON Schema. Scalar types are string/integer/number/
 arrays have items; objects have properties, required and additionalProperties:false. Parameter
 names use snake_case. Nullable values use anyOf. String formats: date/date-time/uuid. Enums match
 their scalar type. No source HTTP-location extensions in frontend contracts.
+Only type, properties, required, additionalProperties, items, enum, anyOf, $ref, format and
+description are supported. Other keywords such as minLength/maxLength/pattern/minimum/maximum/
+default/oneOf/allOf/$defs are forbidden; format:email/uri is forbidden. Put business validation
+in data/handler spec, not extra JSON Schema metadata. Define only actually referenced new_types.
 Custom types use #/types/Name and new_types:[{name:"PascalCase",schema:"<JSON Schema>"}].
 Never redefine supplied types; recursive types and unused new types are forbidden.
 Handler input/output must be object schemas; void is an empty object. Data schema may be any type.
@@ -77,6 +81,9 @@ updates target loaded existing page nodes. bindings target loaded or new nodes; 
 must extract the requirement's wording or scenario action and explain which part this UI realizes.
 The compiler appends this leaf's ID and REPLACES that UI description. Always return bindings for
 relevant UI even on first creation. Use the narrowest relevant controls/regions, not just the page.
+Also bind the page or region that must host a required load/init event, with a requirement-grounded
+description. The Interaction pass can attach events ONLY to UI bound to this leaf; loaded IDs alone
+do not authorize events. Choose a suitable bound region when the page itself has no direct behavior.
 ''',
     'data': '''## Task: minimal typed frontend state
 Design only state required by this leaf: inputs, fetched results, selections, loading and error state.

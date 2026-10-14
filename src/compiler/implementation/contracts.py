@@ -15,11 +15,13 @@ Preserve previously implemented behavior, especially when files/components are s
 
 ## File scope and incremental loading
 editable_files contains current full text and sha256 for the entire writable allowlist.
-Current requirement-associated modules/UI files are always loaded and editable. All shared modules are
+Current requirement-associated modules/UI files are always loaded. Their editability depends on this
+phase: editable_files is the ONLY write allowlist; read_only_files remains read-only. All shared modules are
 listed as summaries in shared_catalog, but their source is not loaded automatically. Other modules are
 retrieved as summaries in related_catalog. Request exact paths via request_files before using/editing them.
-Discovery summaries do not authorize edits. Loading a shared/source module makes it editable on the next
-invocation; configurations are read-only, tests are writable only in test_generation. Never guess source.
+Discovery summaries do not authorize edits. Loading a module supplies its source on the next invocation;
+the compiler recomputes phase-specific permissions. Loading does not override read-only restrictions.
+Configurations are read-only, tests are writable only in test_generation. Never guess source.
 Do not request a dependency closure or every component. Load the few files required by actual imports,
 call chains, composition or observed errors. Any file request must have no edits in that same response.
 No recursive context dump; no automatic dependency source inclusion. Preserve public contracts and IDs.
@@ -47,6 +49,11 @@ Do not add per-requirement seeds, test-local inserts, endpoint seeding or lazy f
 TASKS = {
     'test_generation': '''## Task: generate acceptance tests before implementing
 Write tests only at test_targets. Derive observable expected results from this requirement's scenarios.
+Requirements, scenarios and ancestor constraints define acceptance behavior. IR contracts identify typed
+seams and paths; visual analysis describes presentation. Neither implementation placeholders nor IR
+details may create new acceptance requirements. Do not test every visible control merely because the
+UI pass discovered the complete screenshot; test behavior covered by this leaf. If evidence is genuinely
+contradictory, explain it in blocked_reason instead of inventing policy, fixture data or exact outcomes.
 Do not edit application source yet, nor import seed to insert data inside tests. Assert real behavior,
 not placeholders, snapshots of generated skeletons, or the fact that an implementation throws.
 unit: test business contracts when isolated seams are sufficient. integration: HTTP/DB interactions.
@@ -94,7 +101,20 @@ EXAMPLE = {'request_files': ['backend/src/db/seed.ts'], 'edits': [], 'blocked_re
 PATCH_EXAMPLE = {'request_files': [], 'edits': [{'file': 'tests/unit/example.test.ts',
                  'expected_sha256': '<current SHA256 from editable_files>',
                  'content': '<complete changed file contents>'}], 'blocked_reason': ''}
+EXAMPLE_PATHS = {
+    'test_generation': ('tests/tdd/vitest.config.ts', 'tests/unit/example.test.ts'),
+    'backend_implementation': ('backend/src/db/seed.ts', 'backend/src/app.ts'),
+    'frontend_implementation': ('frontend/src/App.tsx', 'frontend/src/App.tsx'),
+    'implementation': ('backend/src/app.ts', 'backend/src/app.ts'),
+    'repair': ('backend/src/app.ts', 'backend/src/app.ts'),
+}
+def phase_examples(phase):
+    load_path, edit_path = EXAMPLE_PATHS[phase]
+    load = {**EXAMPLE, 'request_files': [load_path]}
+    patch = {**PATCH_EXAMPLE, 'edits': [{**PATCH_EXAMPLE['edits'][0], 'file': edit_path}]}
+    return json.dumps(load), json.dumps(patch)
+
 PROMPTS = {phase: BACKGROUND + task + '\n## Return format\n' + json.dumps(SCHEMA)
-           + '\n## Example: load first, then patch in the next invocation\n' + json.dumps(EXAMPLE)
-           + '\n## Example: replace a changed file (use actual paths, hashes and contents)\n' + json.dumps(PATCH_EXAMPLE)
+           + '\n## Example: load first (only if not already loaded)\n' + phase_examples(phase)[0]
+           + '\n## Example: replace a changed file (use actual allowed paths, hashes and contents)\n' + phase_examples(phase)[1]
            for phase, task in TASKS.items()}

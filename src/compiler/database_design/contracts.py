@@ -147,11 +147,12 @@ Return exactly one JSON object with these keys and no others:
 - requirement_id: copy the supplied requirement.requirement_id exactly; example IDs below are illustrative.
 - reuse_entities: array of existing entity keys; use [] when none.
 - new_entities: array of {"key": singular_snake_case, "description": string}; use [] when none.
+- read/write: arrays of entity keys accessed by this requirement; use [] when none.
 
 Valid output example:
-{"requirement_id":"REQ-3.2","reuse_entities":["traveler","train_service"],"new_entities":[{"key":"booking","description":"A confirmed booking."}]}
+{"requirement_id":"REQ-3.2","reuse_entities":["traveler","train_service"],"new_entities":[{"key":"booking","description":"A confirmed booking."}],"read":["traveler","train_service"],"write":["booking"]}
 Valid empty output example:
-{"requirement_id":"REQ-4.1","reuse_entities":[],"new_entities":[]}
+{"requirement_id":"REQ-4.1","reuse_entities":[],"new_entities":[],"read":[],"write":[]}
 """
 
 
@@ -182,8 +183,10 @@ cross-field constraints, modules, SQL or physical database options. Do not persi
 - Updating this requirement's contribution cannot remove any other requirement's facts.
   own_field_contributions contains this requirement's earlier declarations: preserve its still-applicable
   invariants when revising a complete contribution. Do not copy facts owned only by other requirements.
-- An existing field requiring no new or changed fact is reused silently. No reuse_fields key.
-- Do not rename fields or modify id, *_id, SYSTEM or RELATIONSHIP fields. Return only entities with changes.
+- List existing fields used unchanged in reuse_fields (field names within the entity).
+  This records requirement association without changing storage invariants.
+- Do not rename fields or modify id, *_id, SYSTEM or RELATIONSHIP fields.
+  Return only entities with changes or reused fields.
 
 Field attributes:
 - name: singular snake_case matching ^[a-z][a-z0-9_]*$.
@@ -202,13 +205,16 @@ Field attributes:
     A default is a storage insertion default, not a form initial value, example, SQL expression or current time.
 
 Return {"requirement_id": supplied requirement.requirement_id, "entities": [
-  {"entity": existing_key, "new_fields": [complete declarations], "update_fields": [complete declarations]}
-]}. Empty list when unchanged; omit entities with both lists empty.
+  {"entity": existing_key, "new_fields": [complete declarations], "update_fields": [complete declarations],
+   "reuse_fields": [existing field names]}
+], "read": [entity or entity.field], "write": [entity or entity.field]}.
+Omit entities only when all three field lists are empty. Access arrays describe actual behavior.
 Example:
-{"requirement_id":"REQ-1.2","entities":[{"entity":"user","new_fields":[],"update_fields":[{"name":"username","type":"string","nullable":true,"description":"Account username.","properties":{"min_length":null,"max_length":20,"enum":null,"minimum":null,"maximum":null,"default":null,"unique":null,"comparison":null}}]}]}
+{"requirement_id":"REQ-1.2","entities":[{"entity":"user","new_fields":[],"update_fields":[{"name":"username","type":"string","nullable":true,"description":"Account username.","properties":{"min_length":null,"max_length":20,"enum":null,"minimum":null,"maximum":null,"default":null,"unique":null,"comparison":null}}],"reuse_fields":[]}],"read":["user","user.username"],"write":[]}
 Example assumes user.username already exists in related_entities and this requirement contributes
 the storage bound. For a missing field use new_fields with the same declaration shape.
-Unchanged output example: {"requirement_id":"REQ-1.2","entities":[]}
+Unchanged field reuse example: {"requirement_id":"REQ-1.2","entities":[{"entity":"user","new_fields":[],"update_fields":[],"reuse_fields":["username"]}],"read":["user","user.username"],"write":[]}.
+No access or changes example: {"requirement_id":"REQ-1.2","entities":[],"read":[],"write":[]}.
 """
 ENTITY_INSTRUCTIONS = ER_SCOPE + ENTITY_INSTRUCTIONS
 
@@ -275,13 +281,7 @@ All new entity/field descriptions are one concise sentence explaining domain mea
 """
 ENTITY_INSTRUCTIONS += ACCESS_INSTRUCTIONS + """
 In entity discovery, read/write targets are entity keys only (fields are discovered later).
-Examples earlier omit the new mandatory read/write arrays; always include them in your response.
 """
-FIELD_INSTRUCTIONS = FIELD_INSTRUCTIONS.replace(
-    '- An existing field requiring no new or changed fact is reused silently. No reuse_fields key.',
-    '- List existing fields used unchanged in reuse_fields (field names within the entity). '
-    'This records requirement association without adding or altering storage invariants.').replace(
-    'Return only entities with changes.', 'Return entities with changes or reused fields.')
 FIELD_INSTRUCTIONS += ACCESS_INSTRUCTIONS + """
 Return reuse_fields in every entity entry, including [] when none. Any accessed existing field,
 including compiler-owned id, must be listed in reuse_fields unless declared in new_fields or

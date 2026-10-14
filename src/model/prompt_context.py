@@ -136,7 +136,8 @@ def render_section(name: str, purpose: str, payload: dict[str, Any]) -> str:
 
 
 def stage_sections(schema_name: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
-    if schema_name in {'tdd_test_generation', 'tdd_implementation', 'tdd_repair'}:
+    if schema_name in {'tdd_test_generation', 'tdd_implementation', 'tdd_backend_implementation',
+                       'tdd_frontend_implementation', 'tdd_repair'}:
         remaining = dict(payload)
         sections = []
         for name, keys in (
@@ -181,6 +182,7 @@ def stage_sections(schema_name: str, payload: dict[str, Any]) -> list[dict[str, 
         for name, keys in (
             ('Current task', {'current_task'}),
             ('Upstream modules', {'upstream_modules'}),
+            ('Enclosing API contracts and transport effects', {'upstream_api_contracts'}),
             ('Reusable contracts', {'reuse_candidates', 'reference_catalog'}),
             ('Type definitions', {'existing_types'}),
             ('Global conflict indexes', {'name_index', 'route_index'}),

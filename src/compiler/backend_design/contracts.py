@@ -47,6 +47,12 @@ Void/no parameters may be written as {"type":"object"}; the compiler expands thi
 empty object. Scalar schema types: string, integer, number, boolean, null.
 Use arrays with items, objects with properties, enum, and anyOf for nullable values.
 Date, datetime and UUID are strings with format date/date-time/uuid. Never use arbitrary type names.
+Only these JSON Schema keywords are supported: type, properties, required, additionalProperties,
+items, enum, anyOf, $ref, format, description, and the API-only source extension. Every other
+keyword is forbidden, including minLength, maxLength, pattern, minimum, maximum, default,
+oneOf, allOf and definitions/$defs. format allows ONLY date/date-time/uuid, never email/uri.
+Contracts describe structure and types. Put length, numeric bounds, regex, email validation and
+other business checks in spec; do not add unused schema metadata or unused new_types.
 For custom reusable DTOs emit new_types:[{name:"NoteView",schema:"<JSON Schema object>"}];
 refer with {"$ref":"#/types/NoteView"}. Reuse loaded definitions unchanged; new names cannot overwrite
 existing definitions. Define only types reachable from interfaces. Recursive types are unsupported.
@@ -144,8 +150,6 @@ A session lookup/deletion needs an explicit session_id input; "the caller's sess
 condition. Creating a session normally returns its generated session_id/token for the FUNC and API
 to pass back to the browser. DB output may contain internal secrets; API output must not leak them.
 Explain each attached caller's argument/result mapping in spec using its supplied contract/name.
-If an immutable upstream contract cannot carry the necessary data, do not hide this with empty
-objects or invented context; report the exact missing upstream input/output in validation terms.
 ''',
 }
 EXAMPLES = {
