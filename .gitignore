@@ -14,3 +14,5 @@ arc_compiler.egg-info
 /build
 example/smoke
 example/smoke-smoke
+
+*.log
