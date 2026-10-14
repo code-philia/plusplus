@@ -73,6 +73,14 @@ class BackendDesignPass:
                                 pending.append(target)
                     references = [row for row in trial['modules'] if row['id'] in reference_ids and row['kind'] in
                                   ({'FUNC', 'DB'} if kind == 'FUNC' else {'DB'} if kind == 'DB' else set())]
+                    # DB design needs enclosing transport contracts as well as direct FUNC callers.
+                    ancestor_ids = set(selected)
+                    pending = list(ancestor_ids)
+                    while pending:
+                        for caller in by_id[pending.pop()]['callers']:
+                            if caller not in ancestor_ids:
+                                ancestor_ids.add(caller)
+                                pending.append(caller)
                     payload = {'current_task': {'requirement': requirement, 'data': data},
                                'upstream_modules': selected_upstream, 'reuse_candidates': candidates,
                                'existing_types': trial['types'],
@@ -80,6 +88,9 @@ class BackendDesignPass:
                                'name_index': [row['name'] for row in trial['modules']],
                                'route_index': [{'id': row['id'], 'method': row['method'], 'path': row['path']}
                                                for row in trial['modules'] if row['kind'] == 'API']}
+                    if kind == 'DB':
+                        payload['upstream_api_contracts'] = [row for row in trial['modules']
+                                                           if row['id'] in ancestor_ids and row['kind'] == 'API']
                     trial, selected = self._decision(kind, rid, trial, selected, payload, database)
                 errors = validate_ir(trial, database)
                 if errors:

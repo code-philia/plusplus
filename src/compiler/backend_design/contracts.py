@@ -53,6 +53,31 @@ existing definitions. Define only types reachable from interfaces. Recursive typ
 source is an ARC extension to JSON Schema, used ONLY on top-level API payload properties.
 It identifies each parameter's HTTP location; it is not part of a reusable DTO or a return value.
 
+## Explicit data flow across module boundaries
+Design signatures together with behavior, not just a call graph. Every value needed to execute a
+module's spec must come from its declared input, a declared callee's output, or a local computation
+explicitly described in spec (e.g. hashing a supplied password, generating an identifier, reading
+the clock). Database connection/transaction infrastructure is available; request-specific business
+values are NOT implicit globals. FUNC/DB cannot read an HTTP request, browser cookie, current user,
+current session or an undeclared runtime context. Pass identity, lookup conditions and write values
+as explicit typed parameters. Never use an empty input to hide missing identity or selection data.
+Optional/nullable inputs must have explicit absent-value behavior; required does not mean non-null.
+
+Within spec explain the essential mappings in plain language: which input supplies each downstream
+argument, which earlier result or local computation supplies derived arguments, and which downstream
+result becomes the module's output or an HTTP effect. Describe ordering when one call needs another
+call's result. Mapping may rename, select, combine or transform fields; signatures need not be identical.
+Callers/callees are relationships, NOT argument mappings or execution order. Do not add a separate
+data-flow field; keep these explanations in existing spec and values in existing typed contracts.
+Each required callee argument needs a producer. Each caller result or promised effect needs a source.
+Do not reuse a module merely because its name fits: its input/output must support these mappings.
+
+An empty input is valid for an unfiltered list or an operation needing no caller-specific values.
+An empty output is valid for a command whose caller needs only success/failure. A lookup must return
+the data or existence result its caller needs. An insert must return its generated ID/token when a
+caller needs it for a subsequent operation or transport response. Do not return passwords/hashes to
+the public API merely because an internal module uses them. Keep secret transport effects explicit.
+
 ## Reuse and shared symbols
 reuse_candidates contains full immutable contracts retrieved by entity/field overlap and lexical relevance.
 Prefer reuse ONLY if inputs, outputs, behavior, data requirements and existing callees already suffice
@@ -78,6 +103,13 @@ An API provides an externally callable HTTP service. Discover all required serve
 this leaf's description and scenarios. Define method, absolute path, payload and response. For request
 properties add source:path/query/header/body. Path uses :parameter syntax; path fields are required.
 GET/HEAD have no body. Pure client behavior may yield empty arrays.
+Declare identity/session transport when required by behavior: a session cookie may be represented
+by its named value with source:header; spec explains extraction from Cookie. Do not assume every
+authentication request carries a session: session lookup/sign-out may accept an absent value.
+For login/registration spec must explain how a generated session token reaches Set-Cookie (or the
+requirement's supported carrier), and logout how the carrier is cleared. response describes the
+JSON response body; do not expose a session token in that body unless the requirement needs it.
+These transport effects still require a declared FUNC output supplying the needed token.
 The compiler generates IDs and empty callees, then the FUNC pass wires business collaborators.
 API reuse entries contain only id. Do not design FUNC or DB.
 ''',
@@ -88,6 +120,13 @@ For each new FUNC, callers may name those API IDs or @Name for other new FUNCs; 
 @Name for other new FUNCs or loaded existing FUNC/DB IDs. Do not invent or design DB modules yet.
 Declare each FUNC-FUNC edge once using callers OR callees; the compiler makes edges reciprocal.
 reuse entries contain id and callers (the new upstream attachment), leaving the reused contract intact.
+Read the upstream API's payload, response AND spec. Declare input for all caller-provided identity,
+filters and submitted values needed by this function; remove HTTP source metadata at this layer.
+Output must supply both API body values and any values needed for API transport effects, such as a
+new session token. For a supplied session_id, explain passing it to the storage lookup/revocation.
+For authentication, explain credential lookup, password verification, session creation and returning
+the created token with the public account fields; never assume persistence alone authenticates a browser.
+Plan downstream data requirements in spec now, so the DB pass can define sufficient signatures.
 ''',
     'DB': '''## Current task: storage operations
 A DB encapsulates database operations. upstream_modules are selected FUNCs. Every FUNC with empty
@@ -98,18 +137,27 @@ Use loaded database targets only; do not create entities/fields or infer operati
 DB may call another DB, never API/FUNC. callers may name supplied FUNC IDs or @Name for new DBs;
 callees may name @Name or loaded existing DB IDs. No cycles. Include at least one read/write target.
 The callers declaration is wiring evidence; the compiler records final reciprocal callers and IDs.
+upstream_api_contracts provides the relevant enclosing APIs so request identity and transport effects
+remain visible. Check upstream FUNC input/output/spec and these API contracts before choosing DB
+input/output. Return IDs, tokens, credential material or selected fields needed by upstream operations.
+A session lookup/deletion needs an explicit session_id input; "the caller's session" is not a query
+condition. Creating a session normally returns its generated session_id/token for the FUNC and API
+to pass back to the browser. DB output may contain internal secrets; API output must not leak them.
+Explain each attached caller's argument/result mapping in spec using its supplied contract/name.
+If an immutable upstream contract cannot carry the necessary data, do not hide this with empty
+objects or invented context; report the exact missing upstream input/output in validation terms.
 ''',
 }
 EXAMPLES = {
-    'API': {'new_modules': [{**dict(name='GetNote', spec='{valid note_id} read note {returns the selected note; absent -> not found; no writes}', shared=False, shared_reason=''),
+    'API': {'new_modules': [{**dict(name='GetNote', spec='{valid note_id from route} pass note_id to the business reader and use its title result as the response body {returns the selected note title; absent -> not found; no writes}', shared=False, shared_reason=''),
                             'method': 'GET', 'path': '/api/notes/:note_id',
                             'payload': json.dumps({'type': 'object', 'properties': {'note_id': {'type': 'string', 'format': 'uuid', 'source': 'path'}}, 'required': ['note_id'], 'additionalProperties': False}),
                             'response': json.dumps({'type': 'object', 'properties': {'title': {'type': 'string'}}, 'required': ['title'], 'additionalProperties': False})}], 'reuse': [], 'new_types': []},
-    'FUNC': {'new_modules': [{'name': 'ReadNote', 'spec': '{valid note_id} load note {selected note or not found; no writes}', 'shared': False, 'shared_reason': '',
+    'FUNC': {'new_modules': [{'name': 'ReadNote', 'spec': '{valid note_id supplied by GetNote.payload.note_id} pass input.note_id to a storage lookup and return its title result {output.title is the selected note title; absent -> not found; no writes}', 'shared': False, 'shared_reason': '',
                               'input': '{"type":"object","properties":{"note_id":{"type":"string","format":"uuid"}},"required":["note_id"],"additionalProperties":false}',
                               'output': '{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}',
                               'callers': ['API_000001'], 'callees': []}], 'reuse': [], 'new_types': []},
-    'DB': {'new_modules': [{'name': 'LoadNoteRow', 'spec': '{valid note_id} query note {matching row or not found; no writes}', 'shared': False, 'shared_reason': '',
+    'DB': {'new_modules': [{'name': 'LoadNoteRow', 'spec': '{valid note_id supplied by ReadNote.input.note_id} query note using input.note_id as the row selector and return note.title as output.title for ReadNote {matching title or not found; no writes}', 'shared': False, 'shared_reason': '',
                             'input': '{"type":"object","properties":{"note_id":{"type":"string","format":"uuid"}},"required":["note_id"],"additionalProperties":false}',
                             'output': '{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}',
                             'read': '["note","note.title"]', 'write': '[]', 'callers': ['FUNC_000001'], 'callees': []}], 'reuse': [], 'new_types': []},
