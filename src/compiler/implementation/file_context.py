@@ -81,20 +81,31 @@ class FileContext:
             add('package.json', 'CONFIG.WORKSPACE', spec='Workspace scripts and dependencies', kind='configuration')
 
     def direct_files(self, rid):
-        return {path for path, row in self.catalog.items() if rid in row['reqs'] and row['kind'] == 'source'}
+        # Module/UI/data/event ownership supplies direct source. Table usage alone must
+        # not preload shared schema/connection/seed infrastructure.
+        return {path for path, row in self.catalog.items() if row['kind'] == 'source'
+                and any(rid in contract.get('reqs', []) for contract in row['contracts'])}
 
     def summaries(self, records):
         return [{**{key: copy.deepcopy(row[key]) for key in ('file_path', 'symbol_ids', 'reqs', 'shared', 'kind')},
-                 'summaries': list(dict.fromkeys(row['summaries']))[:4],
+                 'summaries': [text if len(text) <= 400 else text[:397] + '...'
+                               for text in list(dict.fromkeys(row['summaries']))[:4]],
                  'symbol_count': len(row['symbol_ids'])} for row in records]
 
-    def discover(self, rid, k=12):
+    def discover(self, rid, k=12, *, phase=None, exclude=()):
         query = terms({key: self.requirements['nodes'][rid].get(key) for key in ('name','description','scenarios')})
         current_access = self.database.get('access', {}).get(rid, {})
         targets = set(current_access.get('read', [])) | set(current_access.get('write', []))
         entities = {key.split('.')[0] for key in targets}
         shared, scored = [], []
         for row in self.catalog.values():
+            path = row['file_path']
+            if path in exclude:
+                continue
+            if phase == 'backend_implementation' and not (path.startswith('backend/') or path.startswith('shared/')):
+                continue
+            if phase == 'frontend_implementation' and not (path.startswith('frontend/') or path.startswith('shared/')):
+                continue
             if row['shared']:
                 shared.append(row)
                 continue
@@ -125,9 +136,23 @@ class FileContext:
             result.update(paths)
         return result
 
+    @staticmethod
+    def phase_path(path, phase):
+        if phase == 'backend_implementation':
+            return path.startswith(('backend/', 'shared/', 'tests/unit/', 'tests/integration/')) or path in {'tests/tdd/setup.ts', 'tests/tdd/vitest.config.ts'}
+        if phase == 'frontend_implementation':
+            return path.startswith(('frontend/', 'shared/', 'tests/e2e/')) or path == 'tests/tdd/playwright.config.ts'
+        return True
+
     def build(self, rid, phase, loaded, test_targets, evidence):
         direct = self.direct_files(rid)
         source_paths = direct | loaded
+        if phase == 'backend_implementation':
+            source_paths = {path for path in source_paths
+                            if path.startswith('backend/') or path.startswith('shared/')}
+        elif phase == 'frontend_implementation':
+            source_paths = {path for path in source_paths
+                            if path.startswith('frontend/') or path.startswith('shared/')}
         # Include failing regression tests even when owned by an earlier requirement.
         # Only known test files may be selected from untrusted runner output.
         failing_tests = set()
@@ -151,7 +176,8 @@ class FileContext:
                     failing_tests.add(relative)
                     regression_owners.update(record['reqs'])
         editable, readonly = {}, {}
-        for path in sorted(source_paths | set(test_targets) | failing_tests):
+        visible_tests = {path for path in set(test_targets) | failing_tests if self.phase_path(path, phase)}
+        for path in sorted(source_paths | visible_tests):
             row = self.catalog.get(path)
             is_test = path in test_targets or bool(row and row['kind'] == 'acceptance_test')
             writable = (path in test_targets if phase == 'test_generation' else
@@ -165,7 +191,7 @@ class FileContext:
             text = read_source(self.root, path)
             record = {'content': text, 'sha256': sha256(text)}
             (editable if writable else readonly)[path] = record
-        shared, related = self.discover(rid)
+        shared, related = self.discover(rid, phase=phase, exclude=source_paths | visible_tests)
         requirement = copy.deepcopy(self.requirements['nodes'][rid])
         requirement.pop('visual_references', None)
         requirement.pop('children_ids', None)
@@ -188,6 +214,13 @@ class FileContext:
         requirement['ancestor_constraints'] = list(reversed(constraints))
         contracts = [copy.deepcopy(contract) for path in sorted(source_paths) if path in self.catalog
                      for contract in self.catalog[path]['contracts'] if rid in contract.get('reqs', []) or path in loaded]
+        if phase == 'frontend_implementation':
+            # Frontend implementation receives backend API contracts, not backend source.
+            needed_apis = {api for row in self.frontend['handlers'] if rid in row['reqs']
+                           for api in row['apis']}
+            contracts += [copy.deepcopy(row) for row in self.backend['modules']
+                          if row['kind'] == 'API' and (rid in row['reqs'] or row['id'] in needed_apis)]
+        contracts = list({json.dumps(row, sort_keys=True, ensure_ascii=False): row for row in contracts}.values())
         wanted_types = set()
         definitions = {row['name']: row for row in self.backend['types'] + self.frontend['types']}
         for contract in contracts:
@@ -205,8 +238,27 @@ class FileContext:
                 'current_contracts': contracts, 'types': [definitions[key] for key in sorted(wanted_types) if key in definitions],
                 'editable_files': editable, 'read_only_files': readonly,
                 'shared_catalog': shared, 'related_catalog': related,
-                'test_targets': test_targets, 'gate_results': evidence,
+                'test_targets': [path for path in test_targets if self.phase_path(path, phase)],
+                'gate_results': error_feedback(evidence),
                 'failure_context': {'test_files': sorted(failing_tests),
                     'regression_requirements': [copy.deepcopy(self.requirements['nodes'][key])
                         for key in sorted(regression_owners - {rid}) if key in self.requirements['nodes']]},
-                'always_loaded_files': sorted(direct)}
+                'always_loaded_files': sorted(direct & source_paths)}
+
+
+def error_feedback(evidence):
+    """Send concrete errors for failed commands; omit verbose successful command output."""
+    result = []
+    for row in evidence:
+        if row.get('status') == 'PASSED':
+            continue
+        item = {key: copy.deepcopy(row[key]) for key in
+                ('status', 'failure_kind', 'command', 'exit_code', 'error', 'report_error', 'output') if key in row}
+        test = row.get('test_evidence')
+        if test:
+            item['test_evidence'] = {key: copy.deepcopy(test[key]) for key in
+                ('collected', 'executed_files', 'failed_tests', 'report_path') if key in test}
+            if not test.get('failed_tests'):
+                item['test_evidence']['failures'] = test.get('failures', [])
+        result.append(item)
+    return result

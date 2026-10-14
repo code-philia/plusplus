@@ -15,10 +15,20 @@ Preserve previously implemented behavior, especially when files/components are s
 
 ## File scope and incremental loading
 editable_files contains current full text and sha256 for the entire writable allowlist.
-Current requirement-associated modules/UI files are always loaded. Their editability depends on this
-phase: editable_files is the ONLY write allowlist; read_only_files remains read-only. All shared modules are
-listed as summaries in shared_catalog, but their source is not loaded automatically. Other modules are
+always_loaded_files lists current requirement-associated module/UI files in the current layer. Their
+FULL CONTENTS are already in editable_files or read_only_files, not merely available for discovery.
+Read those supplied contents directly and never request_files for always_loaded_files or any other
+already supplied file. You can return edits on the FIRST invocation without a preliminary file request.
+Their editability depends on this phase: editable_files is the ONLY write allowlist; read_only_files
+remains read-only. Shared files not directly associated with the current requirement (including schema,
+connection, seed, server entrypoints and styles) are listed with paths/summaries in shared_catalog;
+their source is loaded only after a request. A reused module directly bound to this requirement is
+already loaded even if shared with other requirements. Other modules are
 retrieved as summaries in related_catalog. Request exact paths via request_files before using/editing them.
+Catalogs omit files whose contents are already supplied. Summaries are compact discovery hints;
+load a record to obtain its complete source and contract. Backend/frontend implementation source and
+discovery catalogs are restricted to that layer; frontend additionally receives needed backend APIs
+as contracts only. Unit/integration tests accompany backend, browser tests accompany frontend.
 Discovery summaries do not authorize edits. Loading a module supplies its source on the next invocation;
 the compiler recomputes phase-specific permissions. Loading does not override read-only restrictions.
 Configurations are read-only. Tests are writable in test_generation and repair; initial implementation
@@ -88,6 +98,8 @@ Avoid unrelated refactoring or signatures that contradict design. Do not return 
 Read gate_results together with the failed test's full source in editable_files. failure_context
 identifies automatically loaded failing tests, including earlier requirements' regression tests and
 their requirement evidence. Reporter failed_tests includes file, case, location and assertion errors.
+gate_results contains failed commands' actual output and structured assertion errors, not merely a
+pass/fail table. Read expected/actual values, stack traces, compiler diagnostics and runtime errors.
 The current requirement, contracts, current source and previously loaded files remain available;
 these are cumulative working files with refreshed content/hashes, not a reset to the skeleton.
 Trace each failure from assertion/expected behavior through the relevant route, service, repository
@@ -110,7 +122,8 @@ TASKS['backend_implementation'] = '''## Task: implement the initial backend vers
 Tests have been generated and compiled, but have NOT been executed yet. Implement the current leaf's
 API/controllers, services/business functions and repositories/storage contracts as one coherent version.
 Wire server routes, parameter/result data flow, authentication transport and required startup fixtures.
-Load shared files when necessary. Frontend source and acceptance tests are read-only in this phase.
+Only backend source and backend shared source are in scope. Frontend source is deliberately omitted.
+Acceptance tests are visible for expected behavior but read-only in this phase.
 Preserve contracts and previously implemented behavior. Return complete changed source files; do not
 leave required business bodies as placeholders just because there is no runtime failure evidence yet.
 '''
@@ -118,7 +131,9 @@ TASKS['frontend_implementation'] = '''## Task: implement the initial frontend ve
 The initial backend implementation is available. Tests have NOT been executed yet. Implement the
 current leaf's UI, state, events and handlers, API calls, page composition and navigation; use the
 requirement's visual analysis for layout, content and style. Load shared components/App/styles as needed.
-Backend source and acceptance tests are read-only in this phase. Preserve contracts and earlier UI
+Only frontend source and frontend shared source are in scope. Backend implementation source is deliberately
+omitted; use the supplied backend API contracts for integration. Acceptance tests are read-only in this phase.
+Preserve contracts and earlier UI
 behavior. Wire the required interactions instead of leaving lowering's event.wired=false as completion.
 After this phase the compiler runs current acceptance tests and all prior regression tests, then repairs.
 '''

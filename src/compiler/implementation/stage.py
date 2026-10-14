@@ -252,6 +252,9 @@ class NodeTDDOrchestrator:
                         if output['edits']:
                             raise ValueError('request_files cannot be combined with edits')
                         paths = self.context.resolve_requests(output['request_files'], targets)
+                        disallowed = {path for path in paths if not self.context.phase_path(path, phase)}
+                        if disallowed:
+                            raise ValueError(f'Files outside {phase} scope: {sorted(disallowed)}')
                         if not paths - loaded - set(payload['always_loaded_files']):
                             raise ValueError('Requested files are already loaded')
                         requests += 1
