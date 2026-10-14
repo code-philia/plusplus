@@ -131,6 +131,17 @@ TASKS['frontend_implementation'] = '''## Task: implement the initial frontend ve
 The initial backend implementation is available. Tests have NOT been executed yet. Implement the
 current leaf's UI, state, events and handlers, API calls, page composition and navigation; use the
 requirement's visual analysis for layout, content and style. Load shared components/App/styles as needed.
+Treat current_task.requirement.pages[*].analysis as the visual reference evidence for each named page
+and reference path. Follow its concrete visual style: page composition and proportions, alignment,
+spacing/padding, color palette and backgrounds, typography hierarchy/weight/size, borders, radii,
+shadows, icons, imagery and visible control states. Build a coherent page matching that evidence;
+do not substitute a generic dashboard/card layout or leave unstyled placeholder controls.
+Use regions/layout_cues for structure, style_cues for styling, and visible_controls/text_cues for
+presentation. Requirements/scenarios remain authoritative for behavior and actual business data;
+reference appearance does not authorize extra backend features or unrelated interactions.
+Preserve existing shared visual conventions and already implemented pages. Load shared CSS or
+components before changing them. When analysis is missing, use the established app style and the
+requirement evidence rather than claiming to have inspected an unavailable image.
 Only frontend source and frontend shared source are in scope. Backend implementation source is deliberately
 omitted; use the supplied backend API contracts for integration. Acceptance tests are read-only in this phase.
 Preserve contracts and earlier UI
