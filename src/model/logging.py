@@ -73,7 +73,7 @@ def log_design_call(method: Callable[..., Any]) -> Callable[..., Any]:
     def wrapped(self: Any, **kwargs: Any) -> Any:
         schema_name = kwargs.get("schema_name", "")
         usage_path = getattr(self, "_usage_path", None)
-        is_design = schema_name.startswith(("arc_database_", "arc_backend_", "backend_", "frontend_", "tdd_")) or schema_name == "arc_visual_reference_analysis"
+        is_design = schema_name.startswith(("arc_database_", "arc_backend_", "backend_", "frontend_", "tdd_", "stage_repair")) or schema_name == "arc_visual_reference_analysis"
         if usage_path is None or not is_design:
             return method(self, **kwargs)
         call_id = uuid.uuid4().hex

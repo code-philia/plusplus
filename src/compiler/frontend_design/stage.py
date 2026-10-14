@@ -43,6 +43,7 @@ class FrontendDesignPass:
         self.visual_log = SynchronousLog('VisualAnalysis', workspace_root=self.artifact_root.parent)
         self.reference_root = reference_root
         self.visual_cache = read_json(self.root / 'visual_cache.json', {})
+        self.visual_failures = {}
         try:
             self.attempts = max(1, int(os.getenv('MODEL_ATTEMPT', '5')))
         except ValueError:
@@ -78,9 +79,17 @@ class FrontendDesignPass:
                 for page in requirement['pages']:
                     reference = page.get('reference')
                     if reference:
-                        record = self._analyze(page['name'], reference, rid)
-                        evidence[reference] = record
-                        page['analysis'] = record['analysis']
+                        try:
+                            if reference in self.visual_failures:
+                                raise ValueError(self.visual_failures[reference])
+                            record = self._analyze(page['name'], reference, rid)
+                            evidence[reference] = record
+                            page['analysis'] = record['analysis']
+                        except Exception as exc:
+                            self.visual_failures[reference] = str(exc)
+                            page['analysis'] = None
+                            self.visual_log.warning(f'Skipping {reference}: {exc}', node_id=rid)
+                            warnings.append(f'{rid}: visual analysis unavailable for {reference}; using requirement evidence')
                     else:
                         known = next((row for row in trial_pages if row['name'] == page['name']), None)
                         page['analysis'] = known['references'][0]['analysis'] if known and known['references'] else None
@@ -100,7 +109,7 @@ class FrontendDesignPass:
                         trial_pages.append(state)
                     if not reference:
                         page['analysis'] = state['references'][0]['analysis'] if state['references'] else None
-                    parsed = not reference or any(row['reference'] == reference and row['sha256'] == record['sha256']
+                    parsed = not reference or not record or any(row['reference'] == reference and row['sha256'] == record['sha256']
                                                   for row in state['references'])
                     mode = 'new' if new_page else 'bind' if parsed else 'extend'
                     subtree = next(row for row in trial['ui']['children'] if row['id'] == state['ui_id'])

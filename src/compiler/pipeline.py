@@ -95,6 +95,7 @@ class Compiler:
             from .implementation import NodeTDDOrchestrator
             from .build.stage import ProjectBuilder
             from .validation_preparation.stage import ValidationPreparationPass, check_validation_readiness
+            from .stage_repair import repair_gate
 
             from cli.commands import _ensure_dotenv_loaded
             _ensure_dotenv_loaded()
@@ -112,8 +113,12 @@ class Compiler:
                     for page in requirements['nodes'][rid].get('pages', []):
                         reference = (page.get('reference') or '').replace('\\', '/')
                         if reference and reference not in seen:
-                            visual._analyze(page['name'], reference, rid)
                             seen.add(reference)
+                            try:
+                                visual._analyze(page['name'], reference, rid)
+                            except Exception as exc:
+                                visual.visual_failures[reference] = str(exc)
+                                visual.visual_log.warning(f'Skipping {reference}: {exc}', node_id=rid)
                 write_json_atomic(root / 'visual_cache.json', visual.visual_cache)
             # Separate thread: synchronous database design must not block image analysis.
             # One writer owns visual caches and pass traces; duplicate paths are analyzed once.
@@ -134,11 +139,37 @@ class Compiler:
 
             async def lower(name, lowerer, *args):
                 await begin(name + '_lowering')
-                plan = lowerer.compile(*args, output)
-                compilation = check_compilation(output, name)
-                if compilation['status'] != 'COMPILED':
-                    raise ValueError(str(compilation))
-                await finish(root / 'lowering' / name / 'plan.json')
+                plan = None
+                def check():
+                    nonlocal plan
+                    try:
+                        if plan is None:
+                            plan = lowerer.compile(*args, output)
+                        compilation = check_compilation(output, name)
+                        return {'ok': compilation['status'] == 'COMPILED', 'compilation': compilation}
+                    except Exception as exc:
+                        return {'ok': False, 'errors': [str(exc)]}
+                result = check()
+                if not result['ok']:
+                    result = repair_gate(model, output, name + '_lowering', check, result, contracts=args[-1])
+                if result['ok']:
+                    # Repairs become the stage's installed source baseline.
+                    manifest_path = root / 'lowering' / name / 'manifest.json'
+                    manifest = read_json(manifest_path, {})
+                    from .lowering.files import digest
+                    for relative in manifest.get('files', {}):
+                        manifest['files'][relative] = digest((output / relative).read_text(encoding='utf-8'))
+                    write_json_atomic(manifest_path, manifest)
+                    await finish(root / 'lowering' / name / 'plan.json')
+                else:
+                    message = name + '_lowering: repair budget exhausted: ' + str(result)
+                    errors.append(message)
+                    reports[-1].update(status='FAILED', errors=[message])
+                    save('RUNNING')
+                    await self._log(message, 'warning')
+                if plan is None:
+                    plan = {'modules': [], 'components': [], 'handlers': [], 'ui': [], 'data': [],
+                            'events': [], 'types': [], 'files': []}
                 return plan
 
             database_plan = await lower('database', DatabaseLoweringPass(), database.schema)
@@ -146,10 +177,9 @@ class Compiler:
             try:
                 visual_future.result()
             except Exception as exc:
-                visual_report.update(status='FAILED', errors=[str(exc)])
-                stage = 'visual_analysis'
-                raise
-            visual_report.update(status='COMPLETED', warnings=[])
+                visual.visual_log.warning('Background visual analysis skipped: ' + str(exc))
+            visual_report.update(status='COMPLETED_WITH_WARNINGS' if visual.visual_failures else 'COMPLETED',
+                                 warnings=[f'{path}: {message}' for path, message in visual.visual_failures.items()])
             artifacts['visual_analysis'] = str(root / 'design/frontend/visual_cache.json')
             save('RUNNING')
             await self._log('visual_analysis: COMPLETED')
@@ -185,29 +215,55 @@ class Compiler:
                 raise ValueError('Design exhausted its attempts for: ' + ', '.join(sorted(skipped)))
             if not request.stop_after_lowering:
                 await begin('implementation')
-                implementation = NodeTDDOrchestrator(model, output, port=request.web_port).compile(
-                    requirements, database.er_model, backend.ir, frontend.ir,
-                    backend_plan, frontend_plan, database_plan)
-                states.update(implementation.node_states)
-                failed.extend(rid for rid in leaves if states[rid] not in {'IMPLEMENTED', 'ALREADY_PASSED'})
-                require_result(implementation)
-                if failed:
-                    raise ValueError('Requirements not implemented: ' + ', '.join(failed))
-                await finish(root / 'implementation/report.json', implementation.warnings)
+                try:
+                    implementation = NodeTDDOrchestrator(model, output, port=request.web_port).compile(
+                        requirements, database.er_model, backend.ir, frontend.ir,
+                        backend_plan, frontend_plan, database_plan)
+                    states.update(implementation.node_states)
+                    failed.extend(rid for rid in leaves if states[rid] not in {'IMPLEMENTED', 'ALREADY_PASSED'})
+                    if implementation.ok and not failed:
+                        await finish(root / 'implementation/report.json', implementation.warnings)
+                    else:
+                        raise ValueError('; '.join(implementation.errors) or 'Requirements not implemented: ' + ', '.join(failed))
+                except Exception as exc:
+                    message = 'implementation: ' + str(exc)
+                    errors.append(message)
+                    reports[-1].update(status='FAILED', errors=[message])
+                    artifacts['implementation'] = str(root / 'implementation/report.json')
+                    save('RUNNING')
+                    await self._log(message + '; continuing to build repair.', 'warning')
 
             await begin('build')
-            require_result(ProjectBuilder(output).build())
-            await finish(output / 'frontend/dist/index.html')
-            if request.prepare_validation and not request.stop_after_lowering:
+            def build_check():
+                try:
+                    result = ProjectBuilder(output).build()
+                    return {'ok': result.ok, 'errors': result.errors}
+                except Exception as exc:
+                    return {'ok': False, 'errors': [str(exc)]}
+            build = build_check()
+            if not build['ok']:
+                build = repair_gate(model, output, 'build', build_check, build)
+            if build['ok']:
+                await finish(output / 'frontend/dist/index.html')
+            else:
+                message = 'build: repair budget exhausted: ' + str(build)
+                errors.append(message)
+                reports[-1].update(status='FAILED', errors=[message])
+                save('RUNNING')
+                await self._log(message, 'warning')
+            if request.prepare_validation and not request.stop_after_lowering and build['ok']:
                 await begin('validation_preparation')
                 validation = ValidationPreparationPass(model, output).generate(requirements)
                 check_validation_readiness(output, validation=True)
                 write_json_atomic(root / 'validation_preparation/report.json',
                                   {'status': 'PREPARED', 'artifacts': validation, 'port': request.web_port})
                 await finish(root / 'validation_preparation/report.json')
-            save('LOWERED' if request.stop_after_lowering else 'COMPLETED')
-            return CompilationResult(ok=True, root_id=requirements['root_id'], states=states,
-                artifacts=artifacts, run_id=run_id)
+            elif request.prepare_validation and not build['ok']:
+                reports.append({'stage': 'validation_preparation', 'status': 'SKIPPED',
+                                'warnings': ['Build unavailable; validation artifacts cannot be prepared.']})
+            save('COMPLETED_WITH_ERRORS' if errors else 'LOWERED' if request.stop_after_lowering else 'COMPLETED')
+            return CompilationResult(ok=not errors, root_id=requirements['root_id'], states=states,
+                failed_nodes=failed, artifacts=artifacts, run_id=run_id)
         except Exception as exc:
             errors.append(f'{stage}: {exc}')
             if reports:
