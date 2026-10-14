@@ -23,7 +23,9 @@ class ProjectInitializer:
             'workspaces': ['backend', 'frontend'],
             'scripts': {
                 'build': 'npm run build -w @arc/frontend && npm run build -w @arc/backend',
-                'start': f'PORT={self.port} npm run start -w @arc/backend',
+                'start': 'npm run start -w @arc/backend',
+                'dev:backend': 'npm run dev -w @arc/backend',
+                'dev:frontend': 'npm run dev -w @arc/frontend',
             },
             'devDependencies': {'@playwright/test': '1.55.0', 'vitest': '3.2.4',
                                 'supertest': '7.1.4', '@types/supertest': '6.0.3', 'tsx': '4.20.5'},
@@ -59,6 +61,12 @@ class ProjectInitializer:
             'frontend/tsconfig.json': {'extends': './tsconfig.app.json'},
         }
         text_sources = {
+            'backend/src/config/server.ts': 'export function serverPort(): number {\n'
+                + f'  const value = process.env.PORT ?? "{self.port}";\n'
+                + '  const port = Number(value);\n'
+                + '  if (!Number.isInteger(port) || port < 0 || port > 65535) {\n'
+                + '    throw new Error("PORT must be an integer between 0 and 65535");\n'
+                + '  }\n  return port;\n}\n',
             'frontend/index.html': '<!doctype html>\n<html><head><meta charset="UTF-8" />'
                 '<meta name="viewport" content="width=device-width, initial-scale=1.0" />'
                 '<title>Application</title></head><body><div id="root"></div>'

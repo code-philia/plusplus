@@ -65,6 +65,7 @@ class BackendLoweringPass:
                           + '    response.sendFile(fileURLToPath(new URL("../../frontend/dist/index.html", import.meta.url)));\n'
                           + '  });\n  return app;\n}\n')
         files['backend/src/server.ts'] = ('import { createApp } from "./app.js";\n'
+            + 'import { serverPort } from "./config/server.js";\n'
             + 'import { createDatabaseClient, bindDatabaseClient } from "./db/client.js";\n'
             + 'import { seedDatabase } from "./db/seed.js";\n'
             + 'import { initializeDatabase } from "./db/initialize.js";\n'
@@ -72,8 +73,16 @@ class BackendLoweringPass:
             + 'try { if (process.env.ARC_VALIDATION_PREPARED === "1") initializeDatabase(client.connection);\n'
             + 'else seedDatabase(client.connection); bindDatabaseClient(client); }\n'
             + 'catch (error) { client.close(); throw error; }\n'
-            + 'const port = Number.parseInt(process.env.PORT ?? "3000", 10);\n'
-            + 'export const server = createApp().listen(Number.isFinite(port) ? port : 3000);\n'
+            + 'const port = serverPort();\n'
+            + 'export const server = createApp().listen(port, () => {\n'
+            + '  const address = server.address();\n'
+            + '  const actualPort = address && typeof address === "object" ? address.port : port;\n'
+            + '  console.log(`Application ready: http://localhost:${actualPort}`);\n'
+            + '  console.log(`Health: http://localhost:${actualPort}/__arc/health`);\n'
+            + '});\n'
+            + 'server.on("error", (error: NodeJS.ErrnoException) => {\n'
+            + '  console.error(error.code === "EADDRINUSE" ? `Port ${port} is already in use` : error.message);\n'
+            + '  client.close(); process.exitCode = 1;\n});\n'
             + 'server.on("close", () => client.close());\n'
             + 'process.once("SIGTERM", () => server.close());\nprocess.once("SIGINT", () => server.close());\n')
         plan = {'ir_kind': 'backend_lowering', 'strategy': 'deterministic_parent_groups',

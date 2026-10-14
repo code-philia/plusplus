@@ -13,6 +13,7 @@ SYSTEM_FILES = {
     'backend/src/db/client.ts': ('SYSTEM.DB_CLIENT', 'Database connection and repository binding'),
     'backend/src/app.ts': ('SYSTEM.SERVER_ROUTES', 'Express app and route registration'),
     'backend/src/server.ts': ('SYSTEM.SERVER_START', 'Startup reset/seed and HTTP server lifecycle'),
+    'backend/src/config/server.ts': ('SYSTEM.SERVER_CONFIG', 'Configured default port and PORT environment override'),
     'backend/src/types/contracts.ts': ('SYSTEM.BACKEND_TYPES', 'Backend exported DTO types'),
     'frontend/src/App.tsx': ('SYSTEM.APP', 'React app/page composition'),
     'frontend/src/main.tsx': ('SYSTEM.FRONTEND_ENTRY', 'React mount entrypoint'),
