@@ -145,11 +145,11 @@ def stage_sections(schema_name: str, payload: dict[str, Any]) -> list[dict[str, 
             ('Current module contracts and types', {'current_contracts', 'types'}),
             ('Always loaded requirement files', {'always_loaded_files'}),
             ('Editable files with current hashes', {'editable_files'}),
-            ('Read-only source and frozen tests', {'read_only_files'}),
+            ('Read-only source and phase-protected tests', {'read_only_files'}),
             ('All shared module summaries', {'shared_catalog'}),
             ('Related module discovery', {'related_catalog'}),
             ('Acceptance test targets', {'test_targets'}),
-            ('Observed gates and correction feedback', {'gate_results', 'validation_feedback', 'previous_output'}),
+            ('Observed gates, failing test context and correction feedback', {'gate_results', 'failure_context', 'validation_feedback', 'previous_output'}),
         ):
             selected = {key: remaining.pop(key) for key in list(remaining) if key in keys}
             if selected:

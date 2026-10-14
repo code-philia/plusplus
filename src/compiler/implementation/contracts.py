@@ -21,7 +21,10 @@ listed as summaries in shared_catalog, but their source is not loaded automatica
 retrieved as summaries in related_catalog. Request exact paths via request_files before using/editing them.
 Discovery summaries do not authorize edits. Loading a module supplies its source on the next invocation;
 the compiler recomputes phase-specific permissions. Loading does not override read-only restrictions.
-Configurations are read-only, tests are writable only in test_generation. Never guess source.
+Configurations are read-only. Tests are writable in test_generation and repair; initial implementation
+phases keep tests read-only. During repair, loaded current or regression acceptance tests can be
+corrected when their assumptions, setup, selectors or assertions contradict the governing requirement.
+Never guess source.
 Do not request a dependency closure or every component. Load the few files required by actual imports,
 call chains, composition or observed errors. Any file request must have no edits in that same response.
 No recursive context dump; no automatic dependency source inclusion. Preserve public contracts and IDs.
@@ -35,7 +38,8 @@ Each edit replaces a WHOLE loaded file, supplies its current expected_sha256 and
 Do not include unchanged files, delete files or modify .arc artifacts. Edit only the supplied allowlist.
 validation_feedback and previous_output are rejected proposals; rejected files are not installed.
 blocked_reason is empty unless a real design/dependency gap prevents implementation. Do not claim success
-from reasoning: the compiler runs compilation and tests. Do not weaken frozen acceptance tests to pass.
+from reasoning: the compiler runs compilation and tests. Test edits must preserve scenario coverage
+and the intended acceptance behavior; never weaken tests merely to match a faulty implementation.
 
 ## Shared database and seed
 backend/src/db/seed.ts is the single cumulative seed module. Every application startup resets only its
@@ -56,6 +60,13 @@ UI pass discovered the complete screenshot; test behavior covered by this leaf. 
 contradictory, explain it in blocked_reason instead of inventing policy, fixture data or exact outcomes.
 Do not edit application source yet, nor import seed to insert data inside tests. Assert real behavior,
 not placeholders, snapshots of generated skeletons, or the fact that an implementation throws.
+Write assertions for the FINISHED product even though current source is a scaffold: successful actions
+must assert the expected data, persistence, response and visible interaction from the scenarios.
+Never expect Not implemented/NotImplementedError, placeholder HTTP 501, empty placeholder UI or
+missing behavior as a successful outcome. Legitimate requirement-defined validation/authentication
+errors are still testable. Current source supplies import paths/signatures, never the acceptance oracle.
+Generated tests are compiled without execution first; implementation is completed before their first
+runtime execution. Do not make tests pass against the scaffold or suppress an expected future failure.
 unit: test business contracts when isolated seams are sufficient. integration: HTTP/DB interactions.
 e2e: user-visible browser behavior when this leaf has frontend UI. Use the loaded project test runner
 configuration and contracts. Tests must compile and be discovered; do not use skip/todo/fixme or mocks
@@ -70,13 +81,27 @@ not by weakening tests or changing expected behavior.
 Implement backend and frontend contracts needed by this leaf, load additional files when needed.
 Wire routes to actual API modules, handlers to UI controls/state/API calls, and page composition.
 The lowering plan's event.wired=false is a placeholder, not completed interaction behavior.
-Acceptance tests are frozen and read-only. Add supported preexisting records to the shared seed module.
+Acceptance tests are read-only in this phase. Add supported preexisting records to the shared seed module.
 Avoid unrelated refactoring or signatures that contradict design. Do not return no-op patches as completion.
 ''',
     'repair': '''## Task: diagnose the observed gate failure and repair it
-Read gate results and current source. Request missing files before diagnosing their exact behavior.
+Read gate_results together with the failed test's full source in editable_files. failure_context
+identifies automatically loaded failing tests, including earlier requirements' regression tests and
+their requirement evidence. Reporter failed_tests includes file, case, location and assertion errors.
+The current requirement, contracts, current source and previously loaded files remain available;
+these are cumulative working files with refreshed content/hashes, not a reset to the skeleton.
+Trace each failure from assertion/expected behavior through the relevant route, service, repository
+or UI handler. Request missing source before diagnosing its exact behavior; a stack trace alone is
+not sufficient evidence for an unrelated rewrite. Fix the cause rather than only the final symptom.
 Fix actual compilation/runtime/acceptance failures while preserving prior passed requirements.
-Tests are frozen; do not change expected values, skip checks, or fake responses to satisfy a fixture.
+Determine whether the defect is in implementation or test by comparing the failed assertion with its
+requirement/scenario. Correct tests when their expected values, setup, selectors, asynchronous waiting
+or API usage misrepresent the intended finished behavior. Preserve every valid acceptance obligation,
+including prior regression coverage. Do not delete scenarios, skip/focus checks, reduce assertions,
+mock the behavior under test or adopt broken implementation output as the expected result.
+Correct source when the test is valid; do not rewrite a correct assertion to avoid fixing the product.
+For each test edit use blocked_reason only for real blockers; put the requirement-grounded rationale
+in a short code comment beside the corrected setup/assertion, without adding response fields.
 Previous accepted patches are installed; rejected proposals are not. Return the minimal coordinated
 source changes, including shared source if the failure requires it.
 ''',

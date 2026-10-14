@@ -128,12 +128,35 @@ class FileContext:
     def build(self, rid, phase, loaded, test_targets, evidence):
         direct = self.direct_files(rid)
         source_paths = direct | loaded
+        # Include failing regression tests even when owned by an earlier requirement.
+        # Only known test files may be selected from untrusted runner output.
+        failing_tests = set()
+        regression_owners = set()
+        for result in evidence:
+            if result.get('status') == 'PASSED':
+                continue
+            failures = result.get('test_evidence', {}).get('failed_tests', [])
+            candidates = [test.get('file') for test in failures]
+            if not failures:
+                candidates += result.get('test_files', [])
+            for candidate in candidates:
+                if not isinstance(candidate, str):
+                    continue
+                path = (self.root / candidate).resolve()
+                if not path.is_relative_to(self.root):
+                    continue
+                relative = path.relative_to(self.root).as_posix()
+                record = self.catalog.get(relative)
+                if record and record['kind'] == 'acceptance_test':
+                    failing_tests.add(relative)
+                    regression_owners.update(record['reqs'])
         editable, readonly = {}, {}
-        for path in sorted(source_paths | set(test_targets)):
+        for path in sorted(source_paths | set(test_targets) | failing_tests):
             row = self.catalog.get(path)
-            is_test = path in test_targets
-            writable = (is_test if phase == 'test_generation' else
-                        not is_test and row is not None and row['kind'] == 'source')
+            is_test = path in test_targets or bool(row and row['kind'] == 'acceptance_test')
+            writable = (path in test_targets if phase == 'test_generation' else
+                        row is not None and (row['kind'] == 'source' or
+                                             phase == 'repair' and is_test))
             if phase in {'backend_implementation', 'frontend_implementation'}:
                 layer = phase.split('_')[0]
                 writable = writable and (path.startswith(layer + '/') or path.startswith('shared/'))
@@ -183,4 +206,7 @@ class FileContext:
                 'editable_files': editable, 'read_only_files': readonly,
                 'shared_catalog': shared, 'related_catalog': related,
                 'test_targets': test_targets, 'gate_results': evidence,
+                'failure_context': {'test_files': sorted(failing_tests),
+                    'regression_requirements': [copy.deepcopy(self.requirements['nodes'][key])
+                        for key in sorted(regression_owners - {rid}) if key in self.requirements['nodes']]},
                 'always_loaded_files': sorted(direct)}

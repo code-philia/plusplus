@@ -128,6 +128,7 @@ export default defineConfig({
                 'tests/tdd/vitest.config.ts', '--reporter=json', '--outputFile=' + str(report), *unit],
                 environment={'DATABASE_URL': ':memory:', 'NODE_ENV': 'test'})
             self._test_report(result, report, 'vitest', len(unit))
+            result['test_files'] = unit
             results.append(result)
         if browser:
             for command in (['node', self.tool('typescript', 'bin/tsc'), '-p', 'backend/tsconfig.json'],
@@ -139,6 +140,7 @@ export default defineConfig({
             db_path = str(artifact / ('run-' + uuid.uuid4().hex + '.db'))
             report = artifact / ('playwright-' + uuid.uuid4().hex + '.json')
             result = self._browser_run(browser, port, db_path, report, red)
+            result['test_files'] = browser
             results.append(result)
         return results
 
@@ -195,11 +197,10 @@ export default defineConfig({
                 if server.poll() is None:
                     server.wait(timeout=5)
 
-    @staticmethod
-    def _test_report(result, path, runner, expected_files):
+    def _test_report(self, result, path, runner, expected_files):
         try:
             report = json.loads(path.read_text(encoding='utf-8'))
-            failures, collected, executed_files = [], 0, set()
+            failures, failed_tests, collected, executed_files = [], [], 0, set()
             if runner == 'vitest':
                 for suite in report.get('testResults', []):
                     assertions = suite.get('assertionResults', [])
@@ -208,6 +209,15 @@ export default defineConfig({
                         executed_files.add(suite['name'])
                     failures.extend(message for test in assertions if test['status'] == 'failed'
                                     for message in test.get('failureMessages', []))
+                    for test in assertions:
+                        if test['status'] == 'failed':
+                            failed_tests.append({'file': suite['name'],
+                                'name': test.get('fullName') or test.get('title', ''),
+                                'location': test.get('location'), 'errors': test.get('failureMessages', [])})
+                    if suite.get('status') == 'failed' and not any(test['status'] == 'failed' for test in assertions):
+                        message = suite.get('message', '')
+                        failures.append(message)
+                        failed_tests.append({'file': suite['name'], 'name': 'suite/setup', 'errors': [message]})
             else:
                 def visit(suites):
                     nonlocal collected
@@ -219,6 +229,16 @@ export default defineConfig({
                                 for run in test.get('results', []):
                                     if run['status'] in {'failed', 'timedOut'}:
                                         failures.extend(error.get('message', '') for error in run.get('errors', []))
+                                        reported_file = Path(spec['file'])
+                                        if not reported_file.is_absolute():
+                                            if spec['file'].replace('\\', '/').startswith('tests/'):
+                                                reported_file = self.root / reported_file
+                                            else:
+                                                test_root = Path(report.get('config', {}).get('rootDir') or 'tests/e2e')
+                                                reported_file = self.root / test_root / reported_file
+                                        failed_tests.append({'file': str(reported_file.resolve()), 'name': spec.get('title', ''),
+                                            'location': {'line': spec.get('line'), 'column': spec.get('column')},
+                                            'status': run['status'], 'errors': run.get('errors', [])})
                         visit(suite.get('suites', []))
                 visit(report.get('suites', []))
             report_errors = [str(error.get('message', error)) if isinstance(error, dict) else str(error)
@@ -234,7 +254,8 @@ export default defineConfig({
             if result['status'] != 'PASSED':
                 result['failure_kind'] = kind
             result['test_evidence'] = {'collected': collected, 'executed_files': len(executed_files),
-                                      'failures': failures[-10:], 'behavior_failure': bool(failures) and kind == 'behavior',
+                                      'failures': failures, 'failed_tests': failed_tests,
+                                      'behavior_failure': bool(failures) and kind == 'behavior',
                                       'report_path': str(path)}
             if collected == 0 or len(executed_files) < expected_files:
                 result['status'] = 'FAILED'

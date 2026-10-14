@@ -1,4 +1,4 @@
-"""Leaf TDD loop with direct editable scope, dynamic loading and frozen regression tests."""
+"""Leaf TDD loop with direct editable scope and requirement-grounded test repair."""
 from __future__ import annotations
 import copy
 import os
@@ -103,11 +103,11 @@ class NodeTDDOrchestrator:
                 self.test_manifest[rid] = targets
                 for path in targets:
                     self.context.catalog[path] = {'file_path': path, 'symbol_ids': ['TEST.' + path],
-                        'reqs': [rid], 'shared': False, 'summaries': [rid + ' frozen acceptance tests'],
+                        'reqs': [rid], 'shared': False, 'summaries': [rid + ' requirement-based acceptance tests'],
                         'kind': 'acceptance_test', 'contracts': []}
                 self._model_patch('test_generation', rid, loaded, targets, evidence, snapshots,
                                   accept=lambda: self._test_generation_gate(targets))
-                self.log.info('Acceptance tests compiled and frozen; implementing initial version before execution.', node_id=rid)
+                self.log.info('Acceptance tests compiled; implementing initial version before execution. Test corrections are permitted during repair.', node_id=rid)
                 direct = self.context.direct_files(rid)
                 for layer in ('backend', 'frontend'):
                     if not any(path.startswith(layer + '/') for path in direct):
@@ -195,6 +195,10 @@ class NodeTDDOrchestrator:
         return targets
 
     def _test_generation_gate(self, targets):
+        self._validate_test_sources(targets)
+        return self.runner.check_tests(targets)
+
+    def _validate_test_sources(self, targets):
         for path in targets:
             content = read_source(self.root, path)
             if not content.strip() or not re.search(r'\bexpect\s*\(', content):
@@ -203,7 +207,12 @@ class NodeTDDOrchestrator:
                 raise ValueError(f'Runnable acceptance test declaration required in {path}')
             if re.search(r'\b(?:test|it|describe)\.(?:skip|todo|fixme|only)\b', content):
                 raise ValueError(f'Acceptance tests cannot skip or focus cases: {path}')
-        return self.runner.check_tests(targets)
+            # Reject explicit positive assertions of generated placeholders, not legitimate
+            # business error assertions or negative assertions that placeholders are absent.
+            if (re.search(r'(?<!\.not)\.(?:toThrow|toThrowError)\s*\(\s*(?:[\'\"]Not[ -]implemented|NotImplementedError\b)', content, re.I)
+                    or re.search(r'(?<!\.not)\.(?:toBe|toEqual|toStrictEqual)\s*\(\s*501\s*\)', content)
+                    or re.search(r'\.expect\s*\(\s*501\s*\)', content)):
+                raise ValueError(f'{path}: assert the requirement\'s implemented behavior, not Not implemented errors or placeholder HTTP 501')
 
     @staticmethod
     def _behavior_failure(results):
@@ -257,6 +266,10 @@ class NodeTDDOrchestrator:
                         raise ValueError('Provide implementation/test edits; no-op response cannot satisfy this task')
                     patch_snapshot = apply_edits(self.root, output['edits'], set(payload['editable_files']),
                                                  ignore_unchanged=phase == 'test_generation')
+                    changed_tests = [path for path in patch_snapshot
+                                     if self.context.catalog.get(path, {}).get('kind') == 'acceptance_test']
+                    if changed_tests:
+                        self._validate_test_sources(changed_tests)
                     gate = accept()
                     if not passed(gate):
                         raise ValueError('Compilation/test-source gate failed: ' + str(gate))
