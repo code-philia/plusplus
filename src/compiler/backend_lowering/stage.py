@@ -28,8 +28,9 @@ class BackendLoweringPass:
             if not re.fullmatch(r'[A-Z][A-Za-z0-9]*', row['name']):
                 raise ValueError(f'Invalid module export name: {row["name"]}')
             group = group_for(row['reqs'], requirements)
-            layer = {'API': 'api', 'FUNC': 'functions', 'DB': 'db'}[row['kind']]
-            path = f'backend/src/modules/{group_directory(group, requirements)}/{layer}/{slug(row["name"])}-{slug(row["id"])}.ts'
+            layer = {'API': 'controllers', 'FUNC': 'services', 'DB': 'repositories'}[row['kind']]
+            directory = 'shared' if row['shared'] else 'features/' + group_directory(group, requirements)
+            path = f'backend/src/{directory}/{layer}/{row["name"]}.ts'
             inp, out = (row['payload'], row['response']) if row['kind'] == 'API' else (row['input'], row['output'])
             needed = sorted(refs(inp) | refs(out))
             imports = ('import type * as Contracts from ' + json.dumps(relative_import(path, types_path)) + ';\n') if needed else ''

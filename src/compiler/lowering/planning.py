@@ -39,7 +39,34 @@ def group_for(reqs, requirements):
 
 def group_directory(key, requirements):
     node = requirements['nodes'][key]
-    return slug(key) + '-' + token(key + ':' + node.get('name', ''))
+    name = slug(node.get('name') or key)
+    duplicates = [rid for rid, row in requirements['nodes'].items()
+                  if slug(row.get('name') or rid) == name]
+    return name if len(duplicates) == 1 else name + '-' + slug(key)
+
+
+def identifier(name, fallback='Component'):
+    """Use semantic names as TypeScript exports, including valid Unicode letters."""
+    words = re.findall(r'[^\W_]+', str(name), re.UNICODE)
+    result = ''.join(word[0].upper() + word[1:] for word in words) or fallback
+    if result[0].isdigit():
+        result = fallback + result
+    return result
+
+
+def unique_name(name, used, *, qualifier='', fallback='Component'):
+    """Disambiguate only collisions, using readable context then an ordinal."""
+    base = identifier(name, fallback)
+    candidate = base
+    if candidate in used and qualifier:
+        candidate = identifier(qualifier, fallback) + base
+    qualified = candidate
+    number = 2
+    while candidate in used:
+        candidate = qualified + str(number)
+        number += 1
+    used.add(candidate)
+    return candidate
 
 
 def relative_import(source, target, extension='.js'):

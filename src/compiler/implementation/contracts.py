@@ -26,6 +26,9 @@ No recursive context dump; no automatic dependency source inclusion. Preserve pu
 
 ## Patch protocol and corrections
 Return exactly the JSON schema: request_files, edits, blocked_reason, no Markdown.
+These THREE keys are the entire top-level response. Never emit type, json_object, response_format,
+schema, status or explanatory fields. JSON Schema's type and the API transport's json_object mode
+describe the format; they are NOT fields to copy into your response. Start with {"request_files": ...}.
 Each edit replaces a WHOLE loaded file, supplies its current expected_sha256 and full new content.
 Do not include unchanged files, delete files or modify .arc artifacts. Edit only the supplied allowlist.
 validation_feedback and previous_output are rejected proposals; rejected files are not installed.
@@ -51,7 +54,10 @@ e2e: user-visible browser behavior when this leaf has frontend UI. Use the loade
 configuration and contracts. Tests must compile and be discovered; do not use skip/todo/fixme or mocks
 that replace the behavior under test. Pure compilation is not an acceptance assertion.
 Application starts in an isolated database with the cumulative startup seed; assertions never preseed
-inside test code. Return a full file per assigned target. Unsupported test layers have no target.
+inside test code. Initially create every assigned target; on correction return only changed files,
+with full replacement text. Preserve valid existing tests; unchanged targets need no edit.
+Unsupported test layers have no target. Infrastructure failures are repaired by the executor,
+not by weakening tests or changing expected behavior.
 ''',
     'implementation': '''## Task: implement the leaf after the red test gate
 Implement backend and frontend contracts needed by this leaf, load additional files when needed.
@@ -69,6 +75,10 @@ source changes, including shared source if the failure requires it.
 ''',
 }
 EXAMPLE = {'request_files': ['backend/src/db/seed.ts'], 'edits': [], 'blocked_reason': ''}
+PATCH_EXAMPLE = {'request_files': [], 'edits': [{'file': 'tests/unit/example.test.ts',
+                 'expected_sha256': '<current SHA256 from editable_files>',
+                 'content': '<complete changed file contents>'}], 'blocked_reason': ''}
 PROMPTS = {phase: BACKGROUND + task + '\n## Return format\n' + json.dumps(SCHEMA)
            + '\n## Example: load first, then patch in the next invocation\n' + json.dumps(EXAMPLE)
+           + '\n## Example: replace a changed file (use actual paths, hashes and contents)\n' + json.dumps(PATCH_EXAMPLE)
            for phase, task in TASKS.items()}

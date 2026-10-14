@@ -2,6 +2,11 @@
 import os
 import json
 import subprocess
+import socket
+import time
+import uuid
+from urllib.request import urlopen
+from urllib.error import URLError
 from pathlib import Path
 from utils.jsonio import write_json_atomic
 from utils.process import process_group_kwargs, terminate_process_tree
@@ -13,7 +18,7 @@ class TestRunner:
         self.timeout = max(1, timeout)
         self.support = self.root / 'tests/tdd'
 
-    def execute(self, argv, *, cwd=None, environment=None):
+    def execute(self, argv, *, cwd=None, environment=None, timeout=None):
         env = {**os.environ, **(environment or {})}
         log = self.root / '.arc/implementation/command-output.txt'
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -22,15 +27,15 @@ class TestRunner:
                 process = subprocess.Popen(argv, cwd=cwd or self.root, env=env, stdout=output,
                                            stderr=subprocess.STDOUT, **process_group_kwargs())
                 try:
-                    code = process.wait(timeout=self.timeout)
+                    code = process.wait(timeout=self.timeout if timeout is None else timeout)
                 except subprocess.TimeoutExpired:
                     terminate_process_tree(process)
-                    return {'status': 'FAILED', 'command': argv, 'error': 'Command timed out',
+                    return {'status': 'FAILED', 'failure_kind': 'infrastructure', 'command': argv, 'error': 'Command timed out',
                             'output': log.read_text(encoding='utf-8')[-18000:]}
             return {'status': 'PASSED' if code == 0 else 'FAILED', 'command': argv, 'exit_code': code,
                     'output': log.read_text(encoding='utf-8')[-18000:]}
         except OSError as exc:
-            return {'status': 'FAILED', 'command': argv, 'error': str(exc)}
+            return {'status': 'FAILED', 'failure_kind': 'infrastructure', 'command': argv, 'error': str(exc)}
 
     def tool(self, package, script):
         for base in (self.root / 'node_modules', self.root / 'tests/node_modules', self.root / 'backend/node_modules', self.root / 'frontend/node_modules'):
@@ -62,7 +67,7 @@ const port = process.env.ARC_TDD_PORT ?? "33100";
 export default defineConfig({
   testDir: "../e2e", workers: 1, fullyParallel: false, retries: 0,
   timeout: 30000, use: { baseURL: "http://127.0.0.1:" + port },
-  webServer: { command: "node backend/dist/server.js", cwd: "../..",
+  webServer: process.env.ARC_TDD_EXTERNAL_SERVER === "1" ? undefined : { command: "node backend/dist/server.js", cwd: "../..",
     url: "http://127.0.0.1:" + port + "/__arc/health", reuseExistingServer: false,
     env: { PORT: port, NODE_ENV: "test", DATABASE_URL: process.env.DATABASE_URL ?? ":memory:" },
     timeout: 30000,
@@ -110,7 +115,7 @@ export default defineConfig({
         }, 'files': [str(self.root / path) for path in files], 'include': []})
         return [self.execute(['node', compiler, '-p', str(config)])]
 
-    def run(self, files, *, port=33100):
+    def run(self, files, *, port=33100, red=False):
         self.prepare()
         results = []
         unit = [path for path in files if not path.startswith('tests/e2e/')]
@@ -118,7 +123,6 @@ export default defineConfig({
         artifact = self.root / '.arc/implementation/databases'
         artifact.mkdir(parents=True, exist_ok=True)
         if unit:
-            import uuid
             report = artifact / ('vitest-' + uuid.uuid4().hex + '.json')
             result = self.execute(['node', self.tool('vitest', 'vitest.mjs'), 'run', '--config',
                 'tests/tdd/vitest.config.ts', '--reporter=json', '--outputFile=' + str(report), *unit],
@@ -132,15 +136,64 @@ export default defineConfig({
                 results.append(result)
                 if result['status'] != 'PASSED':
                     return results
-            import uuid
             db_path = str(artifact / ('run-' + uuid.uuid4().hex + '.db'))
             report = artifact / ('playwright-' + uuid.uuid4().hex + '.json')
-            result = self.execute(['node', self.tool('@playwright/test', 'cli.js'), 'test', '--config',
-                'tests/tdd/playwright.config.ts', '--reporter=json', *browser], environment={'DATABASE_URL': db_path,
-                    'PLAYWRIGHT_JSON_OUTPUT_FILE': str(report), 'ARC_TDD_PORT': str(port), 'NODE_ENV': 'test'})
-            self._test_report(result, report, 'playwright', len(browser))
+            result = self._browser_run(browser, port, db_path, report, red)
             results.append(result)
         return results
+
+    def _browser_run(self, browser, port, db_path, report, red):
+        # Own the server directly: Playwright webServer may start a detached process group.
+        # Never kill a preexisting listener belonging to another compilation/application.
+        with socket.socket() as reservation:
+            try:
+                reservation.bind(('127.0.0.1', port))
+            except OSError:
+                reservation.bind(('127.0.0.1', 0))
+            selected_port = reservation.getsockname()[1]
+        environment = {'DATABASE_URL': db_path, 'PLAYWRIGHT_JSON_OUTPUT_FILE': str(report),
+                       'ARC_TDD_PORT': str(selected_port), 'PORT': str(selected_port),
+                       'ARC_TDD_EXTERNAL_SERVER': '1', 'NODE_ENV': 'test', 'ARC_VALIDATION_PREPARED': '0'}
+        server_log = report.with_suffix('.server.log')
+        server = None
+        try:
+            with server_log.open('w', encoding='utf-8') as output:
+                server = subprocess.Popen(['node', 'backend/dist/server.js'], cwd=self.root,
+                    env={**os.environ, **environment}, stdout=output, stderr=subprocess.STDOUT,
+                    **process_group_kwargs())
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    if server.poll() is not None:
+                        raise ValueError('Test application exited before becoming ready')
+                    try:
+                        with urlopen(f'http://127.0.0.1:{selected_port}/__arc/health', timeout=1) as response:
+                            if response.status == 200:
+                                break
+                    except (URLError, OSError):
+                        pass
+                    time.sleep(0.1)
+                else:
+                    raise ValueError('Test application startup timed out')
+                argv = ['node', self.tool('@playwright/test', 'cli.js'), 'test', '--config',
+                        'tests/tdd/playwright.config.ts', '--reporter=json']
+                # RED needs an observed failure, not six sequential locator timeouts.
+                if red:
+                    argv.append('--max-failures=1')
+                limit = max(90, int(os.environ.get('ARC_TDD_BROWSER_TIMEOUT_SECONDS', '600')))
+                argv.append('--global-timeout=' + str(limit * 1000))
+                result = self.execute(argv + browser, environment=environment, timeout=limit + 30)
+                self._test_report(result, report, 'playwright', len(browser))
+                result['server_port'], result['server_log'] = selected_port, str(server_log)
+                return result
+        except (OSError, ValueError) as exc:
+            return {'status': 'FAILED', 'failure_kind': 'infrastructure', 'error': str(exc),
+                    'server_port': selected_port, 'server_log': str(server_log),
+                    'output': server_log.read_text(encoding='utf-8')[-18000:] if server_log.exists() else ''}
+        finally:
+            if server is not None:
+                terminate_process_tree(server)
+                if server.poll() is None:
+                    server.wait(timeout=5)
 
     @staticmethod
     def _test_report(result, path, runner, expected_files):
@@ -168,19 +221,31 @@ export default defineConfig({
                                         failures.extend(error.get('message', '') for error in run.get('errors', []))
                         visit(suite.get('suites', []))
                 visit(report.get('suites', []))
+            report_errors = [str(error.get('message', error)) if isinstance(error, dict) else str(error)
+                             for error in report.get('errors', [])]
+            failures += report_errors
             infrastructure = any(any(marker in message.lower() for marker in
                 ('executable doesn\'t exist', 'browser was not found', 'failed to launch', 'cannot find module',
-                 'failed to load', 'econnrefused', 'webserver')) for message in failures)
+                 'failed to load', 'econnrefused', 'webserver', 'global timeout')) for message in failures)
+            test_code = any(any(marker in message.lower() for marker in
+                ('syntaxerror', 'transform failed', 'no tests found', 'is not a function',
+                 'referenceerror', 'cannot find module', 'failed to load')) for message in failures)
+            kind = result.get('failure_kind') or ('test_code' if test_code else 'infrastructure' if infrastructure else 'behavior')
+            if result['status'] != 'PASSED':
+                result['failure_kind'] = kind
             result['test_evidence'] = {'collected': collected, 'executed_files': len(executed_files),
-                                      'failures': failures[-10:], 'behavior_failure': bool(failures) and not infrastructure,
+                                      'failures': failures[-10:], 'behavior_failure': bool(failures) and kind == 'behavior',
                                       'report_path': str(path)}
             if collected == 0 or len(executed_files) < expected_files:
                 result['status'] = 'FAILED'
-                result['error'] = 'Acceptance tests were not discovered for every selected file'
+                result['failure_kind'] = 'infrastructure' if report_errors or result.get('failure_kind') == 'infrastructure' else 'test_code'
+                result.setdefault('error', 'Acceptance tests were not discovered for every selected file')
                 result['test_evidence']['behavior_failure'] = False
         except (OSError, ValueError, KeyError, TypeError) as exc:
             result['status'] = 'FAILED'
-            result['error'] = 'Test report unavailable or malformed: ' + str(exc)
+            result.setdefault('failure_kind', 'infrastructure')
+            result['report_error'] = 'Test report unavailable or malformed: ' + str(exc)
+            result.setdefault('error', result['report_error'])
 
 
 def passed(results):

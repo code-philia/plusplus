@@ -107,11 +107,13 @@ class NodeTDDOrchestrator:
                 for test_attempt in range(self.attempts):
                     self._model_patch('test_generation', rid, loaded, targets, evidence, snapshots,
                                       accept=lambda: self._test_generation_gate(targets))
-                    red = self.runner.run(targets, port=self.port)
+                    red = self._run_tests(targets, rid, f'red_{test_attempt + 1}', red=True)
                     self._gate(rid, f'red_{test_attempt + 1}', red)
                     if passed(red) or self._behavior_failure(red):
                         break
-                    evidence = red
+                    if any(row.get('failure_kind') not in {'test_code', 'behavior'} for row in red if row['status'] != 'PASSED'):
+                        raise ValueError('Red gate infrastructure/application failure; no test regeneration attempted: ' + str(red))
+                    evidence = [row for row in red if row.get('failure_kind') == 'test_code']
                 if passed(red):
                     states[rid] = 'ALREADY_PASSED'
                     completed_tests.extend(targets)
@@ -125,11 +127,13 @@ class NodeTDDOrchestrator:
                     self._model_patch(phase, rid, loaded, targets, evidence, snapshots,
                                       accept=lambda: self.runner.compile() + self.runner.check_tests(completed_tests + targets))
                     # Previously passed requirements remain a regression gate after every source edit.
-                    evidence = self.runner.run(list(dict.fromkeys(completed_tests + targets)), port=self.port)
+                    evidence = self._run_tests(list(dict.fromkeys(completed_tests + targets)), rid, f'green_{iteration}')
                     self._gate(rid, f'green_{iteration}', evidence)
                     if passed(evidence):
                         success = True
                         break
+                    if any(row.get('failure_kind') == 'infrastructure' for row in evidence if row['status'] != 'PASSED'):
+                        raise ValueError('Test infrastructure failed after retries; source repair cannot fix the executor: ' + str(evidence))
                 if not success:
                     raise ValueError(f'Acceptance/regression tests still fail after {self.iterations} implementation rounds')
                 states[rid] = 'IMPLEMENTED'
@@ -146,7 +150,7 @@ class NodeTDDOrchestrator:
         if not passed(final):
             errors.append('Final compilation failed')
         if completed_tests:
-            regression = self.runner.run(list(dict.fromkeys(completed_tests)), port=self.port)
+            regression = self._run_tests(list(dict.fromkeys(completed_tests)), 'FINAL', 'regression')
             self._gate('FINAL', 'regression', regression)
             if not passed(regression):
                 errors.append('Final acceptance regression failed')
@@ -162,6 +166,17 @@ class NodeTDDOrchestrator:
             seen.add(current)
             current = requirements['nodes'][current].get('parent_id')
         return False
+
+    def _run_tests(self, targets, rid, phase, *, red=False):
+        """Retry infrastructure without asking the model to rewrite valid tests."""
+        attempts = budget('ARC_TDD_RUN_ATTEMPTS', 2)
+        for attempt in range(1, attempts + 1):
+            results = self.runner.run(targets, port=self.port, red=red)
+            self._gate(rid, f'{phase}_run_{attempt}', results)
+            if not any(row.get('failure_kind') == 'infrastructure' for row in results if row['status'] != 'PASSED'):
+                return results
+            self.log.warning(f'{phase}: infrastructure failure, executor retry {attempt}/{attempts}; keeping tests unchanged', node_id=rid)
+        return results
 
     @staticmethod
     def _targets(rid, backend, frontend):
@@ -213,6 +228,12 @@ class NodeTDDOrchestrator:
                                                        input_payload=payload, output_schema=SCHEMA)
                     previous = output
                     trace['output'] = output
+                    # A known transport metadata echo carries no application semantics.
+                    # Preserve the raw trace; all other unexpected fields remain errors.
+                    if isinstance(output, dict) and output.get('type') == 'json_object':
+                        output = {key: value for key, value in output.items() if key != 'type'}
+                        trace['protocol_normalization'] = 'Removed echoed type:json_object transport metadata'
+                        self.log.warning(trace['protocol_normalization'], node_id=rid)
                     validation = shape_errors(output, SCHEMA)
                     if validation:
                         raise ValueError('; '.join(validation))
@@ -234,7 +255,8 @@ class NodeTDDOrchestrator:
                         continue
                     if not output['edits']:
                         raise ValueError('Provide implementation/test edits; no-op response cannot satisfy this task')
-                    patch_snapshot = apply_edits(self.root, output['edits'], set(payload['editable_files']))
+                    patch_snapshot = apply_edits(self.root, output['edits'], set(payload['editable_files']),
+                                                 ignore_unchanged=phase == 'test_generation')
                     gate = accept()
                     if not passed(gate):
                         raise ValueError('Compilation/test-source gate failed: ' + str(gate))

@@ -25,7 +25,7 @@ def restore(root, snapshots):
             path.write_text(content, encoding='utf-8')
 
 
-def apply_edits(root, edits, allowlist):
+def apply_edits(root, edits, allowlist, *, ignore_unchanged=False):
     root = Path(root).resolve()
     snapshots, seen = {}, set()
     for row in edits:
@@ -38,11 +38,15 @@ def apply_edits(root, edits, allowlist):
             raise ValueError(f'Stale source hash: {relative}; request current file')
         if not row['content'].strip():
             raise ValueError(f'Empty replacement source: {relative}')
+        if current == row['content'] and ignore_unchanged:
+            continue
         if current == row['content']:
             raise ValueError(f'No-op edit: {relative}')
         snapshots[relative] = current if (root / relative).is_file() else None
     try:
         for row in edits:
+            if row['file'] not in snapshots:
+                continue
             path = root / row['file']
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(row['content'], encoding='utf-8')

@@ -3,7 +3,7 @@ import json
 import re
 from compiler.frontend_design.validation import ui_index
 from compiler.lowering.files import write_stage
-from compiler.lowering.planning import group_for, group_directory, slug, token, relative_import
+from compiler.lowering.planning import group_for, group_directory, unique_name, relative_import
 from compiler.lowering.types import contract, refs, type_file
 
 
@@ -22,6 +22,7 @@ class FrontendLoweringPass:
         files = {types_path: type_file(frontend['types'])}
         components, ownership, child_components = [], {}, {}
         component_by_ui = {}
+        export_names = {'App', 'AppState', 'AppProps', 'Contracts'}
         def subtree_reqs(row):
             return set(row['reqs']) | {rid for child in row['children'] for rid in subtree_reqs(child)}
         def size(row):
@@ -32,9 +33,13 @@ class FrontendLoweringPass:
             if extract:
                 reqs = sorted(subtree_reqs(row))
                 group = group_for(reqs, requirements)
-                export = 'Component' + token(row['id'])
+                export = unique_name(row['name'], export_names, qualifier=page['name'],
+                                     fallback='Page' if row['kind'] == 'page' else 'Component')
+                while export + 'State' in export_names or export + 'Props' in export_names:
+                    export = unique_name(row['name'], export_names, qualifier=page['name'])
+                export_names.update({export + 'State', export + 'Props'})
                 directory = "pages" if row["kind"] == "page" else "components"
-                path = f'frontend/src/{directory}/{group_directory(group, requirements)}/{slug(page["name"])}/{slug(row["name"])}-{token(row["id"])}.tsx'
+                path = f'frontend/src/features/{group_directory(group, requirements)}/{directory}/{export}.tsx'
                 record = {'ui_id': row['id'], 'name': row['name'], 'export': export, 'file_path': path,
                           'reqs': reqs, 'group_requirement_id': group, 'depth_from_page': depth,
                           'reason': 'page' if row['kind'] == 'page' else 'shallow_structural_region'}
@@ -59,20 +64,30 @@ class FrontendLoweringPass:
                                'file_path': component_by_ui[owner]['file_path'], 'standalone': row['id'] == owner})
         data_records = []
         state_by_component = {}
+        state_properties = {}
+        property_names = {}
         for row in frontend['data']:
             if row['owner'] not in ownership:
                 raise ValueError(f'Unknown state owner: {row["owner"]}')
             owner = ownership[row['owner']]
             state_by_component.setdefault(owner, []).append(row)
+            used = property_names.setdefault(owner, set())
+            prop = row['name']
+            number = 2
+            while prop in used:
+                prop = row['name'] + '_' + str(number)
+                number += 1
+            used.add(prop)
+            state_properties[row['id']] = prop
             data_records.append({'id': row['id'], 'owner_ui_id': row['owner'], 'component_ui_id': owner,
-                                 'file_path': component_by_ui[owner]['file_path'], 'export': 'State' + token(owner),
-                                 'property': row['name'] + '_' + token(row['id'])})
+                                 'file_path': component_by_ui[owner]['file_path'], 'export': component_by_ui[owner]['export'] + 'State',
+                                 'property': prop})
         def state_contract(owner, path):
             states = state_by_component.get(owner, [])
             needed = sorted(set().union(*(refs(row['schema']) for row in states))) if states else []
             imports = ('import type * as Contracts from ' + json.dumps(relative_import(path, types_path, '')) + ';\n') if needed else ''
-            fields = ' '.join(json.dumps(row['name'] + '_' + token(row['id'])) + ': ' + contract(row['schema'], definitions, False, namespace='Contracts.') + ';' for row in states)
-            return imports + 'export type State' + token(owner) + ' = { ' + fields + ' };\n'
+            fields = ' '.join(json.dumps(state_properties[row['id']]) + ': ' + contract(row['schema'], definitions, False, namespace='Contracts.') + ';' for row in states)
+            return imports + 'export type ' + component_by_ui[owner]['export'] + 'State = { ' + fields + ' };\n'
         for row in components:
             path, key = row['file_path'], row['ui_id']
             children = [component_by_ui[child] for child in child_components[key]]
@@ -93,7 +108,7 @@ class FrontendLoweringPass:
             if not re.fullmatch(r'[A-Z][A-Za-z0-9]*', row['name']):
                 raise ValueError(f'Invalid handler export name: {row["name"]}')
             group = group_for(row['reqs'], requirements)
-            path = f'frontend/src/functions/{group_directory(group, requirements)}/{slug(row["name"])}-{slug(row["id"])}.ts'
+            path = f'frontend/src/features/{group_directory(group, requirements)}/handlers/{row["name"]}.ts'
             needed = sorted(refs(row['input']) | refs(row['output']))
             imports = ('import type * as Contracts from ' + json.dumps(relative_import(path, types_path, '')) + ';\n') if needed else ''
             files[path] = (imports + f'export type {row["name"]}Input = {contract(row["input"], definitions, namespace="Contracts.")};\n'
