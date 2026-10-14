@@ -18,7 +18,8 @@ Useful repository areas:
 
 - `src/compiler/`: compiler passes, IR validation, and deterministic lowering
 - `src/cli/`: command parsing, presentation, and configuration
-- `src/compiler/runtime/`: compilation workspace, artifacts, checkpoints, and traceability
+- `src/compiler/pipeline.py`: stage execution, workflow reports, and requirement-to-file bindings
+- `src/compiler/implementation/`: leaf requirement TDD, file context, and repair loops
 - `src/model/`: model interfaces, transport, structured calls, and usage records
 - `src/utils/`: shared logging, Git commands, process execution, and JSON I/O
 - `docs/`: current pipeline contracts and stage guides
