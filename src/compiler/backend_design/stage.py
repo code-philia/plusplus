@@ -217,10 +217,19 @@ class BackendDesignPass:
                 raise ValueError(f'Unknown or unloaded module ID {key}')
             return key
         reused = set()
+        reuse_ids = {row['id'] for row in payload['reuse_candidates']}
         for reuse in output['reuse']:
             key = reuse['id']
-            if key not in {row['id'] for row in payload['reuse_candidates']} or key in reused:
-                raise ValueError(f'Invalid or duplicate reuse ID {key}')
+            if key in reused:
+                raise ValueError(f'Duplicate reuse ID {key}: list it once and combine all caller IDs in callers')
+            if key not in reuse_ids:
+                target = modules.get(key)
+                if target and target['kind'] != kind:
+                    raise ValueError(f'{kind} reuse accepts {kind} IDs from reuse_candidates only; {key} is '
+                                     f'{target["kind"]}. To call a loaded downstream module, put its ID in '
+                                     'a new module\'s callees, not reuse; multiple callers may share that callee')
+                raise ValueError(f'{key} is not in this {kind} pass\'s reuse_candidates; '
+                                 'reuse only supplied candidates, or call a loaded reference_catalog target through callees')
             reused.add(key)
             modules[key]['reqs'] = sorted(set(modules[key]['reqs']) | {rid})
             selected.append(key)

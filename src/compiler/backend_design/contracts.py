@@ -31,6 +31,9 @@ it emits no implementation, SQL, UI code, fixtures, or database migrations.
 
 ## Contract conventions
 Use globally unique PascalCase module names describing a single reusable responsibility.
+Module/type names use ASCII letters and digits, start with an uppercase letter and contain no spaces,
+underscores or punctuation. Module-name uniqueness is case-insensitive across ALL three layers;
+new_types names must be absent from existing_types and unique within this reply.
 spec is a concise Hoare-style behavioral contract: {preconditions} operation {postconditions};
 include explicit failures and frame conditions (what is preserved). Ground every condition in
 requirements. State authentication, authorization and transaction requirements when supported;
@@ -56,6 +59,13 @@ other business checks in spec; do not add unused schema metadata or unused new_t
 For custom reusable DTOs emit new_types:[{name:"NoteView",schema:"<JSON Schema object>"}];
 refer with {"$ref":"#/types/NoteView"}. Reuse loaded definitions unchanged; new names cannot overwrite
 existing definitions. Define only types reachable from interfaces. Recursive types are unsupported.
+Every new type must be used by a new module's interface, directly or through another used type.
+The interface root itself must be an object with properties; place $ref on a property or array item,
+not in place of the entire payload/response/input/output object. $ref nodes may only add description
+and an API parameter source; do not combine $ref with type/properties. anyOf nodes likewise contain
+only alternatives plus description/source; put nullability and type inside the alternatives.
+required contains unique names declared in that same object's properties. enum values must be unique
+and match the scalar type. Empty objects remain valid only when consistent with the declared behavior.
 source is an ARC extension to JSON Schema, used ONLY on top-level API payload properties.
 It identifies each parameter's HTTP location; it is not part of a reusable DTO or a return value.
 
@@ -89,6 +99,14 @@ reuse_candidates contains full immutable contracts retrieved by entity/field ove
 Prefer reuse ONLY if inputs, outputs, behavior, data requirements and existing callees already suffice
 without any modification. Reuse does not permit strengthening a spec or extending an existing call graph.
 reuse contains existing IDs only. Never repeat an existing name or method+equivalent route as new.
+Only IDs in THIS pass's reuse_candidates may appear in reuse, and their kind must match the pass:
+API reuses API; FUNC reuses FUNC; DB reuses DB. List each reuse ID ONCE, combining all callers in
+that entry. reference_catalog is a catalog of available callee contracts, not extra reuse candidates.
+Calling an existing lower-layer module is declared in a new module's callees; do not also put that
+module in reuse. Adding another caller to an unchanged module is allowed; changing that module's
+input/output/spec or adding new callees to its established graph is forbidden.
+shared is a classification, not a permission: an entity-specific module may have multiple callers
+without shared:true. Multiple FUNCs can call the same DB; multiple APIs can call the same FUNC.
 shared:true is exceptional: only stable cross-domain infrastructure such as authentication, payment
 provider integration or logging with a domain-independent contract. A feature used by two requirements,
 CRUD, or an entity-specific helper is not automatically shared. shared_reason must justify the flag;
@@ -99,6 +117,16 @@ Return exactly the JSON delta described by the response schema, without Markdown
 reqs, kind or other compiler-owned properties. In the same reply, refer to a new module as @Name;
 refer to existing modules by their exact supplied ID. Never guess a future module ID.
 validation_feedback and previous_output describe a rejected reply: return a complete corrected delta.
+Every delta contains new_modules, reuse and new_types; use [] when absent, never omit a required key.
+All caller/callee arrays contain unique IDs or @Name aliases. Only supplied contract IDs are usable:
+names in name_index, IDs in route_index, IDs merely mentioned in spec/callees of another record, and
+IDs in upstream_api_contracts do not by themselves load a contract for wiring. An @Name must name a
+new module in THIS reply; it cannot refer to a future pass's module or a type definition.
+Allowed call directions are API -> FUNC, FUNC -> FUNC/DB, DB -> DB; no self calls or cycles.
+All new or explicitly reused modules must be reachable from the selected upstream operations;
+do not create disconnected helpers. Reciprocal links and requirement association are compiler-owned.
+Reusing an established operation also associates its existing downstream graph with this requirement;
+do not redeclare that entire graph, reselect its children, or invent new collaborators for it.
 Before returning, map every server-side scenario step to an operation or a reused contract. Keep
 transport, business decisions and storage responsibilities separate; never add a module solely to
 mirror a visual control. Empty arrays are valid when the current layer needs no new modules.
@@ -118,6 +146,10 @@ JSON response body; do not expose a session token in that body unless the requir
 These transport effects still require a declared FUNC output supplying the needed token.
 The compiler generates IDs and empty callees, then the FUNC pass wires business collaborators.
 API reuse entries contain only id. Do not design FUNC or DB.
+Paths are absolute URL paths only: no query string, fragment, whitespace or brace parameters.
+Each :parameter has an exact matching payload property with source:path and is listed in required;
+do not add path-source properties absent from the route. Routes with the same method differing only
+in parameter names or a trailing slash are equivalent and cannot be created twice.
 ''',
     'FUNC': '''## Current task: composable business functions
 A FUNC sits between transport APIs and storage DB modules: it validates, authorizes and orchestrates.
@@ -126,6 +158,14 @@ For each new FUNC, callers may name those API IDs or @Name for other new FUNCs; 
 @Name for other new FUNCs or loaded existing FUNC/DB IDs. Do not invent or design DB modules yet.
 Declare each FUNC-FUNC edge once using callers OR callees; the compiler makes edges reciprocal.
 reuse entries contain id and callers (the new upstream attachment), leaving the reused contract intact.
+reuse accepts existing FUNC IDs from reuse_candidates ONLY. For an existing DB in reference_catalog,
+put its ID directly in the new FUNC's callees; NEVER put that DB in this pass's reuse. You may list
+the same DB callee in several new FUNCs. Each such edge is declared once per FUNC; the compiler adds
+the reciprocal DB.callers and reqs. The DB pass designs/reuses only still-needed storage operations.
+For reuse of an existing FUNC, callers may be selected upstream API IDs or @Name of new FUNCs in this
+reply. Merge multiple caller IDs into one reuse entry, rather than duplicate entries for the same ID.
+New FUNC callers may only be selected upstream APIs or new local FUNCs. Do not mutate a loaded
+existing FUNC by making it call a new helper; declare calls from a new caller toward an existing callee.
 Read the upstream API's payload, response AND spec. Declare input for all caller-provided identity,
 filters and submitted values needed by this function; remove HTTP source metadata at this layer.
 Output must supply both API body values and any values needed for API transport effects, such as a
@@ -143,6 +183,16 @@ Use loaded database targets only; do not create entities/fields or infer operati
 DB may call another DB, never API/FUNC. callers may name supplied FUNC IDs or @Name for new DBs;
 callees may name @Name or loaded existing DB IDs. No cycles. Include at least one read/write target.
 The callers declaration is wiring evidence; the compiler records final reciprocal callers and IDs.
+reuse accepts existing DB IDs from reuse_candidates ONLY. One reused DB can attach to multiple
+selected FUNCs: list it once with callers:["FUNC_ID_1","FUNC_ID_2"]. Existing DBs in reference_catalog
+may also be targets in a new DB's callees, without a duplicate reuse entry. New/reused DB callers
+must be selected upstream FUNCs or @Name of new local DBs, not arbitrary existing DBs/APIs.
+Do not alter already populated upstream FUNC callees when that FUNC is reused from another requirement.
+Its established storage graph already suffices by the reuse contract. Only newly designed upstream
+FUNCs may receive additional new storage collaborators. An existing DB's downstream graph is immutable.
+read/write arrays contain unique exact loaded entity/field targets; use "[]" for an unused operation,
+but at least one of read/write must be nonempty. A listed entity does not replace explicitly needed
+field targets. Do not emit SQL, access objects, new table names or fabricated target IDs here.
 upstream_api_contracts provides the relevant enclosing APIs so request identity and transport effects
 remain visible. Check upstream FUNC input/output/spec and these API contracts before choosing DB
 input/output. Return IDs, tokens, credential material or selected fields needed by upstream operations.
@@ -166,6 +216,14 @@ EXAMPLES = {
                             'output': '{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}',
                             'read': '["note","note.title"]', 'write': '[]', 'callers': ['FUNC_000001'], 'callees': []}], 'reuse': [], 'new_types': []},
 }
+WIRING_EXAMPLES = {
+    'API': {'new_modules': [], 'reuse': [{'id': 'API_000001'}], 'new_types': []},
+    'FUNC': {'new_modules': [{**EXAMPLES['FUNC']['new_modules'][0],
+                             'callees': ['DB_000001']}], 'reuse': [], 'new_types': []},
+    'DB': {'new_modules': [], 'reuse': [{'id': 'DB_000001', 'callers': ['FUNC_000001', 'FUNC_000002']}], 'new_types': []},
+}
 PROMPTS = {kind: BACKGROUND + task + '\n## Return format\n' + json.dumps(SCHEMAS[kind], ensure_ascii=False)
            + '\n## Example (IDs are illustrative; use supplied IDs)\n' + json.dumps(EXAMPLES[kind])
+           + '\n## Wiring example (assume the shown contracts are loaded and behavior matches)\n'
+           + json.dumps(WIRING_EXAMPLES[kind])
            for kind, task in TASKS.items()}
