@@ -32,7 +32,7 @@ def completion_request_kwargs(
     messages: list[dict[str, Any]],
     response_format: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build provider request arguments, including DeepSeek-only controls."""
+    """Build provider request arguments with model-specific reasoning controls."""
 
     request: dict[str, Any] = {
         "model": model,
@@ -49,6 +49,8 @@ def completion_request_kwargs(
     elif is_deepseek_model(model):
         request["reasoning_effort"] = "low"
         request["extra_body"] = {"thinking": {"type": "enabled"}}
+    elif str(model).strip().lower().startswith("gpt-"):
+        request["reasoning_effort"] = "low"
     return request
 
 
