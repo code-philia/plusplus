@@ -96,6 +96,14 @@ Reuse supplied state unchanged when it already suffices. Return empty arrays if 
 ''',
     'interaction': '''## Task: events and their handlers together
 Connect scenario actions, page/region load, input changes, submissions, navigation and supported failures.
+event_ui_candidates is the exact allowlist for new_events.ui. Choose its supplied ID, not an @Name,
+page name or an arbitrary loaded_ui_id. A loaded page root is NOT automatically requirement-bound.
+For load use a candidate region that owns the initialization behavior when the page root is absent.
+Never invent a UI ID or attach an event to an unbound ancestor merely because it contains the control.
+Select the handler explicitly in the same response: new_handlers:[{name:"LoadAccount",...}] means
+new_events.handler:"@LoadAccount"; an existing handler must appear in reuse_handlers or handler_updates
+before a NEW event may reference its exact ID. A handler in the input reuse_handlers catalog alone is
+not selected. Reusing an existing event via reuse_events selects its established handler automatically.
 new_events.ui must be a loaded UI explicitly bound to this leaf. trigger is a framework-neutral semantic
 trigger, not an onClick/effect string. Each event points to exactly one handler. Multiple events may share
 one handler. There is at most one event per UI+trigger: reuse it unchanged if its existing handler suffices.

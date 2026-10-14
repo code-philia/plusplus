@@ -140,6 +140,11 @@ class FrontendDesignPass:
                 payload['existing_types'] = self._types(trial, apis, payload['existing_data'])
                 trial = self._design('data', rid, trial, payload, backend)
                 payload['selected_ui_tree'], loaded = region(trial, names)
+                current_nodes, _ = ui_index(trial['ui'])
+                payload['event_ui_candidates'] = [
+                    {'id': key, 'name': current_nodes[key]['name'], 'kind': current_nodes[key]['kind'],
+                     'description': current_nodes[key]['description']}
+                    for key in sorted(loaded) if rid in current_nodes[key]['reqs']]
                 payload['existing_data'] = state_context(trial, loaded)
                 payload['reuse_handlers'], payload['existing_events'] = handler_context(
                     trial, loaded, payload['existing_data'], apis, requirement)

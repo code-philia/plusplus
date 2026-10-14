@@ -163,6 +163,7 @@ def stage_sections(schema_name: str, payload: dict[str, Any]) -> list[dict[str, 
         for name, keys in (
             ('Current task', {'current_task'}),
             ('Selected page and UI tree', {'current_page', 'page_mode', 'selected_ui_tree', 'app', 'loaded_ui_ids'}),
+            ('Eligible event UI nodes', {'event_ui_candidates'}),
             ('Page state comparison', {'baseline_page_states'}),
             ('Global UI summary', {'ui_tree_summary'}),
             ('Backend API contracts', {'api_contracts'}),

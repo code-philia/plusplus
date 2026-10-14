@@ -188,8 +188,16 @@ def apply_interaction(base, output, rid, payload):
     for row in output['new_events']:
         reference = row['handler']
         handler = aliases.get(reference[1:]) if reference.startswith('@') else reference
-        if row['ui'] not in bound_ui or handler not in selected:
-            raise ValueError('New event must connect requirement-bound UI to a selected handler')
+        if row['ui'] not in loaded:
+            raise ValueError(f'Event {row["name"]}: UI {row["ui"]} is not loaded; choose an exact event_ui_candidates ID')
+        if row['ui'] not in bound_ui:
+            raise ValueError(f'Event {row["name"]}: UI {row["ui"]} is loaded but not bound to {rid}; '
+                             f'choose event_ui_candidates, eligible IDs={sorted(bound_ui)}. '
+                             'For load use a bound owning region instead of an unbound page root')
+        if handler not in selected:
+            raise ValueError(f'Event {row["name"]}: handler {reference} is not selected; '
+                             'use @Name matching new_handlers.name, or select an existing exact ID '
+                             'in output reuse_handlers/handler_updates before attaching a new event')
         key = f'EVENT_{len(events) + 1:06d}'
         symbol = {**copy.deepcopy(row), 'handler': handler, 'id': key, 'reqs': [rid]}
         events[key] = symbol
