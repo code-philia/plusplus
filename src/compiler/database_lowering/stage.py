@@ -1,92 +1,73 @@
-"""Static database lowering after project initialization, without fixtures or execution."""
-from __future__ import annotations
-
-import hashlib
+"""Minimal table initialization and connection lowering for the initialized SQLite stack."""
 import json
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-
-from utils.jsonio import write_json_atomic
-
-from compiler.runtime.artifacts import CompilerArtifactStore
-from .strategy import get_strategy
+from compiler.ir.database import table_constraints
+from compiler.lowering.files import write_stage
+from .runtime import runtime_sources, SEED_PATH
 
 
-@dataclass(slots=True)
-class DatabaseLoweringResult:
-    manifest: dict[str, Any] = field(default_factory=dict)
-    sources: dict[str, str] = field(default_factory=dict)
-    artifacts: dict[str, str] = field(default_factory=dict)
-    errors: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-
-    @property
-    def ok(self) -> bool:
-        return not self.errors
+def quote(value):
+    return '"' + value.replace('"', '""') + '"'
 
 
-class DatabaseLowerer:
-    """Generate connection helpers and table initialization only."""
-
-    def lower(self, schema: dict[str, Any], project_manifest: dict[str, Any], output_root: Path, *, dialect: str = "sqlite") -> DatabaseLoweringResult:
-        result = DatabaseLoweringResult()
-        try:
-            if project_manifest.get('status') != 'PROJECT_INITIALIZED':
-                raise ValueError('Project initialization must complete before database lowering')
-            if schema.get('ir_kind') != 'database_schema':
-                raise ValueError('Expected database-neutral Schema IR; dialect-specific schemas are unsupported')
-            strategy = get_strategy(dialect)
-            if strategy.dialect == 'sqlite' and project_manifest.get('profile') != 'web-react18-tailwind4-express-drizzle-sqlite':
-                raise ValueError('SQLite lowering requires the initialized SQLite/Drizzle project profile')
-            lowered = strategy.lower(schema, {}, {})
-            sources = lowered.sources
-            result.warnings.extend(lowered.warnings)
-            result.sources = sources
-            result.manifest = {
-                'schema_version': 6, 'status': 'DATABASE_SCHEMA_LOWERED',
-                'dialect': strategy.dialect,
-                'schema_sha256': hashlib.sha256(json.dumps(schema, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
-                'tables': lowered.tables,
-                'initialization': {'mode': 'create_if_not_exists', 'statements': lowered.statements,
-                                   'entrypoint': 'backend/src/db/init.ts', 'executed': False},
-                'ddl': {'sqlite': 'backend/sql/schema.sqlite.sql'},
-                'policies': lowered.policies,
-                'generated_files': sorted(path for path in sources if path.startswith('backend/src/')),
-                'source_files': sorted(sources),
-            }
-        except (AttributeError, KeyError, TypeError, ValueError, StopIteration) as exc:
-            result.errors.append(f'DATABASE_LOWERING_INVALID: {exc}')
-            result.sources.clear()
-        return result
+def literal(value):
+    if isinstance(value, bool):
+        return '1' if value else '0'
+    if isinstance(value, (float, int)):
+        return str(value)
+    return "'" + str(value).replace("'", "''") + "'"
 
 
-def lower_database(output_root: Path, store: CompilerArtifactStore, project_manifest: dict[str, Any], *, schema_path: Path | None = None, dialect: str = "sqlite") -> DatabaseLoweringResult:
-    """Read the committed schema.json and write sources; never open a database."""
-    output_root = output_root.expanduser().resolve()
-    result = DatabaseLoweringResult()
-    try:
-        if store.root.parent != output_root:
-            raise ValueError('Artifact store and initialized project output roots differ')
-        if not (output_root / 'backend/package.json').is_file():
-            raise ValueError('Initialized backend/package.json is missing')
-        path = schema_path or store.database_root / 'schema.json'
-        schema = json.loads(path.read_text(encoding='utf-8'))
-        if not isinstance(schema, dict):
-            raise ValueError('schema.json must contain a JSON object')
-        result = DatabaseLowerer().lower(schema, project_manifest, output_root, dialect=dialect)
-        if result.ok:
-            result.artifacts.update(store.write_generated_sources(result.sources))
-    except (OSError, ValueError) as exc:
-        result.errors.append(f'DATABASE_LOWERING_FAILED: {exc}')
-    report_root = store.lowering_root / 'database'
-    write_json_atomic(report_root / 'report.json', {
-        'status': 'LOWERED' if result.ok else 'FAILED',
-        'errors': result.errors, 'warnings': result.warnings,
-        'files': sorted(result.sources),
-    })
-    result.artifacts['database_lowering_report'] = str(report_root / 'report.json')
-    if result.ok:
-        write_json_atomic(report_root / 'manifest.json', result.manifest)
-        result.artifacts['database_lowering_manifest'] = str(report_root / 'manifest.json')
-    return result
+def create_statement(table):
+    parts = []
+    for column in table['columns']:
+        dtype = {'string': 'TEXT', 'uuid': 'TEXT', 'date': 'TEXT', 'datetime': 'TEXT', 'json': 'TEXT',
+                 'integer': 'INTEGER', 'boolean': 'INTEGER', 'number': 'REAL'}[column['type']]
+        line = quote(column['name']) + ' ' + dtype + ('' if column['nullable'] else ' NOT NULL')
+        default = column.get('default')
+        if default:
+            value = default['value']
+            if default['kind'] == 'json_literal' and not isinstance(value, str):
+                value = json.dumps(value, ensure_ascii=False)
+            line += ' DEFAULT ' + literal(value)
+        parts.append(line)
+    for item in table_constraints(table):
+        kind = item['kind']
+        columns = ', '.join(quote(name) for name in item['columns'])
+        if kind == 'CHECK':
+            continue
+        if kind == 'PRIMARY_KEY':
+            clause = 'PRIMARY KEY (' + columns + ')'
+        elif kind == 'UNIQUE':
+            if item.get('comparison') == 'case_insensitive':
+                columns = ', '.join(quote(name) + ' COLLATE NOCASE' for name in item['columns'])
+            clause = 'UNIQUE (' + columns + ')'
+        elif kind == 'FOREIGN_KEY':
+            clause = ('FOREIGN KEY (' + columns + ') REFERENCES ' + quote(item['referenced_table'])
+                      + ' (' + ', '.join(quote(name) for name in item['referenced_columns'])
+                      + ') ON DELETE RESTRICT ON UPDATE RESTRICT')
+        else:
+            raise ValueError('Unsupported table constraint ' + kind)
+        parts.append('CONSTRAINT ' + quote(item['name']) + ' ' + clause)
+    return 'CREATE TABLE IF NOT EXISTS ' + quote(table['name']) + ' (\n  ' + ',\n  '.join(parts) + '\n);'
+
+
+class DatabaseLoweringPass:
+    def compile(self, schema, output_dir):
+        if schema.get('ir_kind') != 'database_schema' or schema.get('status') != 'RESOLVED':
+            raise ValueError('Database lowering requires a RESOLVED SchemaIR')
+        files = runtime_sources([create_statement(table) for table in schema['tables']])
+        # The seed is cumulative implementation code, not a fresh placeholder on every lowering.
+        from pathlib import Path
+        seed = Path(output_dir) / SEED_PATH
+        if seed.is_file():
+            files[SEED_PATH] = seed.read_text(encoding='utf-8')
+        plan = {'ir_kind': 'database_lowering', 'dialect': 'sqlite',
+                'tables': [{'name': table['name'], 'reqs': table['requirement_ids'],
+                            'file_path': 'backend/src/db/initialize.ts',
+                            'columns': [{'name': row['name'], 'reqs': row['requirement_ids']} for row in table['columns']]}
+                           for table in schema['tables']],
+                'shared_modules': [{'id': 'SYSTEM.DB_CLIENT', 'name': 'Database connection', 'file_path': 'backend/src/db/client.ts'},
+                    {'id': 'SYSTEM.DB_SCHEMA', 'name': 'Database table initialization', 'file_path': 'backend/src/db/initialize.ts'},
+                    {'id': 'SYSTEM.SEED', 'name': 'Startup reset and cumulative seed', 'file_path': SEED_PATH}]}
+        return write_stage(output_dir, 'database', plan, files,
+                           bootstrap_files={'backend/src/db/client.ts', 'backend/src/db/initialize.ts'})

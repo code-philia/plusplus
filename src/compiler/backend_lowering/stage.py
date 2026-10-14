@@ -53,12 +53,26 @@ class BackendLoweringPass:
         route_lines = [f'  app.{row["method"].lower()}({json.dumps(row["path"])}, (_request, response) => {{\n'
                        + f'    response.status(501).json({{ error: "Not implemented", module_id: {json.dumps(row["module_id"])} }});\n  }});'
                        for row in routes]
-        files[app_path] = ('import express from "express";\n\nexport function createApp() {\n'
+        files[app_path] = ('import express from "express";\n'
+                          + 'import { fileURLToPath } from "node:url";\n\nexport function createApp() {\n'
                           + '  const app = express();\n  app.use(express.json());\n'
-                          + '\n'.join(route_lines) + '\n  return app;\n}\n')
+                          + '  app.get("/__arc/health", (_request, response) => { response.json({ status: "ok" }); });\n'
+                          + '\n'.join(route_lines)
+                          + '\n  app.use(express.static(fileURLToPath(new URL("../../frontend/dist/", import.meta.url))));\n'
+                          + '  app.use((request, response, next) => {\n'
+                          + '    if (request.method !== "GET" || request.path.startsWith("/api")) { next(); return; }\n'
+                          + '    response.sendFile(fileURLToPath(new URL("../../frontend/dist/index.html", import.meta.url)));\n'
+                          + '  });\n  return app;\n}\n')
         files['backend/src/server.ts'] = ('import { createApp } from "./app.js";\n'
+            + 'import { createDatabaseClient, bindDatabaseClient } from "./db/client.js";\n'
+            + 'import { seedDatabase } from "./db/seed.js";\n'
+            + 'const client = createDatabaseClient();\n'
+            + 'try { seedDatabase(client.connection); bindDatabaseClient(client); }\n'
+            + 'catch (error) { client.close(); throw error; }\n'
             + 'const port = Number.parseInt(process.env.PORT ?? "3000", 10);\n'
-            + 'export const server = createApp().listen(Number.isFinite(port) ? port : 3000);\n')
+            + 'export const server = createApp().listen(Number.isFinite(port) ? port : 3000);\n'
+            + 'server.on("close", () => client.close());\n'
+            + 'process.once("SIGTERM", () => server.close());\nprocess.once("SIGINT", () => server.close());\n')
         plan = {'ir_kind': 'backend_lowering', 'strategy': 'deterministic_parent_groups',
                 'entrypoint': 'backend/src/server.ts', 'modules': records, 'routes': routes,
                 'types': [{'name': row['name'], 'file_path': types_path, 'export': row['name']} for row in backend['types']]}

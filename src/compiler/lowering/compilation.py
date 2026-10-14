@@ -7,11 +7,12 @@ from utils.jsonio import read_json, write_json_atomic
 def check_compilation(output, stage):
     output = Path(output).resolve()
     artifact = output / '.arc/lowering' / stage
-    config_name = 'tsconfig.json' if stage == 'backend' else 'tsconfig.app.json'
-    project_config = output / stage / config_name
+    project_stage = 'backend' if stage == 'database' else stage
+    config_name = 'tsconfig.json' if project_stage == 'backend' else 'tsconfig.app.json'
+    project_config = output / project_stage / config_name
     if not project_config.is_file() and stage == 'frontend':
         project_config = output / stage / 'tsconfig.json'
-    candidates = [output / stage / 'node_modules/typescript/bin/tsc',
+    candidates = [output / project_stage / 'node_modules/typescript/bin/tsc',
                   output / 'node_modules/typescript/bin/tsc']
     compiler = next((path for path in candidates if path.is_file()), None)
     if compiler is None or not project_config.is_file():

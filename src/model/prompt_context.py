@@ -136,6 +136,26 @@ def render_section(name: str, purpose: str, payload: dict[str, Any]) -> str:
 
 
 def stage_sections(schema_name: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if schema_name in {'tdd_test_generation', 'tdd_implementation', 'tdd_repair'}:
+        remaining = dict(payload)
+        sections = []
+        for name, keys in (
+            ('Current task', {'current_task'}),
+            ('Current module contracts and types', {'current_contracts', 'types'}),
+            ('Always loaded requirement files', {'always_loaded_files'}),
+            ('Editable files with current hashes', {'editable_files'}),
+            ('Read-only source and frozen tests', {'read_only_files'}),
+            ('All shared module summaries', {'shared_catalog'}),
+            ('Related module discovery', {'related_catalog'}),
+            ('Acceptance test targets', {'test_targets'}),
+            ('Observed gates and correction feedback', {'gate_results', 'validation_feedback', 'previous_output'}),
+        ):
+            selected = {key: remaining.pop(key) for key in list(remaining) if key in keys}
+            if selected:
+                sections.append({'name': name, 'purpose': '', 'payload': selected})
+        if remaining:
+            sections.append({'name': 'Additional context', 'purpose': '', 'payload': remaining})
+        return sections
     if schema_name in {'frontend_design_ui', 'frontend_design_data', 'frontend_design_interaction', 'frontend_design_visual'}:
         remaining = dict(payload)
         sections = []
