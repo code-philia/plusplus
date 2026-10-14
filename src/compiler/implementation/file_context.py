@@ -133,6 +133,9 @@ class FileContext:
             is_test = path in test_targets
             writable = (is_test if phase == 'test_generation' else
                         not is_test and row is not None and row['kind'] == 'source')
+            if phase in {'backend_implementation', 'frontend_implementation'}:
+                layer = phase.split('_')[0]
+                writable = writable and (path.startswith(layer + '/') or path.startswith('shared/'))
             if phase == 'test_generation' and row and row['kind'] == 'test_support':
                 writable = False
             text = read_source(self.root, path)

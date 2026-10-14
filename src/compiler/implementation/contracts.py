@@ -59,7 +59,7 @@ with full replacement text. Preserve valid existing tests; unchanged targets nee
 Unsupported test layers have no target. Infrastructure failures are repaired by the executor,
 not by weakening tests or changing expected behavior.
 ''',
-    'implementation': '''## Task: implement the leaf after the red test gate
+    'implementation': '''## Task: implement the initial version before running tests
 Implement backend and frontend contracts needed by this leaf, load additional files when needed.
 Wire routes to actual API modules, handlers to UI controls/state/API calls, and page composition.
 The lowering plan's event.wired=false is a placeholder, not completed interaction behavior.
@@ -74,6 +74,22 @@ Previous accepted patches are installed; rejected proposals are not. Return the 
 source changes, including shared source if the failure requires it.
 ''',
 }
+TASKS['backend_implementation'] = '''## Task: implement the initial backend version
+Tests have been generated and compiled, but have NOT been executed yet. Implement the current leaf's
+API/controllers, services/business functions and repositories/storage contracts as one coherent version.
+Wire server routes, parameter/result data flow, authentication transport and required startup fixtures.
+Load shared files when necessary. Frontend source and acceptance tests are read-only in this phase.
+Preserve contracts and previously implemented behavior. Return complete changed source files; do not
+leave required business bodies as placeholders just because there is no runtime failure evidence yet.
+'''
+TASKS['frontend_implementation'] = '''## Task: implement the initial frontend version
+The initial backend implementation is available. Tests have NOT been executed yet. Implement the
+current leaf's UI, state, events and handlers, API calls, page composition and navigation; use the
+requirement's visual analysis for layout, content and style. Load shared components/App/styles as needed.
+Backend source and acceptance tests are read-only in this phase. Preserve contracts and earlier UI
+behavior. Wire the required interactions instead of leaving lowering's event.wired=false as completion.
+After this phase the compiler runs current acceptance tests and all prior regression tests, then repairs.
+'''
 EXAMPLE = {'request_files': ['backend/src/db/seed.ts'], 'edits': [], 'blocked_reason': ''}
 PATCH_EXAMPLE = {'request_files': [], 'edits': [{'file': 'tests/unit/example.test.ts',
                  'expected_sha256': '<current SHA256 from editable_files>',

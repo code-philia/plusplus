@@ -104,38 +104,35 @@ class NodeTDDOrchestrator:
                     self.context.catalog[path] = {'file_path': path, 'symbol_ids': ['TEST.' + path],
                         'reqs': [rid], 'shared': False, 'summaries': [rid + ' frozen acceptance tests'],
                         'kind': 'acceptance_test', 'contracts': []}
-                for test_attempt in range(self.attempts):
-                    self._model_patch('test_generation', rid, loaded, targets, evidence, snapshots,
-                                      accept=lambda: self._test_generation_gate(targets))
-                    red = self._run_tests(targets, rid, f'red_{test_attempt + 1}', red=True)
-                    self._gate(rid, f'red_{test_attempt + 1}', red)
-                    if passed(red) or self._behavior_failure(red):
-                        break
-                    if any(row.get('failure_kind') not in {'test_code', 'behavior'} for row in red if row['status'] != 'PASSED'):
-                        raise ValueError('Red gate infrastructure/application failure; no test regeneration attempted: ' + str(red))
-                    evidence = [row for row in red if row.get('failure_kind') == 'test_code']
-                if passed(red):
-                    states[rid] = 'ALREADY_PASSED'
-                    completed_tests.extend(targets)
-                    continue
-                if not self._behavior_failure(red):
-                    raise ValueError('Red gate failed because tests/application could not run, not an observed assertion failure')
-                evidence = red
-                success = False
-                for iteration in range(1, self.iterations + 1):
-                    phase = 'implementation' if iteration == 1 else 'repair'
-                    self._model_patch(phase, rid, loaded, targets, evidence, snapshots,
+                self._model_patch('test_generation', rid, loaded, targets, evidence, snapshots,
+                                  accept=lambda: self._test_generation_gate(targets))
+                self.log.info('Acceptance tests compiled and frozen; implementing initial version before execution.', node_id=rid)
+                direct = self.context.direct_files(rid)
+                for layer in ('backend', 'frontend'):
+                    if not any(path.startswith(layer + '/') for path in direct):
+                        continue
+                    self._model_patch(layer + '_implementation', rid, loaded, targets, [], snapshots,
                                       accept=lambda: self.runner.compile() + self.runner.check_tests(completed_tests + targets))
-                    # Previously passed requirements remain a regression gate after every source edit.
-                    evidence = self._run_tests(list(dict.fromkeys(completed_tests + targets)), rid, f'green_{iteration}')
-                    self._gate(rid, f'green_{iteration}', evidence)
+                regression_targets = list(dict.fromkeys(completed_tests + targets))
+                evidence = self._run_tests(regression_targets, rid, 'initial_implementation')
+                self._gate(rid, 'initial_implementation', evidence)
+                success = passed(evidence)
+                for iteration in range(1, self.iterations + 1):
+                    if success:
+                        break
+                    if any(row.get('failure_kind') == 'infrastructure' for row in evidence if row['status'] != 'PASSED'):
+                        raise ValueError('Test infrastructure failed after retries; source repair cannot fix the executor: ' + str(evidence))
+                    self._model_patch('repair', rid, loaded, targets, evidence, snapshots,
+                                      accept=lambda: self.runner.compile() + self.runner.check_tests(completed_tests + targets))
+                    evidence = self._run_tests(regression_targets, rid, f'repair_{iteration}')
+                    self._gate(rid, f'repair_{iteration}', evidence)
                     if passed(evidence):
                         success = True
                         break
                     if any(row.get('failure_kind') == 'infrastructure' for row in evidence if row['status'] != 'PASSED'):
                         raise ValueError('Test infrastructure failed after retries; source repair cannot fix the executor: ' + str(evidence))
                 if not success:
-                    raise ValueError(f'Acceptance/regression tests still fail after {self.iterations} implementation rounds')
+                    raise ValueError(f'Acceptance/regression tests still fail after initial implementation and {self.iterations} repair rounds')
                 states[rid] = 'IMPLEMENTED'
                 self.log.info('Leaf TDD: COMPLETED', node_id=rid)
                 completed_tests.extend(targets)
