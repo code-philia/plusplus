@@ -11,7 +11,9 @@ HTML_TAG = '<script src="/__arc/validation-runtime.js" data-arc-validation-runti
 
 
 def normalize_environment(environment: dict[str, Any]) -> dict[str, Any]:
-    result = dict(environment)
+    # Validation preparation controls time only; fixture/environment policy lives elsewhere.
+    result = {key: value for key, value in environment.items()
+              if key in {'timezone', 'benchmark_now', 'clock', 'clock_mode'}}
     timezone = result.get('timezone')
     if timezone:
         ZoneInfo(timezone)
@@ -178,7 +180,6 @@ CLOCK_JAVASCRIPT = r'''(function installValidationClock(config) {
 
 def render_runtime_source() -> str:
     return r'''// Validation-only clock and browser bootstrap. Imported before the application's server.
-import type Database from "better-sqlite3";
 import { Server } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { runInThisContext } from "node:vm";
@@ -190,16 +191,10 @@ interface RuntimeEnvironment {
   timezone?: string;
   locale?: string;
 }
-export function installValidationRuntime(connection: Database.Database, environment: RuntimeEnvironment): void {
+export function installValidationRuntime(environment: RuntimeEnvironment): void {
   const realNow = Date.now.bind(Date);
-  connection.exec('CREATE TABLE IF NOT EXISTS "__arc_validation_runtime" (id INTEGER PRIMARY KEY, started_at REAL NOT NULL)');
-  let row = connection.prepare('SELECT started_at FROM "__arc_validation_runtime" WHERE id = 1').get() as { started_at: number } | undefined;
-  if (!row) {
-    row = { started_at: realNow() };
-    connection.prepare('INSERT INTO "__arc_validation_runtime" (id, started_at) VALUES (1, ?)').run(row.started_at);
-  }
-  const elapsed = environment.clock_mode === "frozen" ? 0 : realNow() - row.started_at;
-  const epoch = environment.benchmark_now_ms === null ? realNow() : environment.benchmark_now_ms + elapsed;
+  // Each application start establishes a fresh clock origin; no database state is used.
+  const epoch = environment.benchmark_now_ms ?? realNow();
   const monotonicStart = performance.now();
   const now = () => epoch + (environment.clock_mode === "frozen" ? 0 : performance.now() - monotonicStart);
   const configuration = () => ({ ...environment, nowMs: now() });

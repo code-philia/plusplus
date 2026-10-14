@@ -1,11 +1,10 @@
-"""Prepare validation fixtures and verify that the implemented application builds and starts."""
+"""Configure validation clock/timezone and verify application build/startup."""
 import argparse
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from cli.commands import _ensure_dotenv_loaded
 from compiler.validation_preparation import ValidationPreparationPass, check_validation_readiness
-from model.client import Model
 from utils.jsonio import read_json, write_json_atomic
 
 
@@ -17,7 +16,7 @@ def main(argv=None):
         _ensure_dotenv_loaded()
         root = Path(args.output_dir).expanduser().resolve()
         requirements = read_json(root / '.arc/preprocessing/requirement_ir.json')
-        artifacts = ValidationPreparationPass(Model.from_env(), root).generate(requirements)
+        artifacts = ValidationPreparationPass(None, root).generate(requirements)
         check_validation_readiness(root, validation=True)
         report = root / '.arc/validation_preparation/report.json'
         write_json_atomic(report, {'status': 'PREPARED', 'artifacts': artifacts})
