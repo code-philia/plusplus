@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from utils.logging import SynchronousLog
 
-from compiler.preprocessing.traversal import postorder
+from compiler.preprocessing.traversal import postorder, children_by_id
 
 from ..ir.database import ERModelIR, SchemaIR
 from model.contracts import StructuredModel
@@ -63,7 +63,8 @@ class DatabaseSchemaPass:
         dependency_graph: dict[str, Any] | None = None,
     ) -> DatabasePassResult:
         nodes = requirement_ir.get("nodes", {})
-        requirements = postorder(requirement_ir)
+        children = children_by_id(requirement_ir)
+        requirements = [rid for rid in postorder(requirement_ir) if not children[rid]]
         effective_dependencies = (dependency_graph or {}).get("requirement_dependencies", {})
         self._trace(f"DESIGN_ORDER traversal=depth_first_postorder requirements={requirements}")
         states = {node_id: "DISCOVERED" for node_id in requirements}

@@ -86,7 +86,7 @@ class FrontendLoweringPass:
         files[app_path] = (imports + state_contract(frontend['ui']['id'], app_path)
                           + 'export function App() {\n  return <>\n'
                           + '\n'.join('    <' + row['export'] + ' />' for row in pages) + '\n  </>;\n}\nexport default App;\n')
-        files['frontend/src/main.tsx'] = ('import { createRoot } from "react-dom/client";\nimport App from "./App";\n'
+        files['frontend/src/main.tsx'] = ('import "./index.css";\nimport { createRoot } from "react-dom/client";\nimport App from "./App";\n'
             + 'const root = document.getElementById("root");\nif (root) createRoot(root).render(<App />);\n')
         handlers = []
         for row in frontend['handlers']:

@@ -22,10 +22,10 @@ from .runtime import HTML_TAG, RUNTIME_PATH, normalize_environment, render_runti
 SEED_PATH = "backend/src/validation/seed.ts"
 START_PATH = "backend/src/validation/start.ts"
 MARKER = ".arc/validation/preparation.json"
-START_COMMAND = "npm run build -w @arc/shared && npm run build && node ./dist/validation/start.js"
+START_COMMAND = "npm run build && node ./dist/validation/start.js"
 
 
-def check_validation_readiness(root: Path) -> None:
+def check_validation_readiness(root: Path, *, validation: bool = False) -> None:
     """Check deployable artifacts without using or seeding the application database."""
     root = root.expanduser().resolve()
     build = ProjectBuilder(root).build()
@@ -38,7 +38,7 @@ def check_validation_readiness(root: Path) -> None:
         environment = {**os.environ, 'PORT': str(port), 'NODE_ENV': 'test',
                        'DATABASE_URL': str(Path(directory) / 'probe.db')}
         with tempfile.TemporaryFile() as output:
-            process = subprocess.Popen(['node', 'dist/server.js'], cwd=root / 'backend',
+            process = subprocess.Popen(['node', 'dist/validation/start.js' if validation else 'dist/server.js'], cwd=root / 'backend',
                                        env=environment, stdout=output, stderr=subprocess.STDOUT)
             try:
                 deadline = time.monotonic() + 30
@@ -132,6 +132,7 @@ try {
   client.close();
 }
 // Dynamic import ensures seeding finishes before any server module executes.
+process.env.ARC_VALIDATION_PREPARED = "1";
 await import("../server.js");
 '''.replace("FINGERPRINT", json.dumps(fingerprint)).replace("ENVIRONMENT", json.dumps(environment, ensure_ascii=False)).replace(
         "TIMEZONE", "process.env.TZ = " + json.dumps(environment["timezone"]) + ";" if environment.get("timezone") else "")
