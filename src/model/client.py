@@ -42,9 +42,6 @@ def completion_request_kwargs(
     if response_format is not None:
         request["response_format"] = response_format
     if _thinking_disabled():
-        # Provider-compatible switch for deployments that expose both
-        # reasoning_effort and DeepSeek-style thinking controls.
-        request["reasoning_effort"] = "none"
         request["extra_body"] = {"thinking": {"type": "disabled"}}
     elif is_deepseek_model(model):
         request["reasoning_effort"] = "low"

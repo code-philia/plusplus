@@ -19,11 +19,14 @@ def enabled() -> bool:
 
 
 def pricing(model: str) -> tuple[str, float, float, float]:
+    """Return currency, cached input, uncached input and output prices per million tokens."""
     name = str(model or "").lower()
     if name.startswith("deepseek-flash") or name.startswith("deepseek"):
         return "CNY", 0.02, 1.0, 4.0
     if name.startswith("gpt-5.6-sol"):
         return "USD", 0.5, 5.0, 30.0
+    if name.startswith("gpt-6.1-sol"):
+        return "USD", 0.10, 2.00, 10.00
     # Unknown providers are tracked, but do not invent a price.
     return "USD", 0.0, 0.0, 0.0
 
