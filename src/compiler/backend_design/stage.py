@@ -52,11 +52,11 @@ class BackendDesignPass:
         for rid in order:
             self.log.info('Leaf design: RUNNING', node_id=rid)
             trial = copy.deepcopy(ir)
-            node = requirements['nodes'][rid]
-            requirement = self._requirement(node, requirements['nodes'])
-            data = database_context(database, rid)
             selected = []
             try:
+                node = requirements['nodes'][rid]
+                requirement = self._requirement(node, requirements['nodes'])
+                data = database_context(database, rid)
                 for kind in ('API', 'FUNC', 'DB'):
                     if kind != 'API' and not selected:
                         break
@@ -99,7 +99,7 @@ class BackendDesignPass:
                 states[rid] = 'DESIGNED'
                 self.log.info('Leaf design: COMPLETED', node_id=rid)
                 write_json_atomic(self.root / 'backend_ir.json', ir)
-            except ValueError as exc:
+            except Exception as exc:
                 states[rid] = 'SKIPPED'
                 warnings.append(f'{rid}: rolled back leaf design after failed attempts: {exc}')
                 self.log.warning(warnings[-1], node_id=rid)

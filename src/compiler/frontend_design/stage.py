@@ -69,12 +69,12 @@ class FrontendDesignPass:
         for rid in order:
             self.log.info('Leaf design: RUNNING', node_id=rid)
             trial, trial_pages = copy.deepcopy(ir), copy.deepcopy(page_states)
-            requirement = self._requirement(requirements['nodes'][rid], requirements['nodes'])
-            if not requirement.get('pages'):
-                states[rid] = 'NO_FRONTEND'
-                self.log.info('No frontend page; skipping leaf.', node_id=rid)
-                continue
             try:
+                requirement = self._requirement(requirements['nodes'][rid], requirements['nodes'])
+                if not requirement.get('pages'):
+                    states[rid] = 'NO_FRONTEND'
+                    self.log.info('No frontend page; skipping leaf.', node_id=rid)
+                    continue
                 evidence = {}
                 for page in requirement['pages']:
                     reference = page.get('reference')
@@ -165,7 +165,7 @@ class FrontendDesignPass:
                 ir, page_states = trial, trial_pages
                 states[rid] = 'DESIGNED'
                 self.log.info('Leaf design: COMPLETED', node_id=rid)
-            except (ValueError, OSError, KeyError, TypeError) as exc:
+            except Exception as exc:
                 states[rid] = 'SKIPPED'
                 warnings.append(f'{rid}: rolled back frontend leaf design: {exc}')
                 self.log.warning(warnings[-1], node_id=rid)

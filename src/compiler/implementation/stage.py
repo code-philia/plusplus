@@ -49,7 +49,8 @@ class NodeTDDOrchestrator:
         if hasattr(model, 'set_usage_path'):
             model.set_usage_path(self.root / '.arc/model_usage.jsonl')
 
-    def compile(self, requirements, database, backend, frontend, backend_plan, frontend_plan, database_plan):
+    def compile(self, requirements, database, backend, frontend, backend_plan, frontend_plan, database_plan,
+                *, skip_requirements=()):
         self.context = FileContext(self.root, requirements, database, backend, frontend,
                                    backend_plan, frontend_plan, database_plan)
         required_shared = {'backend/src/db/seed.ts', 'backend/src/db/initialize.ts', 'backend/src/db/client.ts'}
@@ -89,7 +90,13 @@ class NodeTDDOrchestrator:
             visit(rid)
         states, errors, warnings, completed_tests = {}, [], [], []
         self.test_manifest = {}
+        skipped = set(skip_requirements)
         for rid in scheduled:
+            if rid in skipped:
+                states[rid] = 'SKIPPED_DESIGN_FAILED'
+                warnings.append(f'{rid}: design attempts exhausted; skipping TDD')
+                self.log.warning(warnings[-1], node_id=rid)
+                continue
             self.log.info('Leaf TDD: RUNNING', node_id=rid)
             if not self.context.direct_files(rid):
                 states[rid] = 'SKIPPED_NO_DESIGN'
@@ -139,8 +146,11 @@ class NodeTDDOrchestrator:
                 completed_tests.extend(targets)
                 self._report(states, errors, warnings)
                 snapshot_workspace(self.root, rid)
-            except (ValueError, OSError, KeyError, TypeError) as exc:
-                restore(self.root, snapshots)
+            except Exception as exc:
+                try:
+                    restore(self.root, snapshots)
+                except Exception as rollback_exc:
+                    errors.append(f'{rid}: rollback failed: {rollback_exc}')
                 states[rid] = 'FAILED_ROLLED_BACK'
                 errors.append(f'{rid}: {exc}')
                 self.log.error(errors[-1], node_id=rid)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -75,9 +76,26 @@ class Compiler:
             for warning in warnings:
                 await self._log(warning, 'warning')
 
-        def require_result(result):
-            if not result.ok:
-                raise ValueError('; '.join(result.errors))
+        async def stage_failed(exc):
+            message = f'{stage}: {exc}'
+            errors.append(message)
+            reports[-1].update(status='FAILED', errors=[message])
+            save('RUNNING')
+            await self._log(message + '; continuing subsequent stages.', 'warning')
+
+        async def guarded(action, fallback=None):
+            try:
+                return action()
+            except Exception as exc:
+                await stage_failed(exc)
+                return fallback
+
+        async def complete_design(result, path):
+            artifacts[stage] = str(path)
+            if result.ok:
+                await finish(path, result.warnings)
+            else:
+                await stage_failed('; '.join(result.errors))
 
         visual_executor = None
         visual_future = None
@@ -100,8 +118,9 @@ class Compiler:
             from cli.commands import _ensure_dotenv_loaded
             _ensure_dotenv_loaded()
             await begin('project_initialization')
-            ProjectInitializer(output, web_port=request.web_port).initialize()
-            await finish(root / 'project/report.json')
+            initialized = await guarded(lambda: (ProjectInitializer(output, web_port=request.web_port).initialize(), True)[1])
+            if initialized:
+                await finish(root / 'project/report.json')
 
             model = self.model if self.model is not None else Model.from_env()
             visual = FrontendDesignPass(model, root, reference_root=Path(request.requirement_path).resolve().parent)
@@ -127,17 +146,26 @@ class Compiler:
             await self._log('Visual analysis is running in the background alongside database design.')
 
             await begin('database_design')
-            database = DatabaseSchemaPass(model, root).compile(requirements, parsed.dependency_graph)
-            write_json_atomic(root / 'design/database/schema.json', database.schema)
-            write_json_atomic(root / 'design/database/er_model.json', database.er_model)
-            write_json_atomic(root / 'design/database/report.json', {'status': database.schema['status'],
-                'node_states': database.node_states, 'errors': database.errors, 'warnings': database.warnings})
-            require_result(database)
-            if database.schema['status'] != 'RESOLVED':
-                raise ValueError('Database design did not resolve its schema')
-            await finish(root / 'design/database/schema.json', database.warnings)
+            from .database_design.state import DatabaseSchemaState
+            from .database_design.refinement import refine_er_model
+            empty_er = DatabaseSchemaState().to_er_model()
+            database = await guarded(
+                lambda: DatabaseSchemaPass(model, root).compile(requirements, parsed.dependency_graph),
+                SimpleNamespace(schema=refine_er_model(empty_er, requirement_ids=set(leaves)).schema,
+                    er_model=empty_er, node_states={rid: 'FAILED' for rid in leaves},
+                    ok=False, errors=['Database design unavailable'], warnings=[]))
+            await guarded(lambda: (
+                write_json_atomic(root / 'design/database/schema.json', database.schema),
+                write_json_atomic(root / 'design/database/er_model.json', database.er_model),
+                write_json_atomic(root / 'design/database/report.json', {'status': database.schema['status'],
+                    'node_states': database.node_states, 'errors': database.errors, 'warnings': database.warnings})))
+            if reports[-1]['status'] == 'RUNNING':
+                if database.schema['status'] != 'RESOLVED' and database.ok:
+                    await stage_failed('Database design did not resolve its schema')
+                else:
+                    await complete_design(database, root / 'design/database/schema.json')
 
-            async def lower(name, lowerer, *args):
+            async def lower_impl(name, lowerer, *args):
                 await begin(name + '_lowering')
                 plan = None
                 def check():
@@ -172,11 +200,20 @@ class Compiler:
                             'events': [], 'types': [], 'files': []}
                 return plan
 
+            async def lower(name, lowerer, *args):
+                try:
+                    return await lower_impl(name, lowerer, *args)
+                except Exception as exc:
+                    await stage_failed(exc)
+                    return {'modules': [], 'components': [], 'handlers': [], 'ui': [], 'data': [],
+                            'events': [], 'types': [], 'files': []}
+
             database_plan = await lower('database', DatabaseLoweringPass(), database.schema)
             await self._log('Waiting for visual evidence before backend design.')
             try:
                 visual_future.result()
             except Exception as exc:
+                visual.visual_failures['background_analysis'] = str(exc)
                 visual.visual_log.warning('Background visual analysis skipped: ' + str(exc))
             visual_report.update(status='COMPLETED_WITH_WARNINGS' if visual.visual_failures else 'COMPLETED',
                                  warnings=[f'{path}: {message}' for path, message in visual.visual_failures.items()])
@@ -184,43 +221,68 @@ class Compiler:
             save('RUNNING')
             await self._log('visual_analysis: COMPLETED')
             await begin('backend_design')
-            backend = BackendDesignPass(model, root).compile(requirements, database.er_model)
-            require_result(backend)
-            await finish(root / 'design/backend/backend_ir.json', backend.warnings)
+            backend = await guarded(lambda: BackendDesignPass(model, root).compile(requirements, database.er_model),
+                SimpleNamespace(ir={'ir_kind': 'backend_design', 'types': [], 'modules': []},
+                    node_states={rid: 'SKIPPED' for rid in leaves}, ok=False,
+                    errors=['Backend design unavailable'], warnings=[]))
+            if reports[-1]['status'] == 'RUNNING':
+                await complete_design(backend, root / 'design/backend/backend_ir.json')
             backend_plan = await lower('backend', BackendLoweringPass(), requirements, backend.ir)
 
             await begin('frontend_design')
-            frontend = visual.compile(requirements, database.er_model, backend.ir)
-            require_result(frontend)
-            await finish(root / 'design/frontend/frontend_ir.json', frontend.warnings)
+            from .frontend_design.delta import make_ui
+            frontend = await guarded(lambda: visual.compile(requirements, database.er_model, backend.ir),
+                SimpleNamespace(ir={'ir_kind': 'frontend_design',
+                    'ui': make_ui('UI_APP', 'Application', 'app', 'Application root.'),
+                    'types': [], 'data': [], 'events': [], 'handlers': []},
+                    node_states={rid: 'SKIPPED' for rid in leaves}, ok=False,
+                    errors=['Frontend design unavailable'], warnings=[]))
+            if reports[-1]['status'] == 'RUNNING':
+                await complete_design(frontend, root / 'design/frontend/frontend_ir.json')
             frontend_plan = await lower('frontend', FrontendLoweringPass(), requirements, frontend.ir)
 
             await begin('code_binding')
             binding = {'ir_kind': 'code_binding', 'requirements': {}}
             for rid in leaves:
-                associated = {row['file_path'] for row in backend_plan['modules'] if rid in row['reqs']}
-                associated.update(row['file_path'] for row in frontend_plan['components'] + frontend_plan['handlers']
-                                  if rid in row['reqs'])
-                binding['requirements'][rid] = sorted(associated)
-                states[rid] = 'LOWERED'
-            write_json_atomic(root / 'code_binding/bindings.json', binding)
-            await finish(root / 'code_binding/bindings.json')
+                try:
+                    associated = {row['file_path'] for row in backend_plan['modules'] if rid in row['reqs']}
+                    associated.update(row['file_path'] for row in frontend_plan['components'] + frontend_plan['handlers']
+                                      if rid in row['reqs'])
+                    binding['requirements'][rid] = sorted(associated)
+                    states[rid] = 'LOWERED'
+                except Exception as exc:
+                    states[rid] = 'BINDING_FAILED'
+                    failed.append(rid)
+                    await stage_failed(f'{rid}: {exc}')
+            await guarded(lambda: write_json_atomic(root / 'code_binding/bindings.json', binding))
+            if reports[-1]['status'] == 'RUNNING':
+                await finish(root / 'code_binding/bindings.json')
 
             skipped = {rid for result in (backend, frontend) for rid, state in result.node_states.items()
-                       if state == 'SKIPPED'}
+                       if state in {'SKIPPED', 'FAILED'}}
+            skipped.update(rid for rid in leaves if states[rid] == 'BINDING_FAILED')
+            skipped.update(rid for rid, state in database.node_states.items() if rid in leaves and state == 'FAILED')
             if skipped:
                 failed.extend(sorted(skipped))
+                failed[:] = sorted(set(failed))
                 for rid in skipped:
                     states[rid] = 'DESIGN_FAILED'
-                raise ValueError('Design exhausted its attempts for: ' + ', '.join(sorted(skipped)))
+                message = 'Design exhausted its attempts; skipping requirements: ' + ', '.join(sorted(skipped))
+                errors.append(message)
+                reports[-1].setdefault('warnings', []).append(message)
+                save('RUNNING')
+                await self._log(message + '; continuing remaining requirements and build.', 'warning')
             if not request.stop_after_lowering:
                 await begin('implementation')
                 try:
                     implementation = NodeTDDOrchestrator(model, output, port=request.web_port).compile(
                         requirements, database.er_model, backend.ir, frontend.ir,
-                        backend_plan, frontend_plan, database_plan)
+                        backend_plan, frontend_plan, database_plan, skip_requirements=skipped)
                     states.update(implementation.node_states)
+                    for rid in skipped:
+                        states[rid] = 'DESIGN_FAILED'
                     failed.extend(rid for rid in leaves if states[rid] not in {'IMPLEMENTED', 'ALREADY_PASSED'})
+                    failed[:] = sorted(set(failed))
                     if implementation.ok and not failed:
                         await finish(root / 'implementation/report.json', implementation.warnings)
                     else:
@@ -242,7 +304,7 @@ class Compiler:
                     return {'ok': False, 'errors': [str(exc)]}
             build = build_check()
             if not build['ok']:
-                build = repair_gate(model, output, 'build', build_check, build)
+                build = await guarded(lambda: repair_gate(model, output, 'build', build_check, build), build)
             if build['ok']:
                 await finish(output / 'frontend/dist/index.html')
             else:
@@ -253,11 +315,15 @@ class Compiler:
                 await self._log(message, 'warning')
             if request.prepare_validation and not request.stop_after_lowering and build['ok']:
                 await begin('validation_preparation')
-                validation = ValidationPreparationPass(model, output).generate(requirements)
-                check_validation_readiness(output, validation=True)
-                write_json_atomic(root / 'validation_preparation/report.json',
-                                  {'status': 'PREPARED', 'artifacts': validation, 'port': request.web_port})
-                await finish(root / 'validation_preparation/report.json')
+                def prepare_validation():
+                    validation = ValidationPreparationPass(model, output).generate(requirements)
+                    check_validation_readiness(output, validation=True)
+                    write_json_atomic(root / 'validation_preparation/report.json',
+                                      {'status': 'PREPARED', 'artifacts': validation, 'port': request.web_port})
+                    return True
+                prepared = await guarded(prepare_validation)
+                if prepared:
+                    await finish(root / 'validation_preparation/report.json')
             elif request.prepare_validation and not build['ok']:
                 reports.append({'stage': 'validation_preparation', 'status': 'SKIPPED',
                                 'warnings': ['Build unavailable; validation artifacts cannot be prepared.']})
@@ -275,11 +341,13 @@ class Compiler:
             return CompilationResult(ok=False, root_id=requirements['root_id'], states=states,
                 failed_nodes=failed, artifacts=artifacts, run_id=run_id)
         finally:
-            if visual_executor is not None:
-                visual_executor.shutdown(wait=True, cancel_futures=True)
-                if visual_future is not None and visual_report['status'] == 'RUNNING':
-                    error = visual_future.exception() if not visual_future.cancelled() else 'Cancelled'
-                    visual_report.update(status='FAILED' if error else 'COMPLETED',
-                                         errors=[str(error)] if error else [])
-                    save('FAILED')
-            set_run_id(None)
+            try:
+                if visual_executor is not None:
+                    visual_executor.shutdown(wait=True, cancel_futures=True)
+                    if visual_future is not None and visual_report['status'] == 'RUNNING':
+                        error = visual_future.exception() if not visual_future.cancelled() else 'Cancelled'
+                        visual_report.update(status='FAILED' if error else 'COMPLETED',
+                                             errors=[str(error)] if error else [])
+                        save('COMPLETED_WITH_ERRORS' if errors or error else 'COMPLETED')
+            finally:
+                set_run_id(None)

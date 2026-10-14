@@ -273,14 +273,19 @@ class DatabaseSchemaPass:
                     f"attempt={attempt + 1} duration_ms={duration_ms}\n"
                     + format_payload_trace(decision)
                 )
-                decision, normalization_notes = _normalize_decision_context(
-                    phase, decision, context
-                )
-                if validate is not None:
-                    feedback = validate(decision)
-                    if feedback:
-                        self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
-                        continue
+                try:
+                    decision, normalization_notes = _normalize_decision_context(
+                        phase, decision, context
+                    )
+                    if validate is not None:
+                        feedback = validate(decision)
+                        if feedback:
+                            self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
+                            continue
+                except Exception as exc:
+                    feedback = [f'Invalid design response: {describe_model_error(exc)}']
+                    self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={feedback[0]}")
+                    continue
                 for note in normalization_notes:
                     self._trace(
                         f"MODEL_NORMALIZED phase={phase} requirement={node_id} "
