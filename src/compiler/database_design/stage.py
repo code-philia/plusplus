@@ -54,7 +54,7 @@ class DatabaseSchemaPass:
         if hasattr(model, "set_usage_path"):
             model.set_usage_path(self._artifact_root / "model_usage.jsonl")
         self._log = SynchronousLog("DatabaseSchemaPass", workspace_root=self._artifact_root.parent)
-        self._retry_count = _bounded_env_int("ARC_STRUCTURED_OUTPUT_RETRY_COUNT", 2, 0, 10)
+        self._attempts = _bounded_env_int("MODEL_ATTEMPT", 5, 1, 20)
         self._trace_enabled = _enabled_env_flag("ARC_DATABASE_TRACE", default=True)
 
     def compile(
@@ -225,14 +225,14 @@ class DatabaseSchemaPass:
         validate: Callable[[dict[str, Any]], list[str]] | None = None,
     ) -> dict[str, Any] | None:
         feedback: list[str] = []
-        for attempt in range(self._retry_count + 1):
+        for attempt in range(self._attempts):
             payload = copy.deepcopy(context)
             if feedback:
                 payload["previous_validation_errors"] = feedback
             started_at = time.monotonic()
             self._trace(
                 f"MODEL_REQUEST phase={phase} requirement={node_id} "
-                f"attempt={attempt + 1}/{self._retry_count + 1} schema={schema_name}"
+                f"attempt={attempt + 1}/{self._attempts} schema={schema_name}"
             )
             request_payload = {
                 "schema_name": schema_name,
