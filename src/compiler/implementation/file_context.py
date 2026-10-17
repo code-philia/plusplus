@@ -241,6 +241,11 @@ class FileContext:
                 'test_targets': [path for path in test_targets if self.phase_path(path, phase)],
                 'gate_results': error_feedback(evidence),
                 'failure_context': {'test_files': sorted(failing_tests),
+                    **({'startup_files': [path for path in
+                        ('backend/src/server.ts', 'backend/src/app.ts', 'backend/src/db/seed.ts',
+                         'backend/src/db/initialize.ts', 'backend/src/db/client.ts') if path in self.catalog]}
+                       if any(row.get('failure_kind') in {'application_startup', 'application_runtime'}
+                              for row in evidence) else {}),
                     'regression_requirements': [copy.deepcopy(self.requirements['nodes'][key])
                         for key in sorted(regression_owners - {rid}) if key in self.requirements['nodes']]},
                 'always_loaded_files': sorted(direct & source_paths)}
@@ -253,7 +258,8 @@ def error_feedback(evidence):
         if row.get('status') == 'PASSED':
             continue
         item = {key: copy.deepcopy(row[key]) for key in
-                ('status', 'failure_kind', 'command', 'exit_code', 'error', 'report_error', 'output') if key in row}
+                ('status', 'failure_kind', 'command', 'exit_code', 'error', 'report_error', 'output',
+                 'server_log', 'application_output', 'application_exit_code') if key in row}
         test = row.get('test_evidence')
         if test:
             item['test_evidence'] = {key: copy.deepcopy(test[key]) for key in

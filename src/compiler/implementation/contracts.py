@@ -105,6 +105,13 @@ these are cumulative working files with refreshed content/hashes, not a reset to
 Trace each failure from assertion/expected behavior through the relevant route, service, repository
 or UI handler. Request missing source before diagnosing its exact behavior; a stack trace alone is
 not sufficient evidence for an unrelated rewrite. Fix the cause rather than only the final symptom.
+application_startup/application_runtime failures are application defects: read their startup/server
+logs and load the relevant failure_context.startup_files before fixing seed SQL, initialization or
+server wiring. Execution timeouts and missing test reports also need diagnosis; they are not proof
+of an unavailable environment. Preserve the intended tests when repairing application startup.
+E2E case, locator, global-run and command timeouts are test failures and enter this repair loop.
+Diagnose missing UI, unwired handlers, failed requests, blocked startup or incorrect test waits;
+do not merely increase timeouts or weaken assertions to hide the failure.
 Fix actual compilation/runtime/acceptance failures while preserving prior passed requirements.
 Determine whether the defect is in implementation or test by comparing the failed assertion with its
 requirement/scenario. Correct tests when their expected values, setup, selectors, asynchronous waiting

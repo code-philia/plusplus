@@ -30,7 +30,7 @@ class TestRunner:
                     code = process.wait(timeout=self.timeout if timeout is None else timeout)
                 except subprocess.TimeoutExpired:
                     terminate_process_tree(process)
-                    return {'status': 'FAILED', 'failure_kind': 'infrastructure', 'command': argv, 'error': 'Command timed out',
+                    return {'status': 'FAILED', 'failure_kind': 'execution_timeout', 'command': argv, 'error': 'Command timed out',
                             'output': log.read_text(encoding='utf-8')[-18000:]}
             return {'status': 'PASSED' if code == 0 else 'FAILED', 'command': argv, 'exit_code': code,
                     'output': log.read_text(encoding='utf-8')[-18000:]}
@@ -77,6 +77,26 @@ export default defineConfig({
         }
         for name, content in configs.items():
             (self.support / name).write_text(content, encoding='utf-8')
+
+    def check_environment(self, *, browser=False):
+        """Probe runner dependencies once, independently of generated application code."""
+        try:
+            self.tool('typescript', 'bin/tsc')
+            self.tool('vitest', 'vitest.mjs')
+            if browser:
+                self.tool('vite', 'bin/vite.js')
+                playwright = self.tool('@playwright/test', 'index.js')
+                script = ('const { chromium } = require(process.argv[1]); '
+                          '(async () => { const browser = await chromium.launch(); '
+                          'await browser.close(); })().catch(error => { console.error(error); process.exit(1); });')
+                result = self.execute(['node', '-e', script, playwright])
+            else:
+                result = self.execute(['node', '--version'])
+        except (OSError, ValueError) as exc:
+            result = {'status': 'FAILED', 'error': str(exc)}
+        if result['status'] != 'PASSED':
+            result['failure_kind'] = 'infrastructure'
+        return [result]
 
     def compile(self):
         from compiler.lowering.planning import relative_import
@@ -147,17 +167,21 @@ export default defineConfig({
     def _browser_run(self, browser, port, db_path, report, red):
         # Own the server directly: Playwright webServer may start a detached process group.
         # Never kill a preexisting listener belonging to another compilation/application.
-        with socket.socket() as reservation:
-            try:
-                reservation.bind(('127.0.0.1', port))
-            except OSError:
-                reservation.bind(('127.0.0.1', 0))
-            selected_port = reservation.getsockname()[1]
+        try:
+            with socket.socket() as reservation:
+                try:
+                    reservation.bind(('127.0.0.1', port))
+                except OSError:
+                    reservation.bind(('127.0.0.1', 0))
+                selected_port = reservation.getsockname()[1]
+        except OSError as exc:
+            return {'status': 'FAILED', 'failure_kind': 'infrastructure', 'error': str(exc)}
         environment = {'DATABASE_URL': db_path, 'PLAYWRIGHT_JSON_OUTPUT_FILE': str(report),
                        'ARC_TDD_PORT': str(selected_port), 'PORT': str(selected_port),
                        'ARC_TDD_EXTERNAL_SERVER': '1', 'NODE_ENV': 'test', 'ARC_VALIDATION_PREPARED': '0'}
         server_log = report.with_suffix('.server.log')
         server = None
+        ready = False
         try:
             with server_log.open('w', encoding='utf-8') as output:
                 server = subprocess.Popen(['node', 'backend/dist/server.js'], cwd=self.root,
@@ -170,6 +194,7 @@ export default defineConfig({
                     try:
                         with urlopen(f'http://127.0.0.1:{selected_port}/__arc/health', timeout=1) as response:
                             if response.status == 200:
+                                ready = True
                                 break
                     except (URLError, OSError):
                         pass
@@ -186,9 +211,16 @@ export default defineConfig({
                 result = self.execute(argv + browser, environment=environment, timeout=limit + 30)
                 self._test_report(result, report, 'playwright', len(browser))
                 result['server_port'], result['server_log'] = selected_port, str(server_log)
+                if result['status'] != 'PASSED':
+                    result['application_output'] = server_log.read_text(encoding='utf-8')[-18000:]
+                    if server.poll() is not None:
+                        result['failure_kind'] = 'application_runtime'
+                        result['application_exit_code'] = server.returncode
                 return result
         except (OSError, ValueError) as exc:
-            return {'status': 'FAILED', 'failure_kind': 'infrastructure', 'error': str(exc),
+            kind = 'application_startup' if server is not None and not ready else 'infrastructure'
+            return {'status': 'FAILED', 'failure_kind': kind, 'error': str(exc),
+                    'exit_code': server.poll() if server is not None else None,
                     'server_port': selected_port, 'server_log': str(server_log),
                     'output': server_log.read_text(encoding='utf-8')[-18000:] if server_log.exists() else ''}
         finally:
@@ -201,6 +233,7 @@ export default defineConfig({
         try:
             report = json.loads(path.read_text(encoding='utf-8'))
             failures, failed_tests, collected, executed_files = [], [], 0, set()
+            timed_out = result.get('failure_kind') == 'execution_timeout'
             if runner == 'vitest':
                 for suite in report.get('testResults', []):
                     assertions = suite.get('assertionResults', [])
@@ -220,15 +253,18 @@ export default defineConfig({
                         failed_tests.append({'file': suite['name'], 'name': 'suite/setup', 'errors': [message]})
             else:
                 def visit(suites):
-                    nonlocal collected
+                    nonlocal collected, timed_out
                     for suite in suites:
                         for spec in suite.get('specs', []):
                             collected += len(spec.get('tests', []))
                             executed_files.add(spec['file'])
                             for test in spec.get('tests', []):
                                 for run in test.get('results', []):
-                                    if run['status'] in {'failed', 'timedOut'}:
-                                        failures.extend(error.get('message', '') for error in run.get('errors', []))
+                                    if run['status'] in {'failed', 'timedOut', 'interrupted'}:
+                                        timed_out = timed_out or run['status'] == 'timedOut'
+                                        errors = run.get('errors', []) or [{'message':
+                                            f"E2E case {spec.get('title', '')} ended with status {run['status']}."}]
+                                        failures.extend(error.get('message', '') for error in errors)
                                         reported_file = Path(spec['file'])
                                         if not reported_file.is_absolute():
                                             if spec['file'].replace('\\', '/').startswith('tests/'):
@@ -238,19 +274,25 @@ export default defineConfig({
                                                 reported_file = self.root / test_root / reported_file
                                         failed_tests.append({'file': str(reported_file.resolve()), 'name': spec.get('title', ''),
                                             'location': {'line': spec.get('line'), 'column': spec.get('column')},
-                                            'status': run['status'], 'errors': run.get('errors', [])})
+                                            'status': run['status'], 'errors': errors})
                         visit(suite.get('suites', []))
                 visit(report.get('suites', []))
             report_errors = [str(error.get('message', error)) if isinstance(error, dict) else str(error)
                              for error in report.get('errors', [])]
             failures += report_errors
+            if runner == 'playwright':
+                timed_out = timed_out or any('timeout' in message.lower() or 'timed out' in message.lower()
+                                             for message in report_errors)
             infrastructure = any(any(marker in message.lower() for marker in
-                ('executable doesn\'t exist', 'browser was not found', 'failed to launch', 'cannot find module',
-                 'failed to load', 'econnrefused', 'webserver', 'global timeout')) for message in failures)
+                ('executable doesn\'t exist', 'browser was not found', 'failed to launch')) for message in failures)
             test_code = any(any(marker in message.lower() for marker in
                 ('syntaxerror', 'transform failed', 'no tests found', 'is not a function',
                  'referenceerror', 'cannot find module', 'failed to load')) for message in failures)
-            kind = result.get('failure_kind') or ('test_code' if test_code else 'infrastructure' if infrastructure else 'behavior')
+            kind = result.get('failure_kind') or ('infrastructure' if infrastructure else
+                                                 'execution_timeout' if timed_out else
+                                                 'test_code' if test_code else 'behavior')
+            if timed_out:
+                result['status'] = 'FAILED'
             if result['status'] != 'PASSED':
                 result['failure_kind'] = kind
             result['test_evidence'] = {'collected': collected, 'executed_files': len(executed_files),
@@ -259,12 +301,14 @@ export default defineConfig({
                                       'report_path': str(path)}
             if collected == 0 or len(executed_files) < expected_files:
                 result['status'] = 'FAILED'
-                result['failure_kind'] = 'infrastructure' if report_errors or result.get('failure_kind') == 'infrastructure' else 'test_code'
+                result['failure_kind'] = result.get('failure_kind') or 'test_code'
                 result.setdefault('error', 'Acceptance tests were not discovered for every selected file')
                 result['test_evidence']['behavior_failure'] = False
         except (OSError, ValueError, KeyError, TypeError) as exc:
             result['status'] = 'FAILED'
-            result.setdefault('failure_kind', 'infrastructure')
+            # Missing reporter output alone is not proof that the environment is
+            # broken: generated code can crash or hang before producing it.
+            result.setdefault('failure_kind', 'test_execution')
             result['report_error'] = 'Test report unavailable or malformed: ' + str(exc)
             result.setdefault('error', result['report_error'])
 

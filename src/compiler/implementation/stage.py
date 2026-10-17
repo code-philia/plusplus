@@ -36,6 +36,10 @@ def budget(name, default):
         return default
 
 
+class EnvironmentBlocked(RuntimeError):
+    """Executor failures preserve accepted edits and stop this implementation run."""
+
+
 class NodeTDDOrchestrator:
     def __init__(self, model, output_root, *, runner=None, port=33100):
         self.model, self.root = model, Path(output_root).resolve()
@@ -58,6 +62,13 @@ class NodeTDDOrchestrator:
         if missing:
             raise ValueError('Run database lowering before TDD: missing ' + ', '.join(missing))
         self.runner.prepare()
+        children = children_by_id(requirements)
+        order = [rid for rid in postorder(requirements) if not children[rid]]
+        environment = self.runner.check_environment(browser=bool(frontend['ui']['children']))
+        self._gate('BASELINE', 'environment', environment)
+        if not passed(environment):
+            return self._report({rid: 'BLOCKED_ENVIRONMENT' for rid in order},
+                                ['Test environment unavailable before TDD: ' + str(environment)], [])
         # Freeze runner-owned support/config as read-only discoverable records.
         for path in self.runner.support.glob('*'):
             relative = path.relative_to(self.root).as_posix()
@@ -68,8 +79,6 @@ class NodeTDDOrchestrator:
         if not passed(baseline):
             self._gate('BASELINE', 'compilation', baseline)
             return self._report({}, ['Baseline compilation failed before TDD'], [])
-        children = children_by_id(requirements)
-        order = [rid for rid in postorder(requirements) if not children[rid]]
         # Process leaf dependencies before dependents; never design/implement parent nodes.
         pending, scheduled, active = set(order), [], set()
         def visit(rid):
@@ -130,7 +139,7 @@ class NodeTDDOrchestrator:
                     if success:
                         break
                     if any(row.get('failure_kind') == 'infrastructure' for row in evidence if row['status'] != 'PASSED'):
-                        raise ValueError('Test infrastructure failed after retries; source repair cannot fix the executor: ' + str(evidence))
+                        raise EnvironmentBlocked('Test executor unavailable after retries; preserving accepted source: ' + str(evidence))
                     self._model_patch('repair', rid, loaded, targets, evidence, snapshots,
                                       accept=lambda: self.runner.compile() + self.runner.check_tests(completed_tests + targets))
                     evidence = self._run_tests(targets, rid, f'repair_{iteration}')
@@ -139,7 +148,7 @@ class NodeTDDOrchestrator:
                         success = True
                         break
                     if any(row.get('failure_kind') == 'infrastructure' for row in evidence if row['status'] != 'PASSED'):
-                        raise ValueError('Test infrastructure failed after retries; source repair cannot fix the executor: ' + str(evidence))
+                        raise EnvironmentBlocked('Test executor unavailable after retries; preserving accepted source: ' + str(evidence))
                 if not success:
                     raise ValueError(f'Current requirement acceptance tests still fail after initial implementation and {self.iterations} repair rounds')
                 states[rid] = 'IMPLEMENTED'
@@ -147,6 +156,13 @@ class NodeTDDOrchestrator:
                 completed_tests.extend(targets)
                 self._report(states, errors, warnings)
                 snapshot_workspace(self.root, rid)
+            except EnvironmentBlocked as exc:
+                states[rid] = 'BLOCKED_ENVIRONMENT'
+                for remaining in scheduled:
+                    states.setdefault(remaining, 'BLOCKED_ENVIRONMENT')
+                errors.append(f'{rid}: {exc}')
+                self.log.error(errors[-1], node_id=rid)
+                return self._report(states, errors, warnings)
             except Exception as exc:
                 try:
                     restore(self.root, snapshots)
@@ -283,6 +299,9 @@ class NodeTDDOrchestrator:
                         self._validate_test_sources(changed_tests)
                     gate = accept()
                     if not passed(gate):
+                        if any(row.get('failure_kind') == 'infrastructure' for row in gate
+                               if row['status'] != 'PASSED'):
+                            raise EnvironmentBlocked('Compilation executor unavailable; preserving previously accepted source: ' + str(gate))
                         raise ValueError('Compilation/test-source gate failed: ' + str(gate))
                     for path, content in patch_snapshot.items():
                         snapshots.setdefault(path, content)
@@ -290,6 +309,12 @@ class NodeTDDOrchestrator:
                     trace['gate'] = gate
                     self._trace(trace)
                     return
+                except EnvironmentBlocked:
+                    # This proposal has not passed its gate; retain earlier accepted
+                    # patches without installing the unvalidated proposal.
+                    if patch_snapshot:
+                        restore(self.root, patch_snapshot)
+                    raise
                 except Exception as exc:
                     if patch_snapshot:
                         restore(self.root, patch_snapshot)
