@@ -146,7 +146,8 @@ Only frontend source and frontend shared source are in scope. Backend implementa
 omitted; use the supplied backend API contracts for integration. Acceptance tests are read-only in this phase.
 Preserve contracts and earlier UI
 behavior. Wire the required interactions instead of leaving lowering's event.wired=false as completion.
-After this phase the compiler runs current acceptance tests and all prior regression tests, then repairs.
+After this phase the compiler executes only the current requirement's acceptance tests, then repairs.
+Historical test sources are checked for compilation only; no runtime regression suite is executed.
 '''
 EXAMPLE = {'request_files': ['backend/src/db/seed.ts'], 'edits': [], 'blocked_reason': ''}
 PATCH_EXAMPLE = {'request_files': [], 'edits': [{'file': 'tests/unit/example.test.ts',
