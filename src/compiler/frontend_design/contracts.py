@@ -65,6 +65,9 @@ Reuse IDs must come from supplied records. The compiler adds current reqs withou
 '''
 TASKS = {
     'ui': '''## Task: discover the UI and bind the requirement
+current_task.requirement.pages lists ALL pages involved in this requirement, not just pages first
+introduced by it. A repeated name/reference still requires binding the current requirement's
+controls/regions and designing its state and interactions in the subsequent passes.
 Work only in current_page. selected_ui_tree is this page's nested tree, not a flat component list.
 page_mode=new: with an analysis, discover ALL visible regions, controls, text, dialogs and states,
 not only those in the leaf's scenarios. Without an image, derive structure from requirement evidence.
