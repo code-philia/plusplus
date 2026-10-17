@@ -52,6 +52,43 @@ def make_ui(key, name, kind, description):
             'reqs': [], 'children': [], 'data': [], 'events': []}
 
 
+def coordinate_state_owners(ir):
+    """Lift state to the common scope of its consumers and event sites.
+
+    Ownership describes lifetime, independently of requirement traceability.
+    Include the old owner so incremental coordination never narrows its lifetime.
+    """
+    nodes, parents = ui_index(ir['ui'])
+    uses = {row['id']: {row['owner']} for row in ir['data']}
+    for node in nodes.values():
+        for key in node['data']:
+            if key in uses:
+                uses[key].add(node['id'])
+    handlers = {row['id']: row for row in ir['handlers']}
+    for event in ir['events']:
+        handler = handlers.get(event['handler'], {})
+        for key in handler.get('read', []) + handler.get('write', []):
+            if key in uses:
+                uses[key].add(event['ui'])
+
+    def ancestors(key):
+        result = set()
+        while key is not None:
+            result.add(key)
+            key = parents.get(key)
+        return result
+
+    for row in ir['data']:
+        sites = uses[row['id']]
+        if not sites <= nodes.keys():
+            continue  # Existing reference validation reports invalid nodes.
+        common = set.intersection(*(ancestors(key) for key in sites))
+        owner = row['owner']
+        while owner not in common:
+            owner = parents[owner]
+        row['owner'] = owner
+
+
 def apply_ui(base, output, rid, payload):
     trial = copy.deepcopy(base)
     nodes, _ = ui_index(trial['ui'])
@@ -127,13 +164,15 @@ def apply_data(base, output, rid, payload):
         seen.add((ui, key))
         if key not in nodes[ui]['data']:
             nodes[ui]['data'].append(key)
+        associate(nodes[ui], rid)
         bound.add(key)
     new_ids = set(aliases.values())
     if new_ids - bound:
         raise ValueError(f'New data has no consumer: {sorted(new_ids - bound)}')
     for key in selected - bound:
-        if not any(key in nodes[ui]['data'] and rid in nodes[ui]['reqs'] for ui in loaded):
+        if not any(key in nodes[ui]['data'] for ui in loaded):
             raise ValueError(f'Reused data has no consumer for this requirement: {key}')
+    coordinate_state_owners(trial)
     return trial
 
 
@@ -143,7 +182,6 @@ def apply_interaction(base, output, rid, payload):
     trial = copy.deepcopy(base)
     nodes, _ = ui_index(trial['ui'])
     loaded = set(payload['loaded_ui_ids'])
-    bound_ui = {key for key in loaded if rid in nodes[key]['reqs']}
     allowed_data = {row['id'] for row in payload['existing_data']}
     allowed_apis = {row['id'] for row in payload['api_contracts']}
     allowed_handlers = {row['id'] for row in payload['reuse_handlers']}
@@ -190,10 +228,6 @@ def apply_interaction(base, output, rid, payload):
         handler = aliases.get(reference[1:]) if reference.startswith('@') else reference
         if row['ui'] not in loaded:
             raise ValueError(f'Event {row["name"]}: UI {row["ui"]} is not loaded; choose an exact event_ui_candidates ID')
-        if row['ui'] not in bound_ui:
-            raise ValueError(f'Event {row["name"]}: UI {row["ui"]} is loaded but not bound to {rid}; '
-                             f'choose event_ui_candidates, eligible IDs={sorted(bound_ui)}. '
-                             'For load use a bound owning region instead of an unbound page root')
         if handler not in selected:
             raise ValueError(f'Event {row["name"]}: handler {reference} is not selected; '
                              'use @Name matching new_handlers.name, or select an existing exact ID '
@@ -203,15 +237,17 @@ def apply_interaction(base, output, rid, payload):
         events[key] = symbol
         trial['events'].append(symbol)
         nodes[row['ui']]['events'].append(key)
+        associate(nodes[row['ui']], rid)
         used.add(handler)
     for key in output['reuse_events']:
-        if key not in allowed_events or events[key]['ui'] not in bound_ui:
+        if key not in allowed_events or events[key]['ui'] not in loaded:
             raise ValueError(f'Unknown or unrelated reuse event: {key}')
         handler = events[key]['handler']
         if handler not in allowed_handlers:
             raise ValueError(f'Reused event needs a loaded handler contract: {key}')
         associate(events[key], rid)
         associate(handlers[handler], rid)
+        associate(nodes[events[key]['ui']], rid)
         used.add(handler)
     if selected - used:
         raise ValueError(f'Unattached selected handlers: {sorted(selected - used)}')
@@ -222,4 +258,5 @@ def apply_interaction(base, output, rid, payload):
             associate(data[target], rid)
         if set(handlers[key]['apis']) - allowed_apis:
             raise ValueError(f'Reused handler requires unloaded API: {key}')
+    coordinate_state_owners(trial)
     return trial

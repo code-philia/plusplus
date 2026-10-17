@@ -2,7 +2,7 @@
 import copy
 import json
 from compiler.backend_design.context import database_context, retrieve, terms
-from .validation import ui_index, within
+from .validation import ui_index
 
 
 def tree_summary(root):
@@ -60,18 +60,13 @@ def state_context(ir, ids):
 
 
 def handler_context(ir, ids, data, apis, requirement, k=6):
-    nodes, parents = ui_index(ir['ui'])
-    bound = {key for key in ids if requirement['id'] in nodes[key]['reqs']}
     available_data, available_apis = {row['id'] for row in data}, {row['id'] for row in apis}
-    events = [row for row in ir['events'] if row['ui'] in bound]
+    events = [row for row in ir['events'] if row['ui'] in ids]
     direct = {row['handler'] for row in events}
     query = terms({key: requirement.get(key) for key in ('name', 'description', 'scenarios')})
     ranked = []
     for row in ir['handlers']:
         if set(row['read'] + row['write']) - available_data or set(row['apis']) - available_apis:
-            continue
-        if not any(all(within(ui, next(item['owner'] for item in data if item['id'] == target), parents)
-                       for target in row['read'] + row['write']) for ui in bound):
             continue
         score = len(query & terms(row['name'] + ' ' + row['spec']))
         score += 5 * len(set(row['read'] + row['write']) & available_data)

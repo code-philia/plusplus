@@ -134,9 +134,7 @@ class FrontendDesignPass:
                 pages, loaded = region(trial, names)
                 apis = related_apis(backend, requirement, database)
                 # Existing UI events need their exact direct API contracts available for reuse.
-                nodes, _ = ui_index(trial['ui'])
-                bound = {key for key in loaded if rid in nodes[key]['reqs']}
-                handler_ids = {row['handler'] for row in trial['events'] if row['ui'] in bound}
+                handler_ids = {row['handler'] for row in trial['events'] if row['ui'] in loaded}
                 api_ids = {key for row in trial['handlers'] if row['id'] in handler_ids for key in row['apis']}
                 known_api_ids = {row['id'] for row in apis}
                 apis.extend(copy.deepcopy(row) for row in backend['modules']
@@ -153,7 +151,7 @@ class FrontendDesignPass:
                 payload['event_ui_candidates'] = [
                     {'id': key, 'name': current_nodes[key]['name'], 'kind': current_nodes[key]['kind'],
                      'description': current_nodes[key]['description']}
-                    for key in sorted(loaded) if rid in current_nodes[key]['reqs']]
+                    for key in sorted(loaded)]
                 payload['existing_data'] = state_context(trial, loaded)
                 payload['reuse_handlers'], payload['existing_events'] = handler_context(
                     trial, loaded, payload['existing_data'], apis, requirement)

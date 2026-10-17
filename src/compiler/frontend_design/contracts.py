@@ -84,30 +84,37 @@ updates target loaded existing page nodes. bindings target loaded or new nodes; 
 must extract the requirement's wording or scenario action and explain which part this UI realizes.
 The compiler appends this leaf's ID and REPLACES that UI description. Always return bindings for
 relevant UI even on first creation. Use the narrowest relevant controls/regions, not just the page.
-Also bind the page or region that must host a required load/init event, with a requirement-grounded
-description. The Interaction pass can attach events ONLY to UI bound to this leaf; loaded IDs alone
-do not authorize events. Choose a suitable bound region when the page itself has no direct behavior.
+Requirement bindings describe implemented behavior for traceability and file discovery, not event
+permissions. Do not bind an unrelated ancestor merely to authorize an event or state access.
+The next passes can use any loaded UI in the declared pages, including their page roots.
 ''',
     'data': '''## Task: minimal typed frontend state
 Design only state required by this leaf: inputs, fetched results, selections, loading and error state.
 Do not create separate UIData/UIValue, duplicate DTO fields as unrelated global state, or model static
-labels as data. owner is the smallest suitable common UI ancestor of consumers; app is for genuinely
-cross-page state. initial is a JSON STRING containing a value matching schema; null requires a nullable
-schema. Every new_data needs at least one binding. Bind state only to loaded UI, within owner's subtree.
+labels as data. owner describes state lifetime: choose the smallest suitable common UI ancestor of
+display consumers AND the controls/regions whose handlers need to read/write that state. Use a page
+for coordination between its sibling regions, and app for genuinely cross-page state. Requirement
+ownership does not restrict state consumers. The compiler lifts owner to the nearest common ancestor
+when actual consumers/events require a wider scope; state ID, schema, initial value and behavior stay
+unchanged. initial is a JSON STRING containing a value matching schema; null requires a nullable
+schema. Every new_data needs at least one binding. Bind state to its actual loaded UI consumers.
 Use globally unambiguous @Name aliases for this reply even though data names are owner-scoped snake_case.
 Reuse supplied state unchanged when it already suffices. Return empty arrays if state is unnecessary.
 ''',
     'interaction': '''## Task: events and their handlers together
 Connect scenario actions, page/region load, input changes, submissions, navigation and supported failures.
-event_ui_candidates is the exact allowlist for new_events.ui. Choose its supplied ID, not an @Name,
-page name or an arbitrary loaded_ui_id. A loaded page root is NOT automatically requirement-bound.
-For load use a candidate region that owns the initialization behavior when the page root is absent.
-Never invent a UI ID or attach an event to an unbound ancestor merely because it contains the control.
+event_ui_candidates includes all loaded UI in the declared pages and shared app structure. Choose
+the actual interaction control, or a page/region root for load initialization, using its exact ID.
+An event site does not need a prior binding to this requirement. Keep events at their semantic sites;
+do not move a click to an ancestor just to reach state. The compiler coordinates state lifetime by
+lifting owners when a handler needs state from sibling regions. Reference supplied state IDs only;
+never invent UI/data IDs. Cross-page state uses app lifetime when the referenced pages need it.
 Select the handler explicitly in the same response: new_handlers:[{name:"LoadAccount",...}] means
 new_events.handler:"@LoadAccount"; an existing handler must appear in reuse_handlers or handler_updates
 before a NEW event may reference its exact ID. A handler in the input reuse_handlers catalog alone is
 not selected. Reusing an existing event via reuse_events selects its established handler automatically.
-new_events.ui must be a loaded UI explicitly bound to this leaf. trigger is a framework-neutral semantic
+new_events.ui must be a loaded UI. The compiler records the current requirement on used event sites
+for traceability and source discovery. trigger is a framework-neutral semantic
 trigger, not an onClick/effect string. Each event points to exactly one handler. Multiple events may share
 one handler. There is at most one event per UI+trigger: reuse it unchanged if its existing handler suffices.
 If an established event cannot serve this leaf unchanged, use a permitted handler_updates addition or

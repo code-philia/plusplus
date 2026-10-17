@@ -99,12 +99,12 @@ def validate_ir(ir, backend):
     all_ids = list(nodes) + [row['id'] for group in ('data', 'handlers', 'events') for row in ir[group]]
     if len(set(all_ids)) != len(all_ids):
         errors.append('Duplicate frontend symbol ID')
-    state_names, handler_names, event_keys = set(), set(), set()
+    handler_names, event_keys = set(), set()
     for row in ir['data']:
-        key = row['owner'], row['name']
-        if key in state_names or row['owner'] not in nodes or not re.fullmatch(r'[a-z_][a-z0-9_]*', row['name']) or not row['spec'].strip():
-            errors.append(f'Invalid/duplicate state owner, name or spec: {row["id"]}')
-        state_names.add(key)
+        # Stable data IDs identify state; lifting two states to a common owner
+        # may give them the same display name. Lowering disambiguates properties.
+        if row['owner'] not in nodes or not re.fullmatch(r'[a-z_][a-z0-9_]*', row['name']) or not row['spec'].strip():
+            errors.append(f'Invalid state owner, name or spec: {row["id"]}')
         try:
             schema = parse_contract(row['schema'], row['name'], definitions, interface=False)
             if not value_matches(json.loads(row['initial']), schema, definitions):
