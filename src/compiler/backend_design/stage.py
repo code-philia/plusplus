@@ -147,7 +147,7 @@ class BackendDesignPass:
                 feedback = shape_errors(output, SCHEMAS[kind])
                 if not feedback:
                     candidate, selected = self._materialize(base, kind, rid, upstream, output, payload)
-                    feedback = validate_ir(candidate, database, complete=kind == 'DB')
+                    feedback = validate_ir(candidate, database)
                     if not feedback:
                         trace['errors'] = []
                         write_json_atomic(self.root / 'passes' / f'{self.sequence:05d}_{kind.lower()}.json', trace)
@@ -260,9 +260,6 @@ class BackendDesignPass:
                     if origin not in upstream and origin not in new_by_name.values():
                         raise ValueError(f'Invalid reuse caller {caller}')
                     edge(origin, reuse['id'])
-            for key in upstream:
-                if not modules[key]['callees']:
-                    raise ValueError(f'Unfulfilled upstream module {key}: declare at least one collaborator')
         # Reject unused helpers before committing a layer.
         roots = selected if kind == 'API' else upstream
         visited, pending = set(), list(roots)

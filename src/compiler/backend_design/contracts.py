@@ -127,9 +127,11 @@ All new or explicitly reused modules must be reachable from the selected upstrea
 do not create disconnected helpers. Reciprocal links and requirement association are compiler-owned.
 Reusing an established operation also associates its existing downstream graph with this requirement;
 do not redeclare that entire graph, reselect its children, or invent new collaborators for it.
-Before returning, map every server-side scenario step to an operation or a reused contract. Keep
-transport, business decisions and storage responsibilities separate; never add a module solely to
-mirror a visual control. Empty arrays are valid when the current layer needs no new modules.
+Before returning, map every server-side scenario step to an operation or a reused contract.
+Split transport, business and storage responsibilities when useful; this is design guidance,
+not a requirement to populate every layer. Any module may complete its responsibility directly
+with callees:[]. Never create helpers or database access just to fill a layer, or add a module
+solely to mirror a visual control. Empty arrays are valid when the current layer needs no modules.
 '''
 TASKS = {
     'API': '''## Current task: external API interfaces
@@ -143,8 +145,9 @@ authentication request carries a session: session lookup/sign-out may accept an 
 For login/registration spec must explain how a generated session token reaches Set-Cookie (or the
 requirement's supported carrier), and logout how the carrier is cleared. response describes the
 JSON response body; do not expose a session token in that body unless the requirement needs it.
-These transport effects still require a declared FUNC output supplying the needed token.
-The compiler generates IDs and empty callees, then the FUNC pass wires business collaborators.
+Describe where transport values originate: local API behavior or declared collaborator outputs.
+An API may fulfill the operation directly; a FUNC is optional. The compiler generates IDs and
+empty callees, and the FUNC pass attaches business collaborators only when useful.
 API reuse entries contain only id. Do not design FUNC or DB.
 Paths are absolute URL paths only: no query string, fragment, whitespace or brace parameters.
 Each :parameter has an exact matching payload property with source:path and is listed in required;
@@ -152,8 +155,12 @@ do not add path-source properties absent from the route. Routes with the same me
 in parameter names or a trailing slash are equivalent and cannot be created twice.
 ''',
     'FUNC': '''## Current task: composable business functions
-A FUNC sits between transport APIs and storage DB modules: it validates, authorizes and orchestrates.
-upstream_modules are the selected APIs. Every API with empty callees must call at least one FUNC.
+A FUNC implements business behavior: validation, calculation, transformations or orchestration.
+It may complete its responsibility directly with callees:[]; not every FUNC needs a helper or DB.
+Create database collaborators only when its behavior actually requires database reads or writes.
+upstream_modules are the selected APIs. Review their spec to decide whether business functions
+are useful; empty API callees does not itself indicate missing work. If the APIs already fulfill
+the behavior directly, return empty new_modules/reuse/new_types arrays.
 For each new FUNC, callers may name those API IDs or @Name for other new FUNCs; callees may name
 @Name for other new FUNCs or loaded existing FUNC/DB IDs. Do not invent or design DB modules yet.
 Declare each FUNC-FUNC edge once using callers OR callees; the compiler makes edges reciprocal.
@@ -168,20 +175,22 @@ New FUNC callers may only be selected upstream APIs or new local FUNCs. Do not m
 existing FUNC by making it call a new helper; declare calls from a new caller toward an existing callee.
 Read the upstream API's payload, response AND spec. Declare input for all caller-provided identity,
 filters and submitted values needed by this function; remove HTTP source metadata at this layer.
-Output must supply both API body values and any values needed for API transport effects, such as a
-new session token. For a supplied session_id, explain passing it to the storage lookup/revocation.
+For delegated behavior, output supplies the values its caller needs, including transport effects
+when applicable, such as a new session token. For a supplied session_id, explain any required lookup/revocation.
 For authentication, explain credential lookup, password verification, session creation and returning
 the created token with the public account fields; never assume persistence alone authenticates a browser.
 Plan downstream data requirements in spec now, so the DB pass can define sufficient signatures.
 ''',
     'DB': '''## Current task: storage operations
-A DB encapsulates database operations. upstream_modules are selected FUNCs. Every FUNC with empty
-callees must call at least one DB. read/write are JSON STRINGS containing arrays of entity or
+A DB encapsulates database operations. upstream_modules are selected FUNCs; an empty FUNC callees
+list is valid and does not imply missing storage. Design DB modules only for actual database access
+required by the supplied behavior. When no storage work is needed, return empty new_modules/reuse/new_types
+arrays; do not invent database access to fill the layer. read/write are JSON STRINGS containing arrays of entity or
 entity.field targets: entity read means row lookup, entity write means insertion/deletion;
 field targets mean reading/writing the particular field. Entity access does not imply every field.
 Use loaded database targets only; do not create entities/fields or infer operations from dependencies.
 DB may call another DB, never API/FUNC. callers may name supplied FUNC IDs or @Name for new DBs;
-callees may name @Name or loaded existing DB IDs. No cycles. Include at least one read/write target.
+callees may name @Name or loaded existing DB IDs. No cycles. List direct read/write targets when present.
 The callers declaration is wiring evidence; the compiler records final reciprocal callers and IDs.
 reuse accepts existing DB IDs from reuse_candidates ONLY. One reused DB can attach to multiple
 selected FUNCs: list it once with callers:["FUNC_ID_1","FUNC_ID_2"]. Existing DBs in reference_catalog
@@ -190,8 +199,9 @@ must be selected upstream FUNCs or @Name of new local DBs, not arbitrary existin
 Do not alter already populated upstream FUNC callees when that FUNC is reused from another requirement.
 Its established storage graph already suffices by the reuse contract. Only newly designed upstream
 FUNCs may receive additional new storage collaborators. An existing DB's downstream graph is immutable.
-read/write arrays contain unique exact loaded entity/field targets; use "[]" for an unused operation,
-but at least one of read/write must be nonempty. A listed entity does not replace explicitly needed
+read/write arrays contain unique exact loaded entity/field targets; use "[]" for an unused operation.
+Both may be empty when the module has no direct database access, for example when delegating to
+another DB. Do not fabricate targets. A listed entity does not replace explicitly needed
 field targets. Do not emit SQL, access objects, new table names or fabricated target IDs here.
 upstream_api_contracts provides the relevant enclosing APIs so request identity and transport effects
 remain visible. Check upstream FUNC input/output/spec and these API contracts before choosing DB

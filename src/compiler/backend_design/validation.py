@@ -145,7 +145,7 @@ def graph_errors(ir):
     return errors
 
 
-def validate_ir(ir, database, *, complete=True):
+def validate_ir(ir, database):
     definitions = {row['name']: row['schema'] for row in ir['types']}
     modules = ir['modules']
     names, ids, routes, errors = set(), set(), set(), []
@@ -198,19 +198,13 @@ def validate_ir(ir, database, *, complete=True):
                 for direction in ('input', 'output'):
                     parse_contract(row[direction], row['name'] + '.' + direction, definitions)
             if row['kind'] == 'DB':
-                accesses = []
                 for operation in ('read', 'write'):
                     references = json.loads(row[operation])
                     if not isinstance(references, list) or any(not isinstance(ref, str) for ref in references):
                         raise ValueError(f'{row["name"]}.{operation}: expected JSON string array')
                     if len(set(references)) != len(references) or set(references) - targets:
                         raise ValueError(f'{row["name"]}.{operation}: duplicate or unknown database target')
-                    accesses += references
-                if not accesses:
-                    errors.append(f'{row["name"]}: DB requires at least one read/write target')
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             errors.append(str(exc))
-        if complete and row['kind'] in {'API', 'FUNC'} and not row['callees']:
-            errors.append(f'{row["name"]}: {row["kind"]} must have a downstream collaborator')
     errors += graph_errors(ir)
     return list(dict.fromkeys(errors))
