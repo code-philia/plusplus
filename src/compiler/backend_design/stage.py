@@ -12,7 +12,7 @@ from model.client import describe_model_error
 from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
 from .contracts import PROMPTS, SCHEMAS
-from .context import database_context, retrieve
+from .context import database_context, retrieve, module_index, expand_module_context
 from .validation import shape_errors, validate_ir, parse_contract, normalize_contract
 
 
@@ -85,9 +85,7 @@ class BackendDesignPass:
                                'upstream_modules': selected_upstream, 'reuse_candidates': candidates,
                                'existing_types': trial['types'],
                                'reference_catalog': references,
-                               'name_index': [row['name'] for row in trial['modules']],
-                               'route_index': [{'id': row['id'], 'method': row['method'], 'path': row['path']}
-                                               for row in trial['modules'] if row['kind'] == 'API']}
+                               'module_index': module_index(trial['modules'])}
                     if kind == 'DB':
                         payload['upstream_api_contracts'] = [row for row in trial['modules']
                                                            if row['id'] in ancestor_ids and row['kind'] == 'API']
@@ -146,8 +144,15 @@ class BackendDesignPass:
                 trace['output'] = output
                 feedback = shape_errors(output, SCHEMAS[kind])
                 if not feedback:
-                    candidate, selected = self._materialize(base, kind, rid, upstream, output, payload)
-                    feedback = validate_ir(candidate, database)
+                    added, conflicts = expand_module_context(base, kind, payload, output)
+                    if added:
+                        trace['context_loaded_ids'] = added
+                        feedback = [f'Loaded exact existing contracts {added} into reuse_candidates/reference_catalog/'
+                                    'conflict_contracts. Review them and return a corrected design using the same output format.',
+                                    *conflicts]
+                    else:
+                        candidate, selected = self._materialize(base, kind, rid, upstream, output, payload)
+                        feedback = validate_ir(candidate, database)
                     if not feedback:
                         trace['errors'] = []
                         write_json_atomic(self.root / 'passes' / f'{self.sequence:05d}_{kind.lower()}.json', trace)

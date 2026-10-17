@@ -128,7 +128,12 @@ Never list an updated handler in reuse_handlers. Use blocked_reason when a signa
 of old behavior is required, rather than silently changing the contract.
 New handlers use globally unique PascalCase names. read/write name loaded data IDs; apis name loaded
 backend API IDs, never backend FUNC/DB. APIs must be sufficient, with existing request/response contracts;
-never invent an endpoint. spec uses {preconditions} action {postconditions}, explaining event parameter
+never invent an endpoint. api_contracts is the initial relevant slice, not all available capabilities.
+api_index lists all existing APIs. Refer to an exact indexed API ID in the normal handler apis list
+when needed; the compiler supplies its full contract and types for review on the next attempt.
+If reporting a gap involves an unloaded indexed API, name its exact ID/name in blocked_reason so
+the compiler can retrieve it. No extra output fields or separate loading protocol are needed.
+spec uses {preconditions} action {postconditions}, explaining event parameter
 mapping, data updates, API request/response mappings, navigation and failure behavior as needed.
 input/output are object contracts. UI-only actions need no API. Keep orchestration in spec, not a separate
 handler call graph. Every new or explicitly reused handler must be used by an event. Use @Name for a new

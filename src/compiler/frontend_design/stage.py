@@ -7,13 +7,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from compiler.backend_design.context import database_context
+from compiler.backend_design.context import database_context, module_index
 from compiler.backend_design.validation import shape_errors
 from compiler.preprocessing.traversal import children_by_id, postorder
 from model.client import describe_model_error
 from utils.jsonio import read_json, write_json_atomic
 from utils.logging import SynchronousLog
-from .context import region, related_apis, state_context, handler_context, tree_summary, select_types
+from .context import (region, related_apis, state_context, handler_context, tree_summary,
+                      select_types, expand_api_context)
 from .contracts import PROMPTS, SCHEMAS, VISUAL_FIELDS, VISUAL_ANALYSIS_VERSION
 from .delta import apply_ui, apply_data, apply_interaction, make_ui
 from .validation import ui_index, validate_ir
@@ -142,6 +143,7 @@ class FrontendDesignPass:
                 payload = {'current_task': {'requirement': requirement, 'data_access': data_access},
                            'selected_ui_tree': pages, 'app': {key: trial['ui'][key] for key in ('id', 'name', 'kind')},
                            'loaded_ui_ids': sorted(loaded), 'api_contracts': apis,
+                           'api_index': module_index([row for row in backend['modules'] if row['kind'] == 'API']),
                            'existing_data': state_context(trial, loaded),
                            'type_name_index': [row['name'] for row in trial['types']]}
                 payload['existing_types'] = self._types(trial, apis, payload['existing_data'])
@@ -200,6 +202,13 @@ class FrontendDesignPass:
     def _design(self, phase, rid, base, payload, backend):
         apply = {'ui': apply_ui, 'data': apply_data, 'interaction': apply_interaction}[phase]
         def accept(output):
+            if phase == 'interaction':
+                fresh = expand_api_context(backend, payload, output)
+                if fresh:
+                    payload['existing_types'] = self._types(base, payload['api_contracts'],
+                                                          payload['existing_data'], payload['reuse_handlers'])
+                    raise ValueError(f'Loaded existing APIs {fresh} from api_index into api_contracts with their types. '
+                                     'Review them before reporting a missing capability or returning the corrected delta.')
             candidate = apply(base, output, rid, payload)
             errors = validate_ir(candidate, backend)
             if errors:

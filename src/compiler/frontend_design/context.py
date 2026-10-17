@@ -1,6 +1,7 @@
 """Page-local contexts, compact summaries and small contract reuse catalogs."""
 import copy
 import json
+import re
 from compiler.backend_design.context import database_context, retrieve, terms
 from .validation import ui_index
 
@@ -31,6 +32,22 @@ def related_apis(backend, requirement, database):
     return list({row['id']: copy.deepcopy(row) for row in direct + candidates}.values())
 
 
+def expand_api_context(backend, payload, output):
+    """Load exact existing APIs referenced by a delta or an explicit gap report."""
+    apis = {row['id']: row for row in backend['modules'] if row['kind'] == 'API'}
+    wanted = {key for row in output.get('new_handlers', []) + output.get('handler_updates', [])
+              for key in row['apis'] if key in apis}
+    reason = output.get('blocked_reason', '')
+    if reason:
+        wanted.update(key for key, row in apis.items()
+                      if any(re.search(r'(?<![A-Za-z0-9_])' + re.escape(token) + r'(?![A-Za-z0-9_])', reason)
+                             for token in (key, row['name'])))
+    loaded = {row['id'] for row in payload['api_contracts']}
+    fresh = sorted(wanted - loaded)
+    payload['api_contracts'].extend(copy.deepcopy(apis[key]) for key in fresh)
+    return fresh
+
+
 def select_types(ir, apis, contracts=()):
     definitions = {row['name']: row for row in ir['types']}
     used = set()
@@ -59,7 +76,7 @@ def state_context(ir, ids):
     return [copy.deepcopy(row) for row in ir['data'] if row['owner'] in ids]
 
 
-def handler_context(ir, ids, data, apis, requirement, k=6):
+def handler_context(ir, ids, data, apis, requirement, k=10):
     available_data, available_apis = {row['id'] for row in data}, {row['id'] for row in apis}
     events = [row for row in ir['events'] if row['ui'] in ids]
     direct = {row['handler'] for row in events}

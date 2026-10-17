@@ -96,6 +96,11 @@ the public API merely because an internal module uses them. Keep secret transpor
 
 ## Reuse and shared symbols
 reuse_candidates contains full immutable contracts retrieved by entity/field overlap and lexical relevance.
+These are initial suggestions, not the whole system's capabilities. module_index lists all existing
+module IDs/names/kinds/routes. Use exact indexed IDs in the normal reuse/callees fields when needed:
+the compiler loads their contracts and asks you to review the design before accepting it. No separate
+context-request response is needed. Unknown IDs remain invalid. Name/route collisions also load the
+matching existing contracts automatically; conflict_contracts is read-only context for other layers.
 Prefer reuse ONLY if inputs, outputs, behavior, data requirements and existing callees already suffice
 without any modification. Reuse does not permit strengthening a spec or extending an existing call graph.
 reuse contains existing IDs only. Never repeat an existing name or method+equivalent route as new.
@@ -118,9 +123,10 @@ reqs, kind or other compiler-owned properties. In the same reply, refer to a new
 refer to existing modules by their exact supplied ID. Never guess a future module ID.
 validation_feedback and previous_output describe a rejected reply: return a complete corrected delta.
 Every delta contains new_modules, reuse and new_types; use [] when absent, never omit a required key.
-All caller/callee arrays contain unique IDs or @Name aliases. Only supplied contract IDs are usable:
-names in name_index, IDs in route_index, IDs merely mentioned in spec/callees of another record, and
-IDs in upstream_api_contracts do not by themselves load a contract for wiring. An @Name must name a
+All caller/callee arrays contain unique IDs or @Name aliases. Indexed IDs may trigger automatic
+contract loading; wiring is accepted only after the full contract is supplied for review.
+Loading does not permit modifying a reused module or attaching an arbitrary upstream caller.
+IDs merely mentioned in spec and IDs in upstream_api_contracts do not themselves authorize wiring. An @Name must name a
 new module in THIS reply; it cannot refer to a future pass's module or a type definition.
 Allowed call directions are API -> FUNC, FUNC -> FUNC/DB, DB -> DB; no self calls or cycles.
 All new or explicitly reused modules must be reachable from the selected upstream operations;
