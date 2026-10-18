@@ -126,7 +126,7 @@ class NodeTDDOrchestrator:
                 self.log.warning(warnings[-1], node_id=rid)
                 continue
             session, snapshots = WorkingContext(), {}
-            evidence = []
+            evidence, targets = [], []
             repaired_baseline = False
             try:
                 if baseline_needs_repair:
@@ -182,12 +182,34 @@ class NodeTDDOrchestrator:
                 self.log.error(errors[-1], node_id=rid)
                 return self._report(states, errors, warnings)
             except Exception as exc:
+                # Runtime acceptance failure does not discard compilation-safe
+                # progress. Individual invalid proposals are still reverted by
+                # _model_patch before reaching this requirement boundary.
+                retained_tests = [path for path in targets if (self.root / path).is_file()]
                 try:
-                    restore(self.root, snapshots)
-                except Exception as rollback_exc:
-                    errors.append(f'{rid}: rollback failed: {rollback_exc}')
-                baseline_needs_repair = baseline_needs_repair or repaired_baseline
-                states[rid] = 'FAILED_ROLLED_BACK'
+                    compilation = self.runner.compile()
+                    test_sources = list(dict.fromkeys(completed_tests + retained_tests))
+                    if test_sources:
+                        compilation += self.runner.check_tests(test_sources)
+                    self._gate(rid, 'failure_compilation', compilation)
+                    keep_source = passed(compilation)
+                except Exception as compilation_exc:
+                    keep_source = False
+                    warnings.append(f'{rid}: could not verify compilation before retaining source: {compilation_exc}')
+                if keep_source:
+                    states[rid] = 'FAILED_RETAINED'
+                    # Include retained tests in subsequent compilation gates;
+                    # they are not scheduled for regression execution.
+                    completed_tests.extend(retained_tests)
+                    warnings.append(f'{rid}: keeping last compilation-safe result; acceptance remains incomplete')
+                    self.log.warning(warnings[-1], node_id=rid)
+                else:
+                    try:
+                        restore(self.root, snapshots)
+                    except Exception as rollback_exc:
+                        errors.append(f'{rid}: rollback failed: {rollback_exc}')
+                    baseline_needs_repair = baseline_needs_repair or repaired_baseline
+                    states[rid] = 'FAILED_ROLLED_BACK'
                 errors.append(f'{rid}: {exc}')
                 self.log.error(errors[-1], node_id=rid)
             self._report(states, errors, warnings)
