@@ -4,10 +4,30 @@ import os
 import sys
 from contextvars import ContextVar
 from datetime import datetime, timezone, tzinfo
+from pathlib import Path
+from threading import RLock
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 _current_run_id: ContextVar[str | None] = ContextVar("arc_run_id", default=None)
+_log_lock = RLock()
+
+
+def append_debug_log(text: str, *, workspace_root: str | os.PathLike[str] | None = None) -> None:
+    """Append the same console text without ANSI color sequences."""
+    import re
+    explicit = os.environ.get('ARC_DEBUG_LOG_PATH', '').strip()
+    root = workspace_root or os.environ.get('ARC_WORKSPACE_ROOT', '').strip()
+    if root:
+        path = Path(root).expanduser().resolve() / '.arc/debug.log'
+    elif explicit:
+        path = Path(explicit).expanduser().resolve()
+    else:
+        return
+    with _log_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a', encoding='utf-8') as handle:
+            handle.write(re.sub(r'\x1b\[[0-9;]*m', '', text) + '\n')
 
 
 def set_run_id(run_id: str | None) -> None:
@@ -46,12 +66,16 @@ def write_terminal_log(
     *,
     status: str | None = None,
     node_id: str | None = None,
+    workspace_root: str | os.PathLike[str] | None = None,
 ) -> None:
-    print(format_terminal_log(agent_name, message, status=status, node_id=node_id), flush=True)
+    text = format_terminal_log(agent_name, message, status=status, node_id=node_id)
+    with _log_lock:
+        append_debug_log(text, workspace_root=workspace_root)
+        print(text, flush=True)
 
 
 class SynchronousLog:
-    """Write compiler progress to the terminal; persistent state lives in stage reports."""
+    """Synchronize compiler progress to the console and workspace debug.log."""
 
     def __init__(self, agent_name: str, *, workspace_root: str | os.PathLike[str] | None = None) -> None:
         self._agent_name = agent_name
@@ -67,7 +91,8 @@ class SynchronousLog:
         self._write(message, status='error', node_id=node_id)
 
     def _write(self, message: str, *, status: str | None, node_id: str | None) -> None:
-        write_terminal_log(self._agent_name, message, status=status, node_id=node_id)
+        write_terminal_log(self._agent_name, message, status=status, node_id=node_id,
+                           workspace_root=self._workspace_root)
 
 
 ANSI_RESET = "\033[0m"

@@ -8,6 +8,7 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import OpenAI
 from model.logging import log_design_call, logged_completion
+from utils.logging import SynchronousLog
 
 
 from .contracts import StructuredModel
@@ -234,7 +235,7 @@ def record_model_usage(
         return
     summary = _jsonable(usage)
     if isinstance(summary, dict):
-        print("MODEL_USAGE " + json.dumps({"schema_name": schema_name,
+        SynchronousLog('Model', workspace_root=path.parent.parent).info("MODEL_USAGE " + json.dumps({"schema_name": schema_name,
               "operation": operation, "prompt_tokens": summary.get("prompt_tokens"),
               "completion_tokens": summary.get("completion_tokens"),
               "total_tokens": summary.get("total_tokens")}, ensure_ascii=False))

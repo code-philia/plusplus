@@ -52,10 +52,11 @@ def main() -> None:
             from cli.config import print_health_check
             code = print_health_check()
         else:
-            from cli.output import print_cli_banner, print_cli_startup, cli_log, print_compilation_summary
+            from cli.output import init_debug_logger, print_cli_banner, print_cli_startup, cli_log, print_compilation_summary
             request = CompilationRequest(requirement_path=Path(_locate_requirement_file(args.requirement_path)),
                 output_dir=Path(args.output_dir).expanduser().resolve(), web_port=args.port,
                 stop_after_lowering=args.stop_after_lowering, prepare_validation=args.prepare_validation)
+            init_debug_logger(str(request.output_dir))
             print_cli_banner()
             print_cli_startup(str(request.output_dir), str(request.requirement_path), False, request.web_port)
             started = time.monotonic()

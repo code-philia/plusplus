@@ -1,17 +1,36 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 from colorama import Fore, Style, init as colorama_init
 
-from utils.logging import write_terminal_log
+from utils.logging import append_debug_log, write_terminal_log
 
 
 colorama_init()
 
+_cli_workspace_root: str | None = None
+
+
+def init_debug_logger(project_path: str) -> Path:
+    """Append to the workspace log without deleting previous run output."""
+    global _cli_workspace_root
+    _cli_workspace_root = str(Path(project_path).expanduser().resolve())
+    os.environ['ARC_WORKSPACE_ROOT'] = _cli_workspace_root
+    path = Path(_cli_workspace_root) / '.arc/debug.log'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+    return path
+
+def _print(message: str = "") -> None:
+    append_debug_log(message, workspace_root=_cli_workspace_root)
+    print(message)
+
+
 def print_cli_banner() -> None:
     border = "=" * 78
-    print(
+    _print(
         "\n".join(
             [
                 "",
@@ -32,15 +51,16 @@ def print_cli_startup(
 ) -> None:
     requirement_name = Path(requirement_path).parent.name or "requirements"
     mode_label = "clean compile" if clear_all else "compile"
-    print()
-    print(f"{Fore.WHITE}Session{Style.RESET_ALL}")
-    print(f"  {Fore.CYAN}mode      {Style.RESET_ALL}{mode_label}")
-    print(f"  {Fore.CYAN}input     {Style.RESET_ALL}{requirement_name}")
-    print(f"  {Fore.CYAN}output    {Style.RESET_ALL}{project_path}")
-    print(f"  {Fore.CYAN}target    {Style.RESET_ALL}Web")
-    print(f"  {Fore.CYAN}port      {Style.RESET_ALL}{web_port}")
-    print(f"  {Fore.CYAN}stack     {Style.RESET_ALL}React + TypeScript + Express + SQLite")
-    print(f"{Fore.BLUE}{'-' * 78}{Style.RESET_ALL}\n")
+    _print()
+    _print(f"{Fore.WHITE}Session{Style.RESET_ALL}")
+    _print(f"  {Fore.CYAN}mode      {Style.RESET_ALL}{mode_label}")
+    _print(f"  {Fore.CYAN}input     {Style.RESET_ALL}{requirement_name}")
+    _print(f"  {Fore.CYAN}output    {Style.RESET_ALL}{project_path}")
+    _print(f"  {Fore.CYAN}target    {Style.RESET_ALL}Web")
+    _print(f"  {Fore.CYAN}port      {Style.RESET_ALL}{web_port}")
+    _print(f"  {Fore.CYAN}stack     {Style.RESET_ALL}React + TypeScript + Express + SQLite")
+    _print(f"  {Fore.CYAN}debug log {Style.RESET_ALL}{Path(project_path) / '.arc/debug.log'}")
+    _print(f"{Fore.BLUE}{'-' * 78}{Style.RESET_ALL}\n")
 
 
 def cli_log(
@@ -49,9 +69,10 @@ def cli_log(
     status: str | None = None,
     node_id: str | None = None,
 ) -> None:
-    """Print compiler progress; model calls are retained separately in model_logs."""
+    """Synchronize compiler events to the console and workspace debug.log."""
 
-    write_terminal_log(agent_name, message, status=status, node_id=node_id)
+    write_terminal_log(agent_name, message, status=status, node_id=node_id,
+                       workspace_root=_cli_workspace_root)
 
 
 def print_compilation_summary(
@@ -76,16 +97,17 @@ def print_compilation_summary(
                     if str(state).startswith(('FAILED', 'SKIPPED', 'BLOCKED')))
     completed = result.get('completed', result.get('ok', False))
 
-    print(f"\n{Fore.BLUE}{border}{Style.RESET_ALL}")
+    _print(f"\n{Fore.BLUE}{border}{Style.RESET_ALL}")
     status = 'Compilation completed' if completed else 'Compilation failed'
-    print(f"{Fore.CYAN}{status}{Style.RESET_ALL}")
-    print(f"{Fore.BLUE}{border}{Style.RESET_ALL}\n")
-    print(f"{Fore.WHITE}Duration:{Style.RESET_ALL}     {duration}")
-    print(f"{Fore.WHITE}Requirements:{Style.RESET_ALL} {len(state_map)}")
+    _print(f"{Fore.CYAN}{status}{Style.RESET_ALL}")
+    _print(f"{Fore.BLUE}{border}{Style.RESET_ALL}\n")
+    _print(f"{Fore.WHITE}Duration:{Style.RESET_ALL}     {duration}")
+    _print(f"{Fore.WHITE}Requirements:{Style.RESET_ALL} {len(state_map)}")
     skipped = ', '.join(sorted(failures)) if failures else 'None'
-    print(f"{Fore.YELLOW}SKIPPED:{Style.RESET_ALL}      {skipped}")
-    print(f"{Fore.WHITE}Output:{Style.RESET_ALL}       {output_dir}")
+    _print(f"{Fore.YELLOW}SKIPPED:{Style.RESET_ALL}      {skipped}")
+    _print(f"{Fore.WHITE}Output:{Style.RESET_ALL}       {output_dir}")
+    _print(f"{Fore.WHITE}Debug log:{Style.RESET_ALL}    {Path(output_dir) / '.arc/debug.log'}")
 
     if failures or not completed or not result.get('ok'):
-        print(f"{Fore.WHITE}Details:{Style.RESET_ALL}      .arc/workflow/report.json")
-    print(f"{Fore.BLUE}{border}{Style.RESET_ALL}\n")
+        _print(f"{Fore.WHITE}Details:{Style.RESET_ALL}      .arc/workflow/report.json")
+    _print(f"{Fore.BLUE}{border}{Style.RESET_ALL}\n")
