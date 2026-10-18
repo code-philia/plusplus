@@ -70,7 +70,14 @@ def unique_name(name, used, *, qualifier='', fallback='Component'):
 
 
 def relative_import(source, target, extension='.js'):
+    """Handle native Windows paths as well as project-relative POSIX paths."""
+    import ntpath
     import posixpath
-    target = str(PurePosixPath(target).with_suffix(extension))
-    path = posixpath.relpath(target, str(PurePosixPath(source).parent))
+    source = str(source).replace('\\', '/')
+    target = str(PurePosixPath(str(target).replace('\\', '/')).with_suffix(extension))
+    parent = str(PurePosixPath(source).parent)
+    if ntpath.splitdrive(source)[0] or ntpath.splitdrive(target)[0]:
+        path = ntpath.relpath(target, parent).replace('\\', '/')
+    else:
+        path = posixpath.relpath(target, parent)
     return path if path.startswith('.') else './' + path
