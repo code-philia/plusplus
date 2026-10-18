@@ -71,24 +71,21 @@ def print_compilation_summary(
     states = result.get("states")
     state_map = states if isinstance(states, dict) else {}
     failed_nodes = result.get("failed_nodes")
-    failures = failed_nodes if isinstance(failed_nodes, list) else []
+    failures = {str(rid) for rid in failed_nodes} if isinstance(failed_nodes, list) else set()
+    failures.update(str(rid) for rid, state in state_map.items()
+                    if str(state).startswith(('FAILED', 'SKIPPED', 'BLOCKED')))
+    completed = result.get('completed', result.get('ok', False))
 
     print(f"\n{Fore.BLUE}{border}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}Compilation Summary{Style.RESET_ALL}")
+    status = 'Compilation completed' if completed else 'Compilation failed'
+    print(f"{Fore.CYAN}{status}{Style.RESET_ALL}")
     print(f"{Fore.BLUE}{border}{Style.RESET_ALL}\n")
     print(f"{Fore.WHITE}Duration:{Style.RESET_ALL}     {duration}")
     print(f"{Fore.WHITE}Requirements:{Style.RESET_ALL} {len(state_map)}")
-    if failures:
-        print(f"{Fore.RED}Failed:{Style.RESET_ALL}       {', '.join(str(value) for value in failures)}")
+    skipped = ', '.join(sorted(failures)) if failures else 'None'
+    print(f"{Fore.YELLOW}SKIPPED:{Style.RESET_ALL}      {skipped}")
     print(f"{Fore.WHITE}Output:{Style.RESET_ALL}       {output_dir}")
 
-    if result.get("ok") and failures:
-        print(
-            f"\n{Fore.YELLOW}Compilation completed with skipped requirements"
-            f"{Style.RESET_ALL}"
-        )
-    elif result.get("ok"):
-        print(f"\n{Fore.GREEN}Compilation successful{Style.RESET_ALL}")
-    else:
-        print(f"\n{Fore.RED}Compilation failed; inspect .arc/workflow/report.json and .arc/model_logs.{Style.RESET_ALL}")
+    if failures or not completed or not result.get('ok'):
+        print(f"{Fore.WHITE}Details:{Style.RESET_ALL}      .arc/workflow/report.json")
     print(f"{Fore.BLUE}{border}{Style.RESET_ALL}\n")

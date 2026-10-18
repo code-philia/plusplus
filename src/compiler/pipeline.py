@@ -339,7 +339,7 @@ class Compiler:
                                 'warnings': ['Build unavailable; validation artifacts cannot be prepared.']})
             save('COMPLETED_WITH_ERRORS' if errors else 'LOWERED' if request.stop_after_lowering else 'COMPLETED')
             return CompilationResult(ok=not errors, root_id=requirements['root_id'], states=states,
-                failed_nodes=failed, artifacts=artifacts, run_id=run_id)
+                failed_nodes=failed, artifacts=artifacts, run_id=run_id, completed=True)
         except Exception as exc:
             errors.append(f'{stage}: {exc}')
             if reports:

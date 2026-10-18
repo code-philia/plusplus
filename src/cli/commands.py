@@ -2,7 +2,6 @@
 from __future__ import annotations
 import argparse
 import asyncio
-import json
 import os
 import sys
 import time
@@ -62,10 +61,7 @@ def main() -> None:
             started = time.monotonic()
             result = asyncio.run(Compiler(log_cb=cli_log).compile(request))
             print_compilation_summary(result.to_dict(), str(request.output_dir), time.monotonic() - started)
-            print(json.dumps({'status': ('LOWERED' if args.stop_after_lowering else 'COMPLETED') if result.ok else 'FAILED',
-                              'implementation_status': ('NOT_RUN' if args.stop_after_lowering else 'IMPLEMENTED') if result.ok else 'INCOMPLETE',
-                              **result.to_dict()}, ensure_ascii=False, indent=2))
-            code = 0 if result.ok else 1
+            code = 0 if result.completed else 1
     except (OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         code = 1

@@ -28,10 +28,12 @@ class CompilationResult:
     failed_nodes: list[str] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     run_id: str | None = None
+    completed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
+            "completed": self.completed,
             "run_id": self.run_id,
             "root_id": self.root_id,
             "states": dict(sorted(self.states.items())),
