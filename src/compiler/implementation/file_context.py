@@ -136,7 +136,8 @@ class FileContext:
                 by_symbol.setdefault(key, set()).add(path)
         result = set()
         for value in requests:
-            paths = {value} if value in self.catalog or value in test_targets else by_symbol.get(value)
+            relative = value.replace('\\', '/')
+            paths = {relative} if relative in self.catalog or relative in test_targets else by_symbol.get(value)
             if paths is None:
                 raise ValueError(f'Unknown source path/symbol: {value}')
             result.update(paths)

@@ -196,7 +196,7 @@ class RequirementPreprocessor:
                 if not isinstance(reference, str) or not reference.strip() or PurePosixPath(reference.replace(chr(92), "/")).is_absolute() or ":" in reference:
                     errors.append(_format_error("ARC1108", "Page reference must be a relative image path.", node_id=node_id, source=source))
                     continue
-                row["reference"] = reference.strip()
+                row["reference"] = PurePosixPath(reference.strip().replace('\\', '/')).as_posix()
             pages.append(row)
         return pages
 

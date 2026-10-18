@@ -3,7 +3,7 @@ import json
 import re
 from compiler.frontend_design.validation import ui_index
 from compiler.lowering.files import write_stage
-from compiler.lowering.planning import group_for, group_directory, unique_name, relative_import
+from compiler.lowering.planning import group_for, group_directory, unique_name, portable_stem, relative_import
 from compiler.lowering.types import contract, refs, type_file
 
 
@@ -35,11 +35,11 @@ class FrontendLoweringPass:
                 group = group_for(reqs, requirements)
                 export = unique_name(row['name'], export_names, qualifier=page['name'],
                                      fallback='Page' if row['kind'] == 'page' else 'Component')
-                while export + 'State' in export_names or export + 'Props' in export_names:
+                while { (export + 'State').casefold(), (export + 'Props').casefold() } & {name.casefold() for name in export_names}:
                     export = unique_name(row['name'], export_names, qualifier=page['name'])
                 export_names.update({export + 'State', export + 'Props'})
                 directory = "pages" if row["kind"] == "page" else "components"
-                path = f'frontend/src/features/{group_directory(group, requirements)}/{directory}/{export}.tsx'
+                path = f'frontend/src/features/{group_directory(group, requirements)}/{directory}/{portable_stem(export)}.tsx'
                 record = {'ui_id': row['id'], 'name': row['name'], 'export': export, 'file_path': path,
                           'reqs': reqs, 'group_requirement_id': group, 'depth_from_page': depth,
                           'reason': 'page' if row['kind'] == 'page' else 'shallow_structural_region'}
@@ -108,7 +108,7 @@ class FrontendLoweringPass:
             if not re.fullmatch(r'[A-Z][A-Za-z0-9]*', row['name']):
                 raise ValueError(f'Invalid handler export name: {row["name"]}')
             group = group_for(row['reqs'], requirements)
-            path = f'frontend/src/features/{group_directory(group, requirements)}/handlers/{row["name"]}.ts'
+            path = f'frontend/src/features/{group_directory(group, requirements)}/handlers/{portable_stem(row["name"])}.ts'
             needed = sorted(refs(row['input']) | refs(row['output']))
             imports = ('import type * as Contracts from ' + json.dumps(relative_import(path, types_path, '')) + ';\n') if needed else ''
             files[path] = (imports + f'export type {row["name"]}Input = {contract(row["input"], definitions, namespace="Contracts.")};\n'

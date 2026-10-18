@@ -13,6 +13,7 @@ def source_versions(files):
 
 
 def read_source(root, relative):
+    relative = relative.replace('\\', '/')
     root = Path(root).resolve()
     path = (root / relative).resolve()
     if not path.is_relative_to(root) or relative.startswith('.arc/'):
@@ -32,6 +33,9 @@ def restore(root, snapshots):
 
 def apply_edits(root, edits, allowlist, *, expected_versions, ignore_unchanged=False):
     root = Path(root).resolve()
+    # Model replies may copy native Windows separators from compiler diagnostics.
+    # Keep the existing canonical allowlist and version checks authoritative.
+    edits = [{**row, 'file': row['file'].replace('\\', '/')} for row in edits]
     snapshots, seen = {}, set()
     for row in edits:
         relative = row['file']

@@ -4,9 +4,17 @@ import re
 from pathlib import PurePosixPath
 
 
+def portable_stem(name):
+    """Escape Windows device names without changing the exported symbol."""
+    # These names are reserved even with a file extension, e.g. CON.ts.
+    if re.fullmatch(r'con|prn|aux|nul|com[1-9]|lpt[1-9]', name, re.IGNORECASE):
+        return '_' + name
+    return name
+
+
 def slug(name):
     name = re.sub(r'([a-z0-9])([A-Z])', r'\1-\2', str(name)).lower()
-    return re.sub(r'[^a-z0-9]+', '-', name).strip('-') or 'module'
+    return portable_stem(re.sub(r'[^a-z0-9]+', '-', name).strip('-') or 'module')
 
 
 def token(value):
@@ -58,11 +66,12 @@ def unique_name(name, used, *, qualifier='', fallback='Component'):
     """Disambiguate only collisions, using readable context then an ordinal."""
     base = identifier(name, fallback)
     candidate = base
-    if candidate in used and qualifier:
+    used_names = {value.casefold() for value in used}
+    if candidate.casefold() in used_names and qualifier:
         candidate = identifier(qualifier, fallback) + base
     qualified = candidate
     number = 2
-    while candidate in used:
+    while candidate.casefold() in used_names:
         candidate = qualified + str(number)
         number += 1
     used.add(candidate)

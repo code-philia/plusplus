@@ -9,7 +9,7 @@ def image_evidence(reference, reference_root):
     if reference_root is None:
         raise ValueError('reference_root is required to load visual references')
     root = Path(reference_root).resolve()
-    path = (root / reference).resolve()
+    path = (root / reference.replace('\\', '/')).resolve()
     if not path.is_relative_to(root):
         raise ValueError(f'Visual reference must stay inside reference_root: {reference}')
     content = path.read_bytes()

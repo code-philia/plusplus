@@ -2,7 +2,7 @@
 import json
 import re
 from compiler.lowering.files import write_stage
-from compiler.lowering.planning import group_for, group_directory, slug, relative_import
+from compiler.lowering.planning import group_for, group_directory, portable_stem, relative_import
 from compiler.lowering.types import contract, refs, type_file
 from compiler.backend_design.validation import graph_errors, route_key
 
@@ -30,7 +30,7 @@ class BackendLoweringPass:
             group = group_for(row['reqs'], requirements)
             layer = {'API': 'controllers', 'FUNC': 'services', 'DB': 'repositories'}[row['kind']]
             directory = 'shared' if row['shared'] else 'features/' + group_directory(group, requirements)
-            path = f'backend/src/{directory}/{layer}/{row["name"]}.ts'
+            path = f'backend/src/{directory}/{layer}/{portable_stem(row["name"])}.ts'
             inp, out = (row['payload'], row['response']) if row['kind'] == 'API' else (row['input'], row['output'])
             needed = sorted(refs(inp) | refs(out))
             imports = ('import type * as Contracts from ' + json.dumps(relative_import(path, types_path)) + ';\n') if needed else ''
