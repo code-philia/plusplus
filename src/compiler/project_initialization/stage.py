@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
 from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
+from utils.process import resolve_executable, run_command
 
 
 class ProjectInitializer:
@@ -96,9 +98,12 @@ class ProjectInitializer:
         report_path = self.root / '.arc/project/report.json'
         write_json_atomic(report_path, report)
         try:
+            npm = resolve_executable('npm', os.environ) if commands else None
+            if commands and npm is None:
+                raise ValueError('Node.js/npm is unavailable on PATH; install Node.js and reopen the terminal.')
             for argv in commands:
                 self.log.info('Project initialization: ' + ' '.join(argv))
-                result = subprocess.run(argv, cwd=self.root, capture_output=True, text=True, timeout=600)
+                result = run_command([npm, *argv[1:]], cwd=self.root, environment=os.environ, timeout=600)
                 if result.returncode:
                     raise ValueError(f'Project initialization failed: {argv}; '
                                      + (result.stdout + result.stderr)[-4000:])

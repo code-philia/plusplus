@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
         if req_path.exists() or dep_path.exists():
             if not req_path.is_file() or not dep_path.is_file():
                 raise ValueError('Existing preprocessing artifacts are incomplete; they will not be overwritten')
-            requirements = json.loads(req_path.read_text(encoding='utf-8'))
+            requirements = json.loads(req_path.read_text(encoding='utf-8-sig'))
             if source and requirements.get('source', {}).get('sha256') != hashlib.sha256(source.read_bytes()).hexdigest():
                 raise ValueError('Requirements differ from existing preprocessing; use a new workspace')
         else:
@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
             requirements = parsed.requirement_ir
             write_json_atomic(req_path, requirements)
             write_json_atomic(dep_path, parsed.dependency_graph)
-        database = json.loads((arc / 'design/database/er_model.json').read_text(encoding='utf-8'))
+        database = json.loads((arc / 'design/database/er_model.json').read_text(encoding='utf-8-sig'))
         result = BackendDesignPass(Model.from_env(), arc).compile(requirements, database)
         for warning in result.warnings:
             print('WARNING:', warning)

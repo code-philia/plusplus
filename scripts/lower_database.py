@@ -16,7 +16,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         output = Path(args.output_dir).expanduser().resolve()
-        schema = json.loads((output / '.arc/design/database/schema.json').read_text(encoding='utf-8'))
+        schema = json.loads((output / '.arc/design/database/schema.json').read_text(encoding='utf-8-sig'))
         requirements = read_json(output / '.arc/preprocessing/requirement_ir.json')
         lowerer = DatabaseLoweringPass()
         reasons = {}

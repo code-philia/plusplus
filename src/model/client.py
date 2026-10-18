@@ -117,7 +117,7 @@ class Model:
     @classmethod
     def from_env(cls) -> "Model":
         env_file = os.environ.get("ARC_ENV_FILE", "").strip()
-        load_dotenv(env_file or ".env", override=False)
+        load_dotenv(env_file or ".env", override=False, encoding="utf-8-sig")
         return cls(
             model=os.environ.get("MODEL", ""),
             api_key=os.environ.get("OPENAI_API_KEY", ""),

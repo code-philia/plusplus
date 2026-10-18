@@ -19,7 +19,7 @@ def main(argv=None):
         root = Path(args.output_dir).expanduser().resolve()
         arc = root / '.arc'
         def load(relative):
-            return json.loads((arc / relative).read_text(encoding='utf-8'))
+            return json.loads((arc / relative).read_text(encoding='utf-8-sig'))
         result = NodeTDDOrchestrator(Model.from_env(), root, port=args.port).compile(
             load('preprocessing/requirement_ir.json'), load('design/database/er_model.json'),
             load('design/backend/backend_ir.json'), load('design/frontend/frontend_ir.json'),

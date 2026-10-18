@@ -47,8 +47,8 @@ def main(argv: list[str] | None = None) -> int:
         if requirement_path.exists() or dependency_path.exists():
             if not requirement_path.is_file() or not dependency_path.is_file():
                 raise ValueError("Existing preprocessing artifacts are incomplete; they will not be overwritten")
-            requirement_ir = json.loads(requirement_path.read_text(encoding="utf-8"))
-            dependency_graph = json.loads(dependency_path.read_text(encoding="utf-8"))
+            requirement_ir = json.loads(requirement_path.read_text(encoding="utf-8-sig"))
+            dependency_graph = json.loads(dependency_path.read_text(encoding="utf-8-sig"))
             if not isinstance(requirement_ir, dict) or not isinstance(dependency_graph, dict):
                 raise ValueError("Existing preprocessing artifacts must be JSON objects")
             if requirement_ir.get("source", {}).get("sha256") != hashlib.sha256(requirement.read_bytes()).hexdigest():

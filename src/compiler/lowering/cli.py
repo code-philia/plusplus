@@ -2,9 +2,11 @@
 import argparse
 import json
 from pathlib import Path
+from utils.encoding import configure_utf8_console
 
 
 def main(stage, argv=None):
+    configure_utf8_console()
     parser = argparse.ArgumentParser(description=f'Generate minimal {stage} TypeScript skeletons')
     parser.add_argument('-o', '--output-dir', required=True)
     if stage == 'frontend':
@@ -14,8 +16,8 @@ def main(stage, argv=None):
     try:
         output = Path(args.output_dir).expanduser().resolve()
         arc = output / '.arc'
-        requirements = json.loads((arc / 'preprocessing/requirement_ir.json').read_text(encoding='utf-8'))
-        design = json.loads((arc / f'design/{stage}/{stage}_ir.json').read_text(encoding='utf-8'))
+        requirements = json.loads((arc / 'preprocessing/requirement_ir.json').read_text(encoding='utf-8-sig'))
+        design = json.loads((arc / f'design/{stage}/{stage}_ir.json').read_text(encoding='utf-8-sig'))
         if not (output / stage / 'package.json').is_file():
             raise ValueError(f'Initialize {stage}/package.json before lowering')
         if stage == 'backend':

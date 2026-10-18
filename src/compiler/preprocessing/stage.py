@@ -30,8 +30,11 @@ class RequirementPreprocessor:
         errors: list[str] = []
         try:
             source_bytes = source_path.read_bytes()
-            payload = yaml.safe_load(source_bytes.decode("utf-8")) or {}
-        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            payload = yaml.safe_load(source_bytes.decode("utf-8-sig")) or {}
+        except UnicodeError as exc:
+            errors.append(_format_error("ARC1001", f"Requirement document must use UTF-8 encoding (Chinese is supported): {exc}", source=str(source_path)))
+            return PreprocessingResult({}, {}, errors)
+        except (OSError, yaml.YAMLError) as exc:
             errors.append(_format_error("ARC1001", f"Cannot parse requirement document: {exc}", source=str(source_path)))
             return PreprocessingResult({}, {}, errors)
 

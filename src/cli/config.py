@@ -160,7 +160,7 @@ def interactive_config_setup() -> int:
     existing_config = {}
     if env_file.exists():
         try:
-            for line in env_file.read_text(encoding="utf-8").splitlines():
+            for line in env_file.read_text(encoding="utf-8-sig").splitlines():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     key, _, value = line.partition("=")

@@ -11,6 +11,8 @@ import subprocess
 import time
 from typing import Any, Mapping
 
+from .encoding import utf8_environment
+
 
 def resolve_executable(name: str, environment: Mapping[str, str]) -> str | None:
     """Resolve a command using the child process environment's PATH."""
@@ -20,7 +22,12 @@ def resolve_executable(name: str, environment: Mapping[str, str]) -> str | None:
     path = environment.get("PATH")
     if path is None and os.name == "nt":
         path = next((value for key, value in environment.items() if key.upper() == "PATH"), None)
-    return shutil.which(name, path=path if path is not None else os.defpath)
+    search_path = path if path is not None else os.defpath
+    if os.name == 'nt' and name.lower() in {'npm', 'npx'}:
+        shim = shutil.which(name + '.cmd', path=search_path)
+        if shim is not None:
+            return shim
+    return shutil.which(name, path=search_path)
 
 
 def process_group_kwargs() -> dict[str, Any]:
@@ -102,6 +109,7 @@ def terminate_tcp_listeners(
                     [taskkill, "/PID", str(pid), "/T", "/F"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8", errors="replace",
                     timeout=5.0,
                     check=False,
                 )
@@ -160,6 +168,7 @@ def _windows_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
     powershell = shutil.which("powershell.exe") or shutil.which("powershell")
     if powershell is not None:
         command = (
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
             f"Get-NetTCPConnection -LocalPort {int(port)} -State Listen "
             "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess"
         )
@@ -168,6 +177,7 @@ def _windows_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
                 [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
                 capture_output=True,
                 text=True,
+                encoding="utf-8", errors="replace",
                 timeout=5.0,
                 check=False,
             )
@@ -184,6 +194,7 @@ def _windows_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
             [netstat, "-ano", "-p", "tcp"],
             capture_output=True,
             text=True,
+            encoding="utf-8", errors="replace",
             timeout=5.0,
             check=False,
         )
@@ -211,6 +222,7 @@ def _posix_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
                 [lsof, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8", errors="replace",
                 timeout=5.0,
                 check=False,
             )
@@ -228,6 +240,7 @@ def _posix_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
                 [ss, "-H", "-ltnp", f"sport = :{port}"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8", errors="replace",
                 timeout=5.0,
                 check=False,
             )
@@ -275,6 +288,7 @@ def _pid_exists(pid: int) -> bool:
                 [tasklist, "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8", errors="replace",
                 timeout=5.0,
                 check=False,
             )
@@ -309,8 +323,11 @@ def run_command(
 
     process = subprocess.Popen(
         command,
+        # Windows npm/npx are batch shims, requiring cmd.exe. Native executables
+        # and POSIX commands keep direct argument-list execution.
+        shell=os.name == 'nt' and command[0].lower().endswith(('.cmd', '.bat')),
         cwd=cwd,
-        env=environment,
+        env=utf8_environment(environment),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

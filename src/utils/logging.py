@@ -8,6 +8,11 @@ from pathlib import Path
 from threading import RLock
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .encoding import configure_utf8_console
+
+
+configure_utf8_console()
+
 
 _current_run_id: ContextVar[str | None] = ContextVar("arc_run_id", default=None)
 _log_lock = RLock()

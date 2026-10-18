@@ -9,6 +9,7 @@ import tempfile
 from urllib.request import urlopen
 from urllib.error import URLError
 from pathlib import Path
+from utils.encoding import utf8_environment
 from utils.jsonio import write_json_atomic
 from utils.process import process_group_kwargs, terminate_process_tree
 
@@ -25,9 +26,9 @@ class TestRunner:
         self._temporary.cleanup()
 
     def execute(self, argv, *, cwd=None, environment=None, timeout=None):
-        env = {**os.environ, **(environment or {})}
+        env = utf8_environment({**os.environ, **(environment or {})})
         try:
-            with tempfile.TemporaryFile(mode='w+', encoding='utf-8') as output:
+            with tempfile.TemporaryFile(mode='w+', encoding='utf-8', errors='replace') as output:
                 process = subprocess.Popen(argv, cwd=cwd or self.root, env=env, stdout=output,
                                            stderr=subprocess.STDOUT, **process_group_kwargs())
                 try:
@@ -194,7 +195,7 @@ export default defineConfig({
         try:
             with server_log.open('w', encoding='utf-8') as output:
                 server = subprocess.Popen(['node', 'backend/dist/server.js'], cwd=self.root,
-                    env={**os.environ, **environment}, stdout=output, stderr=subprocess.STDOUT,
+                    env=utf8_environment({**os.environ, **environment}), stdout=output, stderr=subprocess.STDOUT,
                     **process_group_kwargs())
                 deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:
@@ -221,7 +222,7 @@ export default defineConfig({
                 self._test_report(result, report, 'playwright', len(browser))
                 result['server_port'] = selected_port
                 if result['status'] != 'PASSED':
-                    result['application_output'] = server_log.read_text(encoding='utf-8')[-18000:]
+                    result['application_output'] = server_log.read_text(encoding='utf-8', errors='replace')[-18000:]
                     if server.poll() is not None:
                         result['failure_kind'] = 'application_runtime'
                         result['application_exit_code'] = server.returncode
@@ -231,7 +232,7 @@ export default defineConfig({
             return {'status': 'FAILED', 'failure_kind': kind, 'error': str(exc),
                     'exit_code': server.poll() if server is not None else None,
                     'server_port': selected_port,
-                    'output': server_log.read_text(encoding='utf-8')[-18000:] if server_log.exists() else ''}
+                    'output': server_log.read_text(encoding='utf-8', errors='replace')[-18000:] if server_log.exists() else ''}
         finally:
             if server is not None:
                 terminate_process_tree(server)
@@ -240,7 +241,7 @@ export default defineConfig({
 
     def _test_report(self, result, path, runner, expected_files):
         try:
-            report = json.loads(path.read_text(encoding='utf-8'))
+            report = json.loads(path.read_text(encoding='utf-8-sig'))
             failures, failed_tests, collected, executed_files = [], [], 0, set()
             timed_out = result.get('failure_kind') == 'execution_timeout'
             if runner == 'vitest':

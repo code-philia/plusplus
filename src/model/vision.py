@@ -57,7 +57,7 @@ class VisualModel:
     @classmethod
     def from_env(cls) -> "VisualModel":
         env_file = os.environ.get("ARC_ENV_FILE", "").strip()
-        load_dotenv(env_file or ".env", override=False)
+        load_dotenv(env_file or ".env", override=False, encoding="utf-8-sig")
         return cls(
             model=os.environ.get("VISUAL_MODEL", "").strip()
             or os.environ.get("MODEL", "").strip(),

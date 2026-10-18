@@ -41,7 +41,7 @@ def _record_usage(root: Path, model: str, usage: dict[str, Any]) -> None:
         return
     path = root / ".arc" / "cost_stack.json"
     try:
-        state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        state = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
         currency, input_hit_rate, input_miss_rate, output_rate = pricing(model)
         prompt = int(usage.get("prompt_tokens") or 0)
         completion = int(usage.get("completion_tokens") or 0)

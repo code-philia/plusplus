@@ -1,7 +1,9 @@
 """Compile generated skeletons with the initialized project's compiler settings."""
 import subprocess
+import os
 import tempfile
 from pathlib import Path
+from utils.encoding import utf8_environment
 from utils.jsonio import read_json, write_json_atomic
 
 
@@ -33,7 +35,8 @@ def check_compilation(output, stage):
             })
             try:
                 process = subprocess.run(['node', str(compiler), '-p', str(check_config)],
-                                         cwd=output, capture_output=True, text=True, timeout=60)
+                                         cwd=output, capture_output=True, text=True, encoding='utf-8',
+                                         errors='replace', env=utf8_environment(os.environ), timeout=60)
                 result = {'status': 'COMPILED' if process.returncode == 0 else 'COMPILATION_FAILED',
                           'exit_code': process.returncode, 'output': (process.stdout + process.stderr).strip()}
             except (OSError, subprocess.TimeoutExpired) as exc:

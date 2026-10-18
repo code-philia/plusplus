@@ -7,13 +7,14 @@ import sys
 import time
 from pathlib import Path
 from compiler import CompilationRequest, Compiler
+from utils.encoding import configure_utf8_console
 
 
 def _ensure_dotenv_loaded() -> None:
     from dotenv import load_dotenv
     path = Path(os.environ.get('ARC_ENV_FILE') or Path(__file__).resolve().parents[2] / '.env')
     if path.is_file():
-        load_dotenv(path, override=False)
+        load_dotenv(path, override=False, encoding="utf-8-sig")
 
 
 def _locate_requirement_file(input_path: str) -> str:
@@ -42,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    configure_utf8_console()
     args = build_parser().parse_args()
     try:
         if args.command == 'config':

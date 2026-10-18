@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         if req_path.exists() or dep_path.exists():
             if not req_path.is_file() or not dep_path.is_file():
                 raise ValueError('Existing preprocessing artifacts are incomplete; they will not be overwritten')
-            requirements = json.loads(req_path.read_text(encoding='utf-8'))
+            requirements = json.loads(req_path.read_text(encoding='utf-8-sig'))
             if source and requirements.get('source', {}).get('sha256') != hashlib.sha256(source.read_bytes()).hexdigest():
                 raise ValueError('Requirements differ from existing preprocessing; use a new workspace')
         else:
@@ -49,8 +49,8 @@ def main(argv: list[str] | None = None) -> int:
         if reference_root is None and any(page.get('reference') for node in requirements['nodes'].values()
                                           for page in node.get('pages', [])):
             raise ValueError('Provide requirement_path or --reference-root to resolve visual reference images')
-        database = json.loads((arc / 'design/database/er_model.json').read_text(encoding='utf-8'))
-        backend = json.loads((arc / 'design/backend/backend_ir.json').read_text(encoding='utf-8'))
+        database = json.loads((arc / 'design/database/er_model.json').read_text(encoding='utf-8-sig'))
+        backend = json.loads((arc / 'design/backend/backend_ir.json').read_text(encoding='utf-8-sig'))
         result = FrontendDesignPass(Model.from_env(), arc, reference_root=reference_root).compile(
             requirements, database, backend)
         for warning in result.warnings:

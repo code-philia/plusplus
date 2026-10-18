@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from compiler.build.stage import ProjectBuilder
+from utils.encoding import utf8_environment
 from utils.jsonio import write_json_atomic
 from .runtime import HTML_TAG, RUNTIME_PATH, normalize_environment, render_runtime_source
 
@@ -36,7 +37,7 @@ def check_validation_readiness(root: Path, *, validation: bool = False) -> None:
                        'DATABASE_URL': str(Path(directory) / 'probe.db')}
         with tempfile.TemporaryFile() as output:
             process = subprocess.Popen(['node', 'dist/validation/start.js' if validation else 'dist/server.js'], cwd=root / 'backend',
-                                       env=environment, stdout=output, stderr=subprocess.STDOUT)
+                                       env=utf8_environment(environment), stdout=output, stderr=subprocess.STDOUT)
             try:
                 deadline = time.monotonic() + 30
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -77,9 +78,9 @@ def disable_validation_startup(root: Path) -> None:
     marker = root / MARKER
     if not marker.is_file():
         return
-    state = json.loads(marker.read_text(encoding="utf-8"))
+    state = json.loads(marker.read_text(encoding="utf-8-sig"))
     backend = root / "backend/package.json"
-    package = json.loads(backend.read_text(encoding="utf-8"))
+    package = json.loads(backend.read_text(encoding="utf-8-sig"))
     if package.get("scripts", {}).get("start") == START_COMMAND:
         package["scripts"]["start"] = state["original_backend_start"]
         write_json_atomic(backend, package)
@@ -106,9 +107,9 @@ class ValidationPreparationPass:
         if not (self.root / "backend/src/server.ts").is_file():
             raise ValueError("Validation preparation requires an initialized application")
         backend_package = self.root / "backend/package.json"
-        package = json.loads(backend_package.read_text(encoding="utf-8"))
+        package = json.loads(backend_package.read_text(encoding="utf-8-sig"))
         marker = self.root / MARKER
-        previous = json.loads(marker.read_text(encoding="utf-8")) if marker.is_file() else {}
+        previous = json.loads(marker.read_text(encoding="utf-8-sig")) if marker.is_file() else {}
         original_start = package.get("scripts", {}).get("start")
         if original_start == START_COMMAND:
             original_start = previous.get("original_backend_start")

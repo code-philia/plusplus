@@ -112,7 +112,7 @@ class BackendDesignPass:
         result = {key: copy.deepcopy(node[key]) for key in ('id', 'name', 'description', 'scenarios', 'pages') if key in node}
         # Visual stage stores analysis separately; attach only this leaf's reference evidence.
         cache_path = self.artifact_root / 'visual_cache.json'
-        cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
+        cache = json.loads(cache_path.read_text(encoding='utf-8-sig')) if cache_path.is_file() else {}
         for page in result.get('pages', []):
             reference = page.get('reference')
             normalized = str(reference or '').replace('\\', '/')
