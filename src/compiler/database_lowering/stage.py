@@ -52,7 +52,7 @@ def create_statement(table):
 
 
 class DatabaseLoweringPass:
-    def compile(self, schema, output_dir):
+    def compile(self, schema, output_dir, *, dry_run=False):
         if schema.get('ir_kind') != 'database_schema' or schema.get('status') != 'RESOLVED':
             raise ValueError('Database lowering requires a RESOLVED SchemaIR')
         files = runtime_sources([create_statement(table) for table in schema['tables']])
@@ -69,5 +69,7 @@ class DatabaseLoweringPass:
                 'shared_modules': [{'id': 'SYSTEM.DB_CLIENT', 'name': 'Database connection', 'file_path': 'backend/src/db/client.ts'},
                     {'id': 'SYSTEM.DB_SCHEMA', 'name': 'Database table initialization', 'file_path': 'backend/src/db/initialize.ts'},
                     {'id': 'SYSTEM.SEED', 'name': 'Startup reset and cumulative seed', 'file_path': SEED_PATH}]}
+        if dry_run:
+            return plan, files
         return write_stage(output_dir, 'database', plan, files,
                            bootstrap_files={'backend/src/db/client.ts', 'backend/src/db/initialize.ts'})

@@ -24,12 +24,37 @@ def main(stage, argv=None):
         else:
             from compiler.frontend_lowering import FrontendLoweringPass
             lowerer = FrontendLoweringPass(component_depth=args.component_depth, min_nodes=args.min_component_nodes)
-        plan = lowerer.compile(requirements, design, output)
+        from .recovery import isolate_design, minimal_lowering, bind_recovery, leaf_ids
+        from utils.jsonio import read_json, write_json_atomic
+        reasons = {}
+        if stage == 'backend':
+            reasons.update(read_json(arc / 'lowering/database/plan.json', {}).get('recovery_requirements', {}))
+        try:
+            plan = lowerer.compile(requirements, design, output)
+        except Exception as exc:
+            print(f'WARNING: isolating {stage} design conflicts: {exc}')
+            try:
+                plan, design = isolate_design(stage, lowerer, requirements, design, output)
+                reasons.update(plan.pop('recovery_reasons', {}))
+            except Exception as isolation_error:
+                reasons.update({rid: str(isolation_error)[:1000] for rid in leaf_ids(requirements)})
+                plan, design = minimal_lowering(stage, lowerer, requirements, output)
+        from .compilation import check_compilation
+        check_result = check_compilation(output, stage)
+        if check_result['status'] != 'COMPILED':
+            reasons.update({rid: str(check_result)[:1000] for rid in leaf_ids(requirements)})
+            plan, design = minimal_lowering(stage, lowerer, requirements, output)
+        states = read_json(arc / 'design' / stage / 'report.json', {}).get('node_states', {})
+        for rid in leaf_ids(requirements):
+            if states.get(rid) in {'FAILED', 'SKIPPED'}:
+                if stage == 'backend' or requirements['nodes'][rid].get('pages'):
+                    reasons[rid] = f'{stage} design incomplete; implement from the requirement.'
+        plan = bind_recovery(output, stage, plan, reasons)
+        write_json_atomic(arc / f'design/{stage}/{stage}_ir.json', design)
         print(f'{stage} lowering: {len(plan["files"])} source files')
         print(f'Plan: {arc / "lowering" / stage / "plan.json"}')
         print(f'Generated entrypoint: {plan["entrypoint"]}')
-        from .compilation import check_compilation
-        result = check_compilation(output, stage)
+        result = check_compilation(output, stage) if reasons else check_result
         print(f'Compilation: {result["status"]}')
         if result.get('output') or result.get('message'):
             print(result.get('output') or result['message'])

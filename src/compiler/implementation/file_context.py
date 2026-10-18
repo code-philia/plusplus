@@ -27,6 +27,7 @@ class FileContext:
         self.root = Path(root).resolve()
         self.requirements, self.database, self.backend, self.frontend = requirements, database, backend, frontend
         self.catalog = {}
+        self.recovery = {}
         def add(path, symbol, reqs=(), shared=False, spec='', kind='source', contracts=None):
             if not path:
                 return
@@ -62,6 +63,13 @@ class FileContext:
                 add(path, key, shared=True, spec=summary)
         for row in database_plan.get('tables', []):
             add(row['file_path'], 'TABLE.' + row['name'], row['reqs'], True, row['name'])
+        for layer, plan in (('backend', backend_plan), ('frontend', frontend_plan)):
+            for row in plan.get('recovery', []):
+                rid = row['requirement_id']
+                self.recovery.setdefault(rid, {})[layer] = copy.deepcopy(row)
+                for path in row['file_paths']:
+                    add(path, 'RECOVERY.' + rid + '.' + path, [rid], spec=row['reason'],
+                        contracts={'reqs': [rid], 'recovery': True, 'reason': row['reason']})
         # Existing project files remain discoverable; source can be loaded for composition/helpers.
         for directory in ('backend/src', 'frontend/src', 'shared/src', 'tests/support'):
             base = self.root / directory
@@ -151,6 +159,10 @@ class FileContext:
         elif phase == 'frontend_implementation':
             source_paths = {path for path in source_paths
                             if path.startswith('frontend/') or path.startswith('shared/')}
+            recovered_backend = self.recovery.get(rid, {}).get('backend')
+            if recovered_backend:
+                source_paths.update(recovered_backend['file_paths'])
+                source_paths.add('backend/src/app.ts')
         # Include failing regression tests even when owned by an earlier requirement.
         # Only known test files may be selected from untrusted runner output.
         failing_tests = set()
@@ -245,7 +257,8 @@ class FileContext:
                 for ref in refs(definitions[name]['schema']) - wanted_types:
                     wanted_types.add(ref); pending.append(ref)
         data_access = self.database.get('access', {}).get(rid, {'read': [], 'write': []})
-        return {'current_task': {'requirement': requirement, 'phase': phase, 'data_access': data_access},
+        return {'current_task': {'requirement': requirement, 'phase': phase, 'data_access': data_access,
+                                 **({'recovery': self.recovery[rid]} if rid in self.recovery else {})},
                 'current_contracts': contracts, 'types': [definitions[key] for key in sorted(wanted_types) if key in definitions],
                 'editable_files': editable, 'read_only_files': readonly,
                 'shared_catalog': shared, 'related_catalog': related,

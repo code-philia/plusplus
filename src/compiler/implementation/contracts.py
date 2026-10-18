@@ -13,6 +13,15 @@ You implement ONE leaf requirement in a generated TypeScript Express/React appli
 The database, backend and frontend symbol tables and lowering plans supply exact contracts and file paths.
 Parent descriptions constrain behavior; dependency requirements are not additional implementation tasks.
 Preserve previously implemented behavior, especially when files/components are shared.
+When current_task.recovery is present, design or lowering could not supply complete contracts.
+Its file_paths are loaded editable recovery files, not implemented modules. Derive missing interfaces
+and behavior from the requirement/scenarios, implement those files, and load shared app/router,
+page composition, types or database initialization to wire the real flows. Recovery placeholders
+impose no signatures or routes. Preserve valid existing behavior; do not treat an incomplete IR as
+a reason to abandon this requirement. Generate HTTP/browser acceptance tests from observable
+behavior without importing nonexistent recovery exports; source implementation follows test generation.
+During frontend recovery, the recovered backend files and app.ts may be supplied read-only so
+you can integrate actual routes even when design-stage API contracts were unavailable.
 
 ## File scope and incremental loading
 editable_files contains current full text for the entire writable allowlist.

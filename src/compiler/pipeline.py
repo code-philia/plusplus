@@ -164,23 +164,44 @@ class Compiler:
                 else:
                     await complete_design(database, root / 'design/database/schema.json')
 
-            async def lower_impl(name, lowerer, *args):
+            from .lowering.recovery import isolate_design, bind_recovery, minimal_lowering
+            recovery_reasons = {name: {} for name in ('database', 'backend', 'frontend')}
+
+            async def lower(name, lowerer, *args):
                 await begin(name + '_lowering')
-                plan = None
+                plan, effective = None, args[-1]
+                def render():
+                    render_args = (effective,) if name == 'database' else (requirements, effective)
+                    return lowerer.compile(*render_args, output)
                 def check():
-                    nonlocal plan
                     try:
-                        if plan is None:
-                            plan = lowerer.compile(*args, output)
                         compilation = check_compilation(output, name)
                         return {'ok': compilation['status'] == 'COMPILED', 'compilation': compilation}
                     except Exception as exc:
                         return {'ok': False, 'errors': [str(exc)]}
+                try:
+                    plan = render()
+                except Exception as exc:
+                    await self._log(f'{name}: isolating unlowerable design: {exc}', 'warning')
+                    try:
+                        plan, effective = isolate_design(name, lowerer, requirements, effective, output)
+                        recovery_reasons[name].update(plan.pop('recovery_reasons', {}))
+                    except Exception as isolation_error:
+                        recovery_reasons[name].update({rid: str(isolation_error)[:1000] for rid in leaves})
+                        plan, effective = minimal_lowering(name, lowerer, requirements, output)
                 result = check()
                 if not result['ok']:
-                    result = repair_gate(model, output, name + '_lowering', check, result, contracts=args[-1])
+                    try:
+                        result = repair_gate(model, output, name + '_lowering', check, result, contracts=effective)
+                    except Exception as exc:
+                        await self._log(f'{name}: lowering repair unavailable; using recovery scaffolding: {exc}', 'warning')
+                if not result['ok']:
+                    # The populated source plan still cannot compile. Replace only
+                    # stage-owned scaffolding, preserving user-modified files.
+                    recovery_reasons[name].update({rid: str(result)[:1000] for rid in leaves})
+                    plan, effective = minimal_lowering(name, lowerer, requirements, output)
+                    result = check()
                 if result['ok']:
-                    # Repairs become the stage's installed source baseline.
                     manifest_path = root / 'lowering' / name / 'manifest.json'
                     manifest = read_json(manifest_path, {})
                     from .lowering.files import digest
@@ -189,25 +210,13 @@ class Compiler:
                     write_json_atomic(manifest_path, manifest)
                     await finish(root / 'lowering' / name / 'plan.json')
                 else:
-                    message = name + '_lowering: repair budget exhausted: ' + str(result)
-                    errors.append(message)
-                    reports[-1].update(status='FAILED', errors=[message])
-                    save('RUNNING')
-                    await self._log(message, 'warning')
-                if plan is None:
-                    plan = {'modules': [], 'components': [], 'handlers': [], 'ui': [], 'data': [],
-                            'events': [], 'types': [], 'files': []}
-                return plan
+                    await stage_failed(name + ': minimal framework still needs repair: ' + str(result))
+                if recovery_reasons[name]:
+                    filename = 'schema.json' if name == 'database' else name + '_ir.json'
+                    write_json_atomic(root / 'design' / name / filename, effective)
+                return plan, effective
 
-            async def lower(name, lowerer, *args):
-                try:
-                    return await lower_impl(name, lowerer, *args)
-                except Exception as exc:
-                    await stage_failed(exc)
-                    return {'modules': [], 'components': [], 'handlers': [], 'ui': [], 'data': [],
-                            'events': [], 'types': [], 'files': []}
-
-            database_plan = await lower('database', DatabaseLoweringPass(), database.schema)
+            database_plan, database.schema = await lower('database', DatabaseLoweringPass(), database.schema)
             await self._log('Waiting for visual evidence before backend design.')
             try:
                 visual_future.result()
@@ -226,7 +235,8 @@ class Compiler:
                     errors=['Backend design unavailable'], warnings=[]))
             if reports[-1]['status'] == 'RUNNING':
                 await complete_design(backend, root / 'design/backend/backend_ir.json')
-            backend_plan = await lower('backend', BackendLoweringPass(), requirements, backend.ir)
+            backend_plan, backend.ir = await lower('backend', BackendLoweringPass(), requirements, backend.ir)
+            write_json_atomic(root / 'design/backend/backend_ir.json', backend.ir)
 
             await begin('frontend_design')
             from .frontend_design.delta import make_ui
@@ -238,34 +248,49 @@ class Compiler:
                     errors=['Frontend design unavailable'], warnings=[]))
             if reports[-1]['status'] == 'RUNNING':
                 await complete_design(frontend, root / 'design/frontend/frontend_ir.json')
-            frontend_plan = await lower('frontend', FrontendLoweringPass(), requirements, frontend.ir)
+            frontend_plan, frontend.ir = await lower('frontend', FrontendLoweringPass(), requirements, frontend.ir)
+            write_json_atomic(root / 'design/frontend/frontend_ir.json', frontend.ir)
 
             # FileContext derives requirement/file associations from the lowering
             # plans directly; no second binding registry is persisted.
             states.update({rid: 'LOWERED' for rid in leaves})
 
-            skipped = {rid for result in (backend, frontend) for rid, state in result.node_states.items()
-                       if state in {'SKIPPED', 'FAILED'}}
-            skipped.update(rid for rid, state in database.node_states.items() if rid in leaves and state == 'FAILED')
-            if skipped:
-                failed.extend(sorted(skipped))
-                failed[:] = sorted(set(failed))
-                for rid in skipped:
-                    states[rid] = 'DESIGN_FAILED'
-                message = 'Design exhausted its attempts; skipping requirements: ' + ', '.join(sorted(skipped))
-                errors.append(message)
+            backend_recovery = dict(recovery_reasons['backend'])
+            frontend_recovery = dict(recovery_reasons['frontend'])
+            from .frontend_design.validation import ui_index
+            ui_nodes, _ = ui_index(frontend.ir['ui'])
+            backend_owners = {rid for row in backend.ir['modules'] for rid in row['reqs']}
+            ui_owners = {rid for row in ui_nodes.values() for rid in row['reqs']}
+            for rid in leaves:
+                if backend.node_states.get(rid) in {'SKIPPED', 'FAILED'}:
+                    backend_recovery[rid] = 'Backend design unavailable; implement from the requirement.'
+                if database.node_states.get(rid) in {'FAILED', 'SKIPPED'} or rid in recovery_reasons['database']:
+                    backend_recovery[rid] = 'Database design/lowering incomplete; repair shared initialization as needed.'
+                if frontend.node_states.get(rid) in {'SKIPPED', 'FAILED'} and requirements['nodes'][rid].get('pages'):
+                    frontend_recovery[rid] = 'Frontend design unavailable; implement the declared pages from the requirement.'
+                if requirements['nodes'][rid].get('pages') and rid not in ui_owners:
+                    frontend_recovery.setdefault(rid, 'No UI files bound; implement the declared pages from the requirement.')
+                if rid not in backend_owners and rid not in ui_owners and rid not in frontend_recovery:
+                    backend_recovery.setdefault(rid, 'No source files bound; implement from the requirement.')
+                if rid in backend_recovery and requirements['nodes'][rid].get('pages'):
+                    frontend_recovery.setdefault(rid, 'Integrate the recovered backend behavior with the declared pages.')
+            backend_plan = bind_recovery(output, 'backend', backend_plan, backend_recovery)
+            frontend_plan = bind_recovery(output, 'frontend', frontend_plan, frontend_recovery)
+            recovered = set(backend_recovery) | set(frontend_recovery)
+            for rid in recovered:
+                states[rid] = 'LOWERED_WITH_RECOVERY'
+            if recovered:
+                message = 'Recovery files bound; continuing implementation for: ' + ', '.join(sorted(recovered))
                 reports[-1].setdefault('warnings', []).append(message)
                 save('RUNNING')
-                await self._log(message + '; continuing remaining requirements and build.', 'warning')
+                await self._log(message, 'warning')
             if not request.stop_after_lowering:
                 await begin('implementation')
                 try:
                     implementation = NodeTDDOrchestrator(model, output, port=request.web_port).compile(
                         requirements, database.er_model, backend.ir, frontend.ir,
-                        backend_plan, frontend_plan, database_plan, skip_requirements=skipped)
+                        backend_plan, frontend_plan, database_plan)
                     states.update(implementation.node_states)
-                    for rid in skipped:
-                        states[rid] = 'DESIGN_FAILED'
                     failed.extend(rid for rid in leaves if states[rid] not in {'IMPLEMENTED', 'ALREADY_PASSED'})
                     failed[:] = sorted(set(failed))
                     if implementation.ok and not failed:

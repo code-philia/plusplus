@@ -74,7 +74,9 @@ class NodeTDDOrchestrator:
         self.runner.prepare()
         children = children_by_id(requirements)
         order = [rid for rid in postorder(requirements) if not children[rid]]
-        environment = self.runner.check_environment(browser=bool(frontend['ui']['children']))
+        needs_browser = bool(frontend['ui']['children']) or any(
+            'frontend' in layers for layers in self.context.recovery.values())
+        environment = self.runner.check_environment(browser=needs_browser)
         self._gate('BASELINE', 'environment', environment)
         if not passed(environment):
             return self._report({rid: 'BLOCKED_ENVIRONMENT' for rid in order},
@@ -88,7 +90,8 @@ class NodeTDDOrchestrator:
         baseline = self.runner.compile()
         if not passed(baseline):
             self._gate('BASELINE', 'compilation', baseline)
-            return self._report({}, ['Baseline compilation failed before TDD'], [])
+            self.log.warning('Baseline compilation needs repair; continuing with requirement recovery files.')
+        baseline_needs_repair = not passed(baseline)
         # Process leaf dependencies before dependents; never design/implement parent nodes.
         pending, scheduled, active = set(order), [], set()
         def visit(rid):
@@ -124,8 +127,14 @@ class NodeTDDOrchestrator:
                 continue
             session, snapshots = WorkingContext(), {}
             evidence = []
+            repaired_baseline = False
             try:
-                targets = self._targets(rid, backend, frontend)
+                if baseline_needs_repair:
+                    self._model_patch('repair', rid, session, [], baseline, snapshots,
+                                      accept=lambda: self.runner.compile())
+                    baseline_needs_repair = False
+                    repaired_baseline = True
+                targets = self._targets(rid, backend, frontend, recovery=self.context.recovery.get(rid, {}))
                 self.test_manifest[rid] = targets
                 for path in targets:
                     self.context.catalog[path] = {'file_path': path, 'symbol_ids': ['TEST.' + path],
@@ -177,6 +186,7 @@ class NodeTDDOrchestrator:
                     restore(self.root, snapshots)
                 except Exception as rollback_exc:
                     errors.append(f'{rid}: rollback failed: {rollback_exc}')
+                baseline_needs_repair = baseline_needs_repair or repaired_baseline
                 states[rid] = 'FAILED_ROLLED_BACK'
                 errors.append(f'{rid}: {exc}')
                 self.log.error(errors[-1], node_id=rid)
@@ -212,16 +222,16 @@ class NodeTDDOrchestrator:
         return results
 
     @staticmethod
-    def _targets(rid, backend, frontend):
+    def _targets(rid, backend, frontend, *, recovery=None):
         stem = slug(rid) + '-' + token(rid)
         kinds = {row['kind'] for row in backend['modules'] if rid in row['reqs']}
         targets = []
         if 'FUNC' in kinds:
             targets.append(f'tests/unit/{stem}.test.ts')
-        if kinds & {'API', 'DB'}:
+        if kinds & {'API', 'DB'} or recovery and 'backend' in recovery:
             targets.append(f'tests/integration/{stem}.test.ts')
         nodes, _ = ui_index_local(frontend)
-        if any(rid in row['reqs'] for row in nodes.values()):
+        if any(rid in row['reqs'] for row in nodes.values()) or recovery and 'frontend' in recovery:
             targets.append(f'tests/e2e/{stem}.spec.ts')
         if not targets:
             raise ValueError(f'No appropriate acceptance layer for {rid}')

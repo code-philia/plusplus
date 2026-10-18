@@ -8,7 +8,7 @@ from compiler.backend_design.validation import graph_errors, route_key
 
 
 class BackendLoweringPass:
-    def compile(self, requirements, backend, output_dir):
+    def compile(self, requirements, backend, output_dir, *, dry_run=False):
         if backend.get('ir_kind') != 'backend_design':
             raise ValueError('Expected backend_design IR')
         modules = backend['modules']
@@ -88,4 +88,6 @@ class BackendLoweringPass:
         plan = {'ir_kind': 'backend_lowering', 'strategy': 'deterministic_parent_groups',
                 'entrypoint': 'backend/src/server.ts', 'modules': records, 'routes': routes,
                 'types': [{'name': row['name'], 'file_path': types_path, 'export': row['name']} for row in backend['types']]}
+        if dry_run:
+            return plan, files
         return write_stage(output_dir, 'backend', plan, files, bootstrap_files={'backend/src/app.ts', 'backend/src/server.ts'})

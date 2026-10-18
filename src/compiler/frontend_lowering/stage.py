@@ -13,7 +13,7 @@ class FrontendLoweringPass:
             raise ValueError('component_depth >= 1 and min_nodes >= 2 required')
         self.component_depth, self.min_nodes = component_depth, min_nodes
 
-    def compile(self, requirements, frontend, output_dir):
+    def compile(self, requirements, frontend, output_dir, *, dry_run=False):
         if frontend.get('ir_kind') != 'frontend_design':
             raise ValueError('Expected frontend_design IR')
         nodes, parents = ui_index(frontend['ui'])
@@ -128,4 +128,6 @@ class FrontendLoweringPass:
                 'app': {'ui_id': frontend['ui']['id'], 'file_path': app_path, 'export': 'App'},
                 'components': components, 'ui': ui_records, 'data': data_records, 'events': events,
                 'handlers': handlers, 'types': [{'name': row['name'], 'file_path': types_path, 'export': row['name']} for row in frontend['types']]}
+        if dry_run:
+            return plan, files
         return write_stage(output_dir, 'frontend', plan, files, bootstrap_files={'frontend/src/App.tsx', 'frontend/src/main.tsx'})
