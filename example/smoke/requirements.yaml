@@ -1,0 +1,131 @@
+id: ROOT
+name: Train Ticket Booking Demo
+type: FOLDER
+dependencies: []
+pages: []
+description: |-
+  这是一个小型网站，访客可以注册，或使用已存在的旅客账户登录。场景 GIVEN 中明确说明数据库已存在的账户属于应用预置数据；在实现账户功能时累积维护 seed，并使用与注册一致的密码哈希格式保存凭据。每个场景使用独立数据库，自动初始化截至当前实现已累积的预置数据；浏览器初始无会话，预置账户不等于预置登录状态。
+
+  首页和注册页的共享导航提供 "Home"(role=link)、"Booking"(role=link)、"Travel guides"(role=link)、"My 12306"(role=link)、"简体中文"(role=button) 和 "Contact us"(role=link)，可见文案与参考图片完全一致。账户入口控件及其行为见 REQ-1。每个页面的页脚提供 "Privacy Policy"(role=link) 和 "Cookie Statement"(role=link)，可见文案和可访问名称相同。名称重复的控件通过其语义位置区分，例如注册协议区域与页脚。这里明确了参考控件的展示和交互身份.
+children:
+  - id: REQ-1
+    name: Public home page and account access
+    type: ATOMIC
+    dependencies: []
+    pages:
+      - name: home
+        reference: ./reference/homepage.png
+    description: |-
+      未登录状态下，首页 / 显示 "Register"(role=link)，点击后打开 /register；同时显示 "Login"(role=link)，点击后打开 /login。注册或登录成功后，页头以文本显示已保存的用户名，并提供 "Sign out"(role=link)；点击 Sign out 清除持久保存的会话，恢复 Register 和 Login 链接。注册创建账户及会话；登录为已有账户重新建立会话。未登录状态的参考图片没有展示登录后的 Sign out 操作；其精确可见文案和可访问名称均为 "Sign out"。
+
+      首页参考图还展示了可编辑的 "From"(role=textbox)、"To"(role=textbox) 和 "Date"(role=textbox)，各自使用上述可见标签和可访问名称；"Search"(role=button) 的可见文案为 "Search"，"High-speed trains only"(role=checkbox) 使用上述可见标签和可访问名称。交换车站图标的 role=button，可访问名称为 "Swap stations"，没有可见文本。三个横幅指示器的 role=button，可访问名称分别为 "Show banner 1"、"Show banner 2" 和 "Show banner 3"，没有可见文本。由于参考图片未提供文字标签，这里明确补充这些纯图标控件的名称。
+
+      Quick Guide 区域提供 "What ID documents are accepted by 12306.cn English website?"(role=link)、"What services does 12306.cn English website provide?"(role=link)、"What is endorsement?"(role=link)、"What are the rules of ticket endorsement?"(role=link) 和 "More>"(role=link)，使用上述精确可见文案和可访问名称。账户需求未规定列车查询、横幅切换、交换车站和指南内容的行为；明确这些控件的身份，不会增加账户流程的验收条件。
+    scenarios:
+      - name: View the public home page and account entries
+        steps:
+          - keyword: GIVEN
+            content: 一位未登录访客打开首页 /。
+          - keyword: WHEN
+            content: 访客查看首页页头中的账户入口和导航。
+          - keyword: THEN
+            content: >-
+              首页显示 "Register"(role=link) 和 "Login"(role=link)，其可见文案和可访问名称精确匹配；两个链接分别指向 /register 和 /login。
+  - id: REQ-2
+    name: Register a traveler account
+    type: ATOMIC
+    dependencies: []
+    pages:
+      - name: registration
+        reference: ./reference/register.png
+    description: |-
+      点击未登录页头中的 "Register"(role=link)，打开 /register 注册页。面包屑的可见文案为 "Current location: HOME > Create an account"；其中 "HOME"(role=link) 返回 /，"Create an account" 是当前页面的文本。表单遵循提供的参考图片，按展示顺序明确以下交互身份：
+
+      "Nationality"(role=combobox) 的可见标签为 "Nationality"，初始显示 "Please select"，包含可选择的 "Vietnam"(role=option)。"Name"(role=textbox) 和 "Passport number"(role=textbox) 使用上述精确可见标签。"Passport expiration date"(role=textbox) 和 "Date of birth"(role=textbox) 使用上述精确可见标签，允许输入日期。如果其日历图标可独立交互，则图标的 role=button，没有可见文本，可访问名称分别为 "Choose passport expiration date" 和 "Choose date of birth"。"Gender"(role=radiogroup) 的可见分组标签为 "Gender"，包含 "Male"(role=radio) 和 "Female"(role=radio)，使用上述精确可见标签和可访问名称。
+
+      "Username"(role=textbox) 的可见标签为 "Username"。隐藏输入内容的两个密码字段，其可见标签和可访问名称分别为 "Password" 和 "Confirm Password"，没有隐式 ARIA role。"Email address"(role=textbox) 使用上述精确可见标签。帮助链接的可见文案和可访问名称为 "Check the rules for filling out passport information"(role=link)。
+
+      协议控件的 role=checkbox，可见标签和可访问名称均为 "I have read and agree to abide by Terms of Service and Privacy Policy of 12306.cn."。其中可独立交互的 "Terms of Service"(role=link) 和 "Privacy Policy"(role=link) 使用上述精确可见文案；它们位于协议区域，与页脚的 Privacy Policy 链接区分。提交操作为 "Next step"(role=button)，可见文案和可访问名称均为 "Next step"。护照信息填写指南和协议链接保留上述交互身份；其文档内容不属于本账户创建需求。
+
+      所有字段均为必填，且必须勾选同意协议。姓名必须包含 2–100 个非空白字符；护照号码必须包含 6–30 个 ASCII 字母、数字或连字符；出生日期必须早于当前日期，护照有效期必须晚于当前日期。用户名必须包含 3–32 个 ASCII 字母、数字、连字符或下划线。邮箱格式必须有效，长度最多 254 个字符。密码必须包含 12–128 个字符，且包含大写字母、小写字母、数字和特殊字符；Confirm Password 必须与 Password 一致。用户名和邮箱必须唯一，邮箱比较不区分大小写。通过 Next step 提交有效信息后，保存账户、自动登录并返回首页。无效或重复的输入需要显示错误，且不创建账户或会话。
+    scenarios:
+      - name: Register a valid traveler
+        steps:
+          - keyword: GIVEN
+            content: >-
+              一位未登录访客打开 /，准备好未使用的用户名和邮箱、有效的姓名和护照号码、国籍 Vietnam、早于当前日期的出生日期、晚于当前日期的护照有效期，以及有效密码。
+          - keyword: WHEN
+            content: >-
+              访客点击页头的 "Register"(role=link)，在 "Nationality"(role=combobox) 中选择 Vietnam，填写 "Name"(role=textbox)、"Passport number"(role=textbox)、"Passport expiration date"(role=textbox)、"Date of birth"(role=textbox)、"Username"(role=textbox) 和 "Email address"(role=textbox)，在 "Gender"(role=radiogroup) 中选择 "Male"(role=radio)，在带标签的密码输入框 "Password" 和 "Confirm Password" 中填写相同的有效密码，勾选 "I have read and agree to abide by Terms of Service and Privacy Policy of 12306.cn."(role=checkbox)，然后点击 "Next step"(role=button)。
+          - keyword: THEN
+            content: >-
+              首页以可见文本显示已保存的用户名，并显示 "Sign out"(role=link)，使用上述精确可见文案和可访问名称；刷新页面后仍显示该用户名和已登录状态下的操作。
+      - name: Reject a username already used by a pre-existing traveler
+        steps:
+          - keyword: GIVEN
+            content: |-
+              数据库中已经有一位旅客，用户名 taken_traveler，邮箱 taken.traveler@example.com，登录密码 TakenSmoke!2026。
+              其国籍为 Vietnam，姓名为 Existing Traveler，护照号码为 VNTAKEN001，护照有效期为 2099-12-31，出生日期为 1990-04-12，性别为 Male；注册时已同意协议。
+              该账户在场景开始前已存在，不能通过本场景注册操作创建。访客未登录，打开首页 /，准备另一个未使用的邮箱以及符合注册规则的其余字段。
+          - keyword: WHEN
+            content: 访客点击 Register 打开注册表单，填写用户名 taken_traveler、未使用的邮箱及其他有效必填信息，勾选协议并点击 Next step。
+          - keyword: THEN
+            content: 表单显示用户名已被使用的错误，不创建新账户或会话。刷新首页后仍显示 Register 和 Login，原有账户的用户名、邮箱和凭据保持不变。
+  - id: REQ-3
+    name: Log in with an existing traveler account
+    type: ATOMIC
+    dependencies:
+      - REQ-1
+      - REQ-2
+    pages:
+      - name: login
+        reference: ./reference/login.png
+      - name: home
+        reference: ./reference/homepage.png
+    description: |-
+      未登录访客点击首页的 "Login"(role=link) 打开 /login。登录页遵循参考图片，标题文本为 "Login"，账户输入框的可访问名称及占位文本均为 "Email/Username/Mobile number"(role=textbox)；密码输入框的可访问名称及占位文本均为 "Password"，输入类型为 password。提交按钮的可见文本和可访问名称均为 "LOGIN"(role=button)。登录支持用户名或邮箱；邮箱比较不区分大小写。本需求没有手机号注册流程，输入框文案与参考图一致即可，无需增加手机号登录。
+      "Register now"(role=link) 打开 /register；"Forgot your password"(role=link) 保留参考图的展示身份，密码找回行为不在本需求范围内。
+      账户和密码为必填。正确凭据建立持久会话并返回首页 /，显示已保存的用户名及 "Sign out"(role=link)，刷新后仍保持登录。空输入、未知账户或错误密码显示可见错误，不创建账户或登录会话；错误不得泄露密码或密码哈希。
+      点击 Sign out 后清除持久会话，刷新仍显示 Register 和 Login。退出不会删除账户；同一凭据可再次登录。预置账户和注册创建的账户使用同一套凭据校验机制。
+    scenarios:
+      - name: Log in with the username of a preloaded traveler
+        steps:
+          - keyword: GIVEN
+            content: |-
+              一位未登录访客打开首页 /。系统在测试开始前已有账户 smoke_traveler，邮箱 smoke.traveler@example.com，正确密码 SmokeLogin!2026。
+              这位旅客的完整资料是：国籍 Vietnam，姓名 Smoke Traveler，护照号码 VNSMOKE001，护照有效期 2099-12-31，出生日期 1992-08-15，性别 Female，已同意注册协议。
+              这些资料作为预置账户保存；密码按照应用真实凭据格式编码，不建立初始会话，也不由测试调用注册接口准备。
+          - keyword: WHEN
+            content: 点击首页 Login，在 Email/Username/Mobile number 中输入 smoke_traveler，在 Password 中输入 SmokeLogin!2026，然后点击 LOGIN。
+          - keyword: THEN
+            content: 返回首页 /，显示用户名 smoke_traveler 和 Sign out，Register 和 Login 不再显示；刷新页面后仍显示 smoke_traveler 和 Sign out。
+      - name: Log in with an email using different letter case
+        steps:
+          - keyword: GIVEN
+            content: |-
+              浏览器没有登录会话；数据库已预置 smoke_traveler，其邮箱为 smoke.traveler@example.com，密码为 SmokeLogin!2026。
+              账户资料为 Vietnam、Smoke Traveler、VNSMOKE001、护照有效期 2099-12-31、出生日期 1992-08-15、Female、已同意协议。它是上述登录场景的同一个账户，不重复插入第二条记录。
+          - keyword: WHEN
+            content: 从首页 Login 打开登录页，输入邮箱 SMOKE.TRAVELER@EXAMPLE.COM 和正确密码 SmokeLogin!2026，点击 LOGIN。
+          - keyword: THEN
+            content: 成功返回首页，显示账户用户名 smoke_traveler 而不是输入的邮箱；刷新后登录状态仍然保持。
+      - name: Reject an incorrect password without changing the account
+        steps:
+          - keyword: GIVEN
+            content: |-
+              smoke_traveler 已存在，邮箱 smoke.traveler@example.com，正确密码 SmokeLogin!2026，旅客资料为 Vietnam、Smoke Traveler、VNSMOKE001、2099-12-31、1992-08-15、Female、已同意协议。
+              访客没有会话，从首页打开登录页；本场景使用的错误密码 WrongSmoke!2026 不属于该账户。
+          - keyword: WHEN
+            content: 输入用户名 smoke_traveler 和错误密码 WrongSmoke!2026，点击 LOGIN。
+          - keyword: THEN
+            content: 显示可见登录错误，不显示密码或哈希，不建立会话；打开首页并刷新后仍显示 Register 和 Login。随后使用同一用户名及正确密码 SmokeLogin!2026 可成功登录，证明错误尝试没有更改或删除账户。
+      - name: Sign out and log in with an earlier accumulated seed account
+        steps:
+          - keyword: GIVEN
+            content: |-
+              数据库包含注册冲突场景中已有的 taken_traveler，邮箱 taken.traveler@example.com，密码 TakenSmoke!2026；国籍 Vietnam，姓名 Existing Traveler，护照号码 VNTAKEN001，护照有效期 2099-12-31，出生日期 1990-04-12，性别 Male，已同意协议。
+              也包含登录场景中的 smoke_traveler 账户。两个账户均在场景开始前预置，浏览器无会话。
+          - keyword: WHEN
+            content: 从首页 Login 进入登录页，使用 taken_traveler 和 TakenSmoke!2026 登录；点击 Sign out，刷新首页，再使用同一凭据登录。
+          - keyword: THEN
+            content: 两次登录都显示 taken_traveler 和 Sign out；中间退出并刷新后显示 Register 和 Login。账户一直存在，加入 smoke_traveler 的预置数据没有覆盖较早的 taken_traveler。
