@@ -8,6 +8,31 @@ from .prompt_context import render_section, stage_sections
 
 CONTEXT_SEGMENTS_KEY = "context_segments"
 
+REQUIREMENT_FIDELITY = '''## Requirement fidelity
+For design, test generation, implementation and repair, explicit requirement descriptions, scenarios
+and applicable ancestor constraints define the observable product contract. Visual references, generated
+IR, existing source and convenience choices must not override that contract.
+Preserve explicitly specified UI wording and accessible names exactly, including spelling, case,
+punctuation and dynamic naming patterns. Do not translate, paraphrase, abbreviate or substitute another
+spelling unless the document explicitly permits it. Use the same names in design, source and tests.
+Preserve explicitly specified UI roles and states. A required button is a button, not a link merely
+because it navigates; fields need their specified associated labels. Implement the actual control
+semantics, not just matching text or an aria-label on a different control. Use alternatives only when
+the requirement explicitly allows them.
+At each specified scenario step, required controls and navigation entries must exist, be visible and
+be operable in the stated scope. Do not invent prerequisite expansion, hover or navigation steps that
+hide an expected input or action. Preserve these contracts in shared forms and prerequisite flows too.
+Tests must exercise the specified names, roles and states; do not broaden selectors or expected values
+to accept an implementation that contradicts explicit requirements.
+Where the requirement is silent, choose suitable wording, roles and interaction details consistent
+with the supplied visual evidence and existing application conventions. Do not invent extra obligations.
+'''
+
+
+def system_instructions(instructions: str) -> str:
+    """Apply the same requirement contract to normal and fallback model requests."""
+    return REQUIREMENT_FIDELITY + '\n' + instructions
+
 
 def user_messages(input_payload: dict[str, Any], *, schema_name: str | None = None) -> list[dict[str, str]]:
     """Render named sections, preserving compiler payloads and explicit segments."""

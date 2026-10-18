@@ -14,7 +14,8 @@ from utils.logging import SynchronousLog
 from utils.archive import snapshot_workspace
 from .contracts import SCHEMA, PROMPTS
 from .file_context import FileContext
-from .patcher import apply_edits, read_source, restore
+from .working_context import WorkingContext
+from .patcher import apply_edits, read_source, restore, source_versions
 from .test_runner import TestRunner, passed
 
 
@@ -112,7 +113,7 @@ class NodeTDDOrchestrator:
                 warnings.append(f'{rid}: no associated lowered files; not treated as implemented')
                 self.log.warning(warnings[-1], node_id=rid)
                 continue
-            loaded, snapshots = set(), {}
+            session, snapshots = WorkingContext(), {}
             evidence = []
             try:
                 targets = self._targets(rid, backend, frontend)
@@ -121,14 +122,14 @@ class NodeTDDOrchestrator:
                     self.context.catalog[path] = {'file_path': path, 'symbol_ids': ['TEST.' + path],
                         'reqs': [rid], 'shared': False, 'summaries': [rid + ' requirement-based acceptance tests'],
                         'kind': 'acceptance_test', 'contracts': []}
-                self._model_patch('test_generation', rid, loaded, targets, evidence, snapshots,
+                self._model_patch('test_generation', rid, session, targets, evidence, snapshots,
                                   accept=lambda: self._test_generation_gate(targets))
                 self.log.info('Acceptance tests compiled; implementing initial version before execution. Test corrections are permitted during repair.', node_id=rid)
                 direct = self.context.direct_files(rid)
                 for layer in ('backend', 'frontend'):
                     if not any(path.startswith(layer + '/') for path in direct):
                         continue
-                    self._model_patch(layer + '_implementation', rid, loaded, targets, [], snapshots,
+                    self._model_patch(layer + '_implementation', rid, session, targets, [], snapshots,
                                       accept=lambda: self.runner.compile() + self.runner.check_tests(completed_tests + targets))
                 # Execute only this requirement; historical test sources remain
                 # covered by the compilation gates above and during repair.
@@ -140,7 +141,7 @@ class NodeTDDOrchestrator:
                         break
                     if any(row.get('failure_kind') == 'infrastructure' for row in evidence if row['status'] != 'PASSED'):
                         raise EnvironmentBlocked('Test executor unavailable after retries; preserving accepted source: ' + str(evidence))
-                    self._model_patch('repair', rid, loaded, targets, evidence, snapshots,
+                    self._model_patch('repair', rid, session, targets, evidence, snapshots,
                                       accept=lambda: self.runner.compile() + self.runner.check_tests(completed_tests + targets))
                     evidence = self._run_tests(targets, rid, f'repair_{iteration}')
                     self._gate(rid, f'repair_{iteration}', evidence)
@@ -244,22 +245,23 @@ class NodeTDDOrchestrator:
         failures = [row for row in results if row['status'] != 'PASSED']
         return bool(failures) and all(row.get('test_evidence', {}).get('behavior_failure', False) for row in failures)
 
-    def _model_patch(self, phase, rid, loaded, targets, evidence, snapshots, accept):
+    def _model_patch(self, phase, rid, session, targets, evidence, snapshots, accept):
         feedback, previous, requests = [], None, 0
         for attempt in range(self.attempts):
             self.log.info(f'{phase} attempt {attempt + 1}/{self.attempts}', node_id=rid)
             while True:
-                payload = self.context.build(rid, phase, loaded, targets, evidence)
+                payload = self.context.build(rid, phase, session, targets, evidence)
+                expected_versions = source_versions(payload['editable_files'])
                 if feedback:
                     payload['validation_feedback'], payload['previous_output'] = feedback, previous
                 self.sequence += 1
                 trace = {'requirement_id': rid, 'phase': phase, 'attempt': attempt + 1,
                          'instructions': PROMPTS[phase], 'input': payload}
                 patch_snapshot = {}
+                output = None
                 try:
                     output = self.model.generate_json(schema_name='tdd_' + phase, instructions=PROMPTS[phase],
                                                        input_payload=payload, output_schema=SCHEMA)
-                    previous = output
                     trace['output'] = output
                     # A known transport metadata echo carries no application semantics.
                     # Preserve the raw trace; all other unexpected fields remain errors.
@@ -272,26 +274,29 @@ class NodeTDDOrchestrator:
                         raise ValueError('; '.join(validation))
                     if output['blocked_reason'].strip():
                         raise ValueError(output['blocked_reason'])
-                    if output['request_files']:
+                    if output['request_files'] or output.get('release_files'):
                         if output['edits']:
-                            raise ValueError('request_files cannot be combined with edits')
+                            raise ValueError('Context read/release operations cannot be combined with edits')
                         paths = self.context.resolve_requests(output['request_files'], targets)
+                        releases = self.context.resolve_requests(output.get('release_files', []), targets)
                         disallowed = {path for path in paths if not self.context.phase_path(path, phase)}
                         if disallowed:
                             raise ValueError(f'Files outside {phase} scope: {sorted(disallowed)}')
-                        if not paths - loaded - set(payload['always_loaded_files']):
-                            raise ValueError('Requested files are already loaded')
                         requests += 1
                         if requests > self.load_rounds:
                             raise ValueError('File loading rounds exhausted; choose minimal necessary files')
-                        loaded.update(paths)
-                        self.log.info('Loading requested files: ' + ', '.join(sorted(paths)), node_id=rid)
+                        session.apply(output, paths, releases,
+                                      set(payload['context_state']['pinned_files']), self.sequence)
+                        self.log.info('Context read: ' + ', '.join(sorted(paths))
+                                      + '; release: ' + ', '.join(sorted(releases)), node_id=rid)
                         trace['errors'] = []
+                        trace['context_operation'] = copy.deepcopy(session.last_operation)
                         self._trace(trace)
                         continue
                     if not output['edits']:
                         raise ValueError('Provide implementation/test edits; no-op response cannot satisfy this task')
                     patch_snapshot = apply_edits(self.root, output['edits'], set(payload['editable_files']),
+                                                 expected_versions=expected_versions,
                                                  ignore_unchanged=phase == 'test_generation')
                     changed_tests = [path for path in patch_snapshot
                                      if self.context.catalog.get(path, {}).get('kind') == 'acceptance_test']
@@ -305,6 +310,7 @@ class NodeTDDOrchestrator:
                         raise ValueError('Compilation/test-source gate failed: ' + str(gate))
                     for path, content in patch_snapshot.items():
                         snapshots.setdefault(path, content)
+                    session.touch(patch_snapshot)
                     trace['errors'] = []
                     trace['gate'] = gate
                     self._trace(trace)
@@ -319,6 +325,11 @@ class NodeTDDOrchestrator:
                     if patch_snapshot:
                         restore(self.root, patch_snapshot)
                     feedback = [describe_model_error(exc)]
+                    if output is not None:
+                        previous = output
+                        if isinstance(output, dict):
+                            session.focus.update(edit['file'] for edit in output.get('edits', [])
+                                                 if isinstance(edit, dict) and edit.get('file') in payload['editable_files'])
                     self.log.warning(f'{phase} rejected: ' + '; '.join(feedback), node_id=rid)
                     trace['errors'] = feedback
                     self._trace(trace)

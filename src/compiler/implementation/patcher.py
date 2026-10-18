@@ -3,8 +3,13 @@ import hashlib
 from pathlib import Path
 
 
-def sha256(content):
+def _sha256(content):
     return hashlib.sha256(content.encode('utf-8')).hexdigest()
+
+
+def source_versions(files):
+    """Capture the exact source supplied to one model call; never send these tokens."""
+    return {path: (record['exists'], _sha256(record['content'])) for path, record in files.items()}
 
 
 def read_source(root, relative):
@@ -25,7 +30,7 @@ def restore(root, snapshots):
             path.write_text(content, encoding='utf-8')
 
 
-def apply_edits(root, edits, allowlist, *, ignore_unchanged=False):
+def apply_edits(root, edits, allowlist, *, expected_versions, ignore_unchanged=False):
     root = Path(root).resolve()
     snapshots, seen = {}, set()
     for row in edits:
@@ -34,8 +39,9 @@ def apply_edits(root, edits, allowlist, *, ignore_unchanged=False):
             raise ValueError(f'Unknown/read-only or duplicate edit file: {relative}')
         seen.add(relative)
         current = read_source(root, relative)
-        if sha256(current) != row['expected_sha256']:
-            raise ValueError(f'Stale source hash: {relative}; request current file')
+        if relative not in expected_versions or expected_versions[relative] != (
+                (root / relative).is_file(), _sha256(current)):
+            raise ValueError(f'Source changed after it was read: {relative}; use the refreshed file contents')
         if not row['content'].strip():
             raise ValueError(f'Empty replacement source: {relative}')
         if current == row['content'] and ignore_unchanged:

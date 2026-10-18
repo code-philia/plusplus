@@ -5,7 +5,7 @@ from pathlib import Path
 from compiler.backend_design.context import terms
 from compiler.frontend_design.validation import ui_index
 from compiler.lowering.types import refs
-from .patcher import read_source, sha256
+from .patcher import read_source
 
 SYSTEM_FILES = {
     'backend/src/db/seed.ts': ('SYSTEM.SEED', 'Single cumulative startup reset and fixture insertion module'),
@@ -122,8 +122,6 @@ class FileContext:
         return self.summaries(shared), self.summaries([row for _, row in scored[:k]])
 
     def resolve_requests(self, requests, test_targets):
-        if len(requests) != len(set(requests)):
-            raise ValueError('Duplicate request_files')
         by_symbol = {}
         for path, row in self.catalog.items():
             for key in row['symbol_ids']:
@@ -144,9 +142,9 @@ class FileContext:
             return path.startswith(('frontend/', 'shared/', 'tests/e2e/')) or path == 'tests/tdd/playwright.config.ts'
         return True
 
-    def build(self, rid, phase, loaded, test_targets, evidence):
+    def build(self, rid, phase, session, test_targets, evidence):
         direct = self.direct_files(rid)
-        source_paths = direct | loaded
+        source_paths = (direct | session.active) - session.released
         if phase == 'backend_implementation':
             source_paths = {path for path in source_paths
                             if path.startswith('backend/') or path.startswith('shared/')}
@@ -175,8 +173,9 @@ class FileContext:
                 if record and record['kind'] == 'acceptance_test':
                     failing_tests.add(relative)
                     regression_owners.update(record['reqs'])
-        editable, readonly = {}, {}
+        editable, readonly, records = {}, {}, {}
         visible_tests = {path for path in set(test_targets) | failing_tests if self.phase_path(path, phase)}
+        writable_paths = set()
         for path in sorted(source_paths | visible_tests):
             row = self.catalog.get(path)
             is_test = path in test_targets or bool(row and row['kind'] == 'acceptance_test')
@@ -189,8 +188,18 @@ class FileContext:
             if phase == 'test_generation' and row and row['kind'] == 'test_support':
                 writable = False
             text = read_source(self.root, path)
-            record = {'content': text, 'sha256': sha256(text)}
-            (editable if writable else readonly)[path] = record
+            records[path] = {'content': text, 'exists': (self.root / path).is_file()}
+            if writable:
+                writable_paths.add(path)
+        records, context_state = session.select(records, visible_tests, direct)
+        for path, record in records.items():
+            section = 'editable_files' if path in writable_paths else 'read_only_files'
+            record['context_location'] = section
+            (editable if path in writable_paths else readonly)[path] = record
+        for result in context_state.get('last_operation', {}).get('results', []):
+            if result['file'] in records:
+                result['content_ref'] = records[result['file']]['context_location'] + '[' + result['file'] + ']'
+        source_paths &= records.keys()
         shared, related = self.discover(rid, phase=phase, exclude=source_paths | visible_tests)
         requirement = copy.deepcopy(self.requirements['nodes'][rid])
         requirement.pop('visual_references', None)
@@ -213,7 +222,7 @@ class FileContext:
             parent = node.get('parent_id')
         requirement['ancestor_constraints'] = list(reversed(constraints))
         contracts = [copy.deepcopy(contract) for path in sorted(source_paths) if path in self.catalog
-                     for contract in self.catalog[path]['contracts'] if rid in contract.get('reqs', []) or path in loaded]
+                     for contract in self.catalog[path]['contracts'] if rid in contract.get('reqs', []) or path in session.active]
         if phase == 'frontend_implementation':
             # Frontend implementation receives backend API contracts, not backend source.
             needed_apis = {api for row in self.frontend['handlers'] if rid in row['reqs']
@@ -248,6 +257,10 @@ class FileContext:
                               for row in evidence) else {}),
                     'regression_requirements': [copy.deepcopy(self.requirements['nodes'][key])
                         for key in sorted(regression_owners - {rid}) if key in self.requirements['nodes']]},
+                'context_state': context_state,
+                'file_index': [{'file': path, 'symbols': row['symbol_ids'], 'kind': row['kind']}
+                               for path, row in sorted(self.catalog.items())
+                               if path not in records and self.phase_path(path, phase)],
                 'always_loaded_files': sorted(direct & source_paths)}
 
 

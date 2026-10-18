@@ -4,9 +4,10 @@ from compiler.backend_design.contracts import obj, STRING, STRINGS
 
 SCHEMA = obj({
     'request_files': STRINGS,
-    'edits': {'type': 'array', 'items': obj({'file': STRING, 'expected_sha256': STRING, 'content': STRING})},
+    'release_files': STRINGS,
+    'edits': {'type': 'array', 'items': obj({'file': STRING, 'content': STRING})},
     'blocked_reason': STRING,
-})
+}, required=['request_files', 'edits', 'blocked_reason'])
 BACKGROUND = '''## Background and role
 You implement ONE leaf requirement in a generated TypeScript Express/React application using TDD.
 The database, backend and frontend symbol tables and lowering plans supply exact contracts and file paths.
@@ -14,16 +15,16 @@ Parent descriptions constrain behavior; dependency requirements are not addition
 Preserve previously implemented behavior, especially when files/components are shared.
 
 ## File scope and incremental loading
-editable_files contains current full text and sha256 for the entire writable allowlist.
-always_loaded_files lists current requirement-associated module/UI files in the current layer. Their
+editable_files contains current full text for the entire writable allowlist.
+always_loaded_files lists current requirement-associated module/UI files supplied in this invocation. Their
 FULL CONTENTS are already in editable_files or read_only_files, not merely available for discovery.
-Read those supplied contents directly and never request_files for always_loaded_files or any other
-already supplied file. You can return edits on the FIRST invocation without a preliminary file request.
+Read those supplied contents directly. You can return edits on the FIRST invocation without a
+preliminary file request. Re-reading a supplied file is supported and returns its latest version.
 Their editability depends on this phase: editable_files is the ONLY write allowlist; read_only_files
 remains read-only. Shared files not directly associated with the current requirement (including schema,
 connection, seed, server entrypoints and styles) are listed with paths/summaries in shared_catalog;
-their source is loaded only after a request. A reused module directly bound to this requirement is
-already loaded even if shared with other requirements. Other modules are
+their source is loaded only after a request. Directly bound modules are initially supplied even
+when shared; released or budget-evicted files can be read again through file_index. Other modules are
 retrieved as summaries in related_catalog. Request exact paths via request_files before using/editing them.
 Catalogs omit files whose contents are already supplied. Summaries are compact discovery hints;
 load a record to obtain its complete source and contract. Backend/frontend implementation source and
@@ -38,13 +39,23 @@ Never guess source.
 Do not request a dependency closure or every component. Load the few files required by actual imports,
 call chains, composition or observed errors. Any file request must have no edits in that same response.
 No recursive context dump; no automatic dependency source inclusion. Preserve public contracts and IDs.
+file_index lists discoverable paths/symbols outside the current working set. Read through request_files;
+optionally use release_files to drop unneeded full source from context (not from disk). Reads and
+releases may be combined, but not combined with edits. Current/failing tests stay pinned. The compiler
+may release older optional files to fit the source budget; requested files are delivered whole, never
+truncated. Reload any released file before editing it. Permission rules remain phase-specific.
+context_state.last_operation pairs the latest read/release request with results and content_ref
+pointing into editable_files/read_only_files, where each source appears once with its current content.
+Every invocation refreshes source from disk; old source versions and full history remain in traces,
+not in this prompt. Context requests do not install rejected edits shown in previous_output.
 
 ## Patch protocol and corrections
-Return exactly the JSON schema: request_files, edits, blocked_reason, no Markdown.
-These THREE keys are the entire top-level response. Never emit type, json_object, response_format,
+Return exactly the JSON schema: request_files, edits, blocked_reason, and optional release_files, no Markdown.
+These are the only allowed top-level keys. Never emit type, json_object, response_format,
 schema, status or explanatory fields. JSON Schema's type and the API transport's json_object mode
 describe the format; they are NOT fields to copy into your response. Start with {"request_files": ...}.
-Each edit replaces a WHOLE loaded file, supplies its current expected_sha256 and full new content.
+Each edit supplies only the file path and full replacement content for a loaded writable file.
+The compiler manages source versions internally and refreshes context if a file changed during the call.
 Do not include unchanged files, delete files or modify .arc artifacts. Edit only the supplied allowlist.
 validation_feedback and previous_output are rejected proposals; rejected files are not installed.
 blocked_reason is empty unless a real design/dependency gap prevents implementation. Do not claim success
@@ -100,8 +111,9 @@ identifies automatically loaded failing tests, including earlier requirements' r
 their requirement evidence. Reporter failed_tests includes file, case, location and assertion errors.
 gate_results contains failed commands' actual output and structured assertion errors, not merely a
 pass/fail table. Read expected/actual values, stack traces, compiler diagnostics and runtime errors.
-The current requirement, contracts, current source and previously loaded files remain available;
-these are cumulative working files with refreshed content/hashes, not a reset to the skeleton.
+The current requirement and active contracts/source are supplied with refreshed content.
+Accepted edits remain on disk even after a file leaves context; reload it when needed. This is
+a cumulative working application, not a reset to the skeleton.
 Trace each failure from assertion/expected behavior through the relevant route, service, repository
 or UI handler. Request missing source before diagnosing its exact behavior; a stack trace alone is
 not sufficient evidence for an unrelated rewrite. Fix the cause rather than only the final symptom.
@@ -158,7 +170,6 @@ Historical test sources are checked for compilation only; no runtime regression 
 '''
 EXAMPLE = {'request_files': ['backend/src/db/seed.ts'], 'edits': [], 'blocked_reason': ''}
 PATCH_EXAMPLE = {'request_files': [], 'edits': [{'file': 'tests/unit/example.test.ts',
-                 'expected_sha256': '<current SHA256 from editable_files>',
                  'content': '<complete changed file contents>'}], 'blocked_reason': ''}
 EXAMPLE_PATHS = {
     'test_generation': ('tests/tdd/vitest.config.ts', 'tests/unit/example.test.ts'),
@@ -174,6 +185,6 @@ def phase_examples(phase):
     return json.dumps(load), json.dumps(patch)
 
 PROMPTS = {phase: BACKGROUND + task + '\n## Return format\n' + json.dumps(SCHEMA)
-           + '\n## Example: load first (only if not already loaded)\n' + phase_examples(phase)[0]
-           + '\n## Example: replace a changed file (use actual allowed paths, hashes and contents)\n' + phase_examples(phase)[1]
+           + '\n## Example: read a file when needed\n' + phase_examples(phase)[0]
+           + '\n## Example: replace a changed file (use actual allowed paths and contents)\n' + phase_examples(phase)[1]
            for phase, task in TASKS.items()}

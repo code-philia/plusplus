@@ -13,7 +13,7 @@ from model.logging import log_design_call, logged_completion
 
 
 from .contracts import StructuredModel
-from .messages import user_messages
+from .messages import system_instructions, user_messages
 
 
 class ModelConfigurationError(RuntimeError):
@@ -142,7 +142,7 @@ class Model:
         self._last_output_mode = "json_object" if force_json else self._structured_output_mode
         user_inputs = user_messages(input_payload, schema_name=schema_name)
         messages = [
-            {"role": "system", "content": instructions},
+            {"role": "system", "content": system_instructions(instructions)},
             *user_inputs,
         ]
         response = None
@@ -177,7 +177,7 @@ class Model:
             f"{json.dumps(output_schema, ensure_ascii=False, separators=(',', ':'))}"
         )
         fallback_messages = [
-            {"role": "system", "content": fallback_instructions},
+            {"role": "system", "content": system_instructions(fallback_instructions)},
             *user_inputs,
         ]
         if response is None and (force_json or self._structured_output_mode == "json_object"):

@@ -168,10 +168,10 @@ def _visual_messages(
     image_data_url: str,
     *, schema_name: str | None = None,
 ) -> list[dict[str, Any]]:
-    from .messages import user_messages
+    from .messages import system_instructions, user_messages
 
     return [
-        {"role": "system", "content": instructions},
+        {"role": "system", "content": system_instructions(instructions)},
         *user_messages(input_payload, schema_name=schema_name),
         {
             "role": "user",
@@ -202,4 +202,3 @@ def _nonnegative_env_int(name: str, default: int) -> int:
         return max(0, int(os.environ.get(name, str(default))))
     except ValueError:
         return default
-
