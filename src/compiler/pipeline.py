@@ -138,9 +138,8 @@ class Compiler:
                             except Exception as exc:
                                 visual.visual_failures[reference] = str(exc)
                                 visual.visual_log.warning(f'Skipping {reference}: {exc}', node_id=rid)
-                write_json_atomic(root / 'visual_cache.json', visual.visual_cache)
             # Separate thread: synchronous database design must not block image analysis.
-            # One writer owns visual caches and pass traces; duplicate paths are analyzed once.
+            # One writer owns the visual cache; duplicate paths are analyzed once.
             visual_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='arc-visual')
             visual_future = visual_executor.submit(analyze_images)
             await self._log('Visual analysis is running in the background alongside database design.')
@@ -217,7 +216,7 @@ class Compiler:
                 visual.visual_log.warning('Background visual analysis skipped: ' + str(exc))
             visual_report.update(status='COMPLETED_WITH_WARNINGS' if visual.visual_failures else 'COMPLETED',
                                  warnings=[f'{path}: {message}' for path, message in visual.visual_failures.items()])
-            artifacts['visual_analysis'] = str(root / 'design/frontend/visual_cache.json')
+            artifacts['visual_analysis'] = str(root / 'visual_cache.json')
             save('RUNNING')
             await self._log('visual_analysis: COMPLETED')
             await begin('backend_design')
@@ -241,26 +240,12 @@ class Compiler:
                 await complete_design(frontend, root / 'design/frontend/frontend_ir.json')
             frontend_plan = await lower('frontend', FrontendLoweringPass(), requirements, frontend.ir)
 
-            await begin('code_binding')
-            binding = {'ir_kind': 'code_binding', 'requirements': {}}
-            for rid in leaves:
-                try:
-                    associated = {row['file_path'] for row in backend_plan['modules'] if rid in row['reqs']}
-                    associated.update(row['file_path'] for row in frontend_plan['components'] + frontend_plan['handlers']
-                                      if rid in row['reqs'])
-                    binding['requirements'][rid] = sorted(associated)
-                    states[rid] = 'LOWERED'
-                except Exception as exc:
-                    states[rid] = 'BINDING_FAILED'
-                    failed.append(rid)
-                    await stage_failed(f'{rid}: {exc}')
-            await guarded(lambda: write_json_atomic(root / 'code_binding/bindings.json', binding))
-            if reports[-1]['status'] == 'RUNNING':
-                await finish(root / 'code_binding/bindings.json')
+            # FileContext derives requirement/file associations from the lowering
+            # plans directly; no second binding registry is persisted.
+            states.update({rid: 'LOWERED' for rid in leaves})
 
             skipped = {rid for result in (backend, frontend) for rid, state in result.node_states.items()
                        if state in {'SKIPPED', 'FAILED'}}
-            skipped.update(rid for rid in leaves if states[rid] == 'BINDING_FAILED')
             skipped.update(rid for rid, state in database.node_states.items() if rid in leaves and state == 'FAILED')
             if skipped:
                 failed.extend(sorted(skipped))

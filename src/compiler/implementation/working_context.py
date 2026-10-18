@@ -1,4 +1,4 @@
-"""A requirement-local working set; source truth remains on disk, history in traces."""
+"""A requirement-local working set; source truth stays on disk, history in model_logs."""
 import json
 import os
 

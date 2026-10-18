@@ -207,12 +207,14 @@ class FileContext:
         # Pull cached analyses into the requirement's original pages, not a parallel field.
         from utils.jsonio import read_json
         page_states = read_json(self.root / '.arc/design/frontend/page_states.json', [])
+        visual_cache = read_json(self.root / '.arc/visual_cache.json', {})
         for page in requirement.get('pages', []):
             state = next((row for row in page_states if row['name'] == page['name']), None)
             records = state.get('references', []) if state else []
             reference = str(page.get('reference', '')).replace('\\', '/')
-            record = next((row for row in records if row['reference'] == reference), records[0] if records and not reference else {})
-            page['analysis'] = record.get('analysis')
+            if not reference and records:
+                reference = records[0]['reference']
+            page['analysis'] = visual_cache.get(reference, {}).get('analysis')
         constraints, parent = [], requirement.get('parent_id')
         seen = set()
         while parent in self.requirements['nodes'] and parent not in seen:
@@ -272,11 +274,11 @@ def error_feedback(evidence):
             continue
         item = {key: copy.deepcopy(row[key]) for key in
                 ('status', 'failure_kind', 'command', 'exit_code', 'error', 'report_error', 'output',
-                 'server_log', 'application_output', 'application_exit_code') if key in row}
+                 'application_output', 'application_exit_code') if key in row}
         test = row.get('test_evidence')
         if test:
             item['test_evidence'] = {key: copy.deepcopy(test[key]) for key in
-                ('collected', 'executed_files', 'failed_tests', 'report_path') if key in test}
+                ('collected', 'executed_files', 'failed_tests') if key in test}
             if not test.get('failed_tests'):
                 item['test_evidence']['failures'] = test.get('failures', [])
         result.append(item)

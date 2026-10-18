@@ -4,7 +4,6 @@ import os
 import sys
 from contextvars import ContextVar
 from datetime import datetime, timezone, tzinfo
-from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -15,30 +14,6 @@ def set_run_id(run_id: str | None) -> None:
     """Retain the compiler-run context without displaying it in log prefixes."""
 
     _current_run_id.set(str(run_id).strip() if run_id else None)
-
-
-def append_debug_log(
-    agent_name: str,
-    message: str,
-    *,
-    status: str | None = None,
-    node_id: str | None = None,
-    workspace_root: str | None = None,
-) -> None:
-    log_path = _resolve_debug_log_path(workspace_root)
-    if log_path is None:
-        return
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    timestamp = local_timestamp()
-    prefix = f"[{timestamp}] [{agent_name}]"
-    if node_id:
-        prefix += f"[{node_id}]"
-    if status:
-        prefix += f"[{status}]"
-    lines = str(message).splitlines() or [""]
-    with log_path.open("a", encoding="utf-8") as file:
-        for line in lines:
-            file.write(f"{prefix} {line}\n")
 
 
 def format_terminal_log(
@@ -76,7 +51,7 @@ def write_terminal_log(
 
 
 class SynchronousLog:
-    """Write one compiler event to both the terminal and workspace debug log."""
+    """Write compiler progress to the terminal; persistent state lives in stage reports."""
 
     def __init__(self, agent_name: str, *, workspace_root: str | os.PathLike[str] | None = None) -> None:
         self._agent_name = agent_name
@@ -92,13 +67,6 @@ class SynchronousLog:
         self._write(message, status='error', node_id=node_id)
 
     def _write(self, message: str, *, status: str | None, node_id: str | None) -> None:
-        append_debug_log(
-            self._agent_name,
-            message,
-            status=status,
-            node_id=node_id,
-            workspace_root=self._workspace_root,
-        )
         write_terminal_log(self._agent_name, message, status=status, node_id=node_id)
 
 
@@ -121,16 +89,6 @@ def _log_timezone() -> tzinfo:
         except ZoneInfoNotFoundError:
             pass
     return datetime.now().astimezone().tzinfo or timezone.utc
-
-
-def _resolve_debug_log_path(workspace_root: str | None) -> Path | None:
-    explicit = os.environ.get("ARC_DEBUG_LOG_PATH", "").strip()
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-    root = workspace_root or os.environ.get("ARC_WORKSPACE_ROOT", "").strip()
-    if not root:
-        return None
-    return Path(root).expanduser().resolve() / ".arc" / "debug.log"
 
 
 def _should_color() -> bool:

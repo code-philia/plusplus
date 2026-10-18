@@ -43,7 +43,8 @@ class FrontendDesignPass:
         self.log = SynchronousLog('FrontendDesignPass', workspace_root=self.artifact_root.parent)
         self.visual_log = SynchronousLog('VisualAnalysis', workspace_root=self.artifact_root.parent)
         self.reference_root = reference_root
-        self.visual_cache = read_json(self.root / 'visual_cache.json', {})
+        self.cache_path = self.artifact_root / 'visual_cache.json'
+        self.visual_cache = read_json(self.cache_path, {})
         self.visual_failures = {}
         try:
             self.attempts = max(1, int(os.getenv('MODEL_ATTEMPT', '5')))
@@ -93,7 +94,7 @@ class FrontendDesignPass:
                             warnings.append(f'{rid}: visual analysis unavailable for {reference}; using requirement evidence')
                     else:
                         known = next((row for row in trial_pages if row['name'] == page['name']), None)
-                        page['analysis'] = known['references'][0]['analysis'] if known and known['references'] else None
+                        page['analysis'] = self._page_analysis(known)
                 missing_page = any(not any(row['name'] == page['name'] for row in page_states)
                                    for page in requirement['pages'])
                 data_access = database_context(database, rid)
@@ -109,7 +110,7 @@ class FrontendDesignPass:
                         state = {'name': page['name'], 'ui_id': key, 'references': []}
                         trial_pages.append(state)
                     if not reference:
-                        page['analysis'] = state['references'][0]['analysis'] if state['references'] else None
+                        page['analysis'] = self._page_analysis(state)
                     parsed = not reference or not record or any(row['reference'] == reference and row['sha256'] == record['sha256']
                                                   for row in state['references'])
                     mode = 'new' if new_page else 'bind' if parsed else 'extend'
@@ -123,14 +124,14 @@ class FrontendDesignPass:
                     if mode == 'extend' and state['references']:
                         baseline = state['references'][0]
                         payload['baseline_page_states'] = {'name': state['name'], 'reference': baseline['reference'],
-                                                           'analysis': baseline['analysis']}
+                                                           'analysis': self._page_analysis(state)}
                     trial = self._design('ui', rid, trial, payload, backend)
                     if record:
                         old = next((index for index, row in enumerate(state['references']) if row['reference'] == reference), None)
                         if old is None:
-                            state['references'].append(copy.deepcopy(record))
+                            state['references'].append({key: record[key] for key in ('reference', 'sha256')})
                         else:
-                            state['references'][old] = copy.deepcopy(record)
+                            state['references'][old] = {key: record[key] for key in ('reference', 'sha256')}
                 names = {page['name'] for page in requirement['pages']}
                 pages, loaded = region(trial, names)
                 apis = related_apis(backend, requirement, database)
@@ -225,8 +226,6 @@ class FrontendDesignPass:
             if feedback:
                 request['validation_feedback'], request['previous_output'] = feedback, previous
             self.sequence += 1
-            trace = {'requirement_id': rid, 'phase': phase, 'attempt': attempt,
-                     'instructions': PROMPTS[phase], 'input': request}
             try:
                 kwargs = {'schema_name': 'frontend_design_' + phase, 'instructions': PROMPTS[phase],
                           'input_payload': request, 'output_schema': SCHEMAS[phase]}
@@ -240,18 +239,13 @@ class FrontendDesignPass:
                 else:
                     output = self.model.generate_json(**kwargs)
                 previous = output
-                trace['output'] = output
                 feedback = shape_errors(output, SCHEMAS[phase])
                 if not feedback:
                     result = accept(output)
-                    trace['errors'] = []
-                    write_json_atomic(self.root / 'passes' / f'{self.sequence:05d}_{phase}.json', trace)
                     return result
             except Exception as exc:
                 feedback = [describe_model_error(exc)]
-            trace['errors'] = feedback
             logger.warning(f'{phase} validation rejected: ' + '; '.join(feedback), node_id=rid)
-            write_json_atomic(self.root / 'passes' / f'{self.sequence:05d}_{phase}.json', trace)
         raise ValueError(f'{phase}: exhausted {self.attempts} attempts: ' + '; '.join(feedback))
 
     def _analyze(self, name, reference, rid):
@@ -272,14 +266,16 @@ class FrontendDesignPass:
         analysis = '\n\n'.join(field + ':\n' + '\n'.join('- ' + item for item in details[field])
                                for field in VISUAL_FIELDS)
         record = {'reference': reference, 'sha256': digest, 'analysis_version': VISUAL_ANALYSIS_VERSION,
-                  'details': details, 'analysis': analysis}
+                  'analysis': analysis}
         self.visual_cache[reference] = record
-        write_json_atomic(self.root / 'visual_cache.json', self.visual_cache)
+        write_json_atomic(self.cache_path, self.visual_cache)
         self.visual_log.info(f'Analysis completed: {name} ({reference})', node_id=rid)
         return copy.deepcopy(record)
 
     def _save(self, ir, page_states):
         write_json_atomic(self.root / 'frontend_ir.json', ir)
-        write_json_atomic(self.root / 'ui.json', ir['ui'])
         write_json_atomic(self.root / 'page_states.json', page_states)
-        write_json_atomic(self.root / 'visual_cache.json', self.visual_cache)
+
+    def _page_analysis(self, state):
+        references = state.get('references', []) if state else []
+        return self.visual_cache.get(references[0]['reference'], {}).get('analysis') if references else None

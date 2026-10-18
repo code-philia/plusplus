@@ -5,6 +5,7 @@ import re
 import sys
 import time
 import uuid
+import json
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import wraps
@@ -51,6 +52,8 @@ def _save(path: Path, record: dict[str, Any]) -> None:
                 if "output" in attempt:
                     handle.write(f"\n\n{prefix} MODEL_OUTPUT\n")
                     handle.write(attempt["output"] or "")
+                if attempt.get('usage') is not None:
+                    handle.write(f"\n\n{prefix} MODEL_USAGE " + json.dumps(attempt['usage'], ensure_ascii=False, default=str))
                 if attempt.get("reasoning") is not None:
                     handle.write(f"\n\n{prefix} MODEL_REASONING\n")
                     handle.write(attempt["reasoning"])
@@ -120,6 +123,9 @@ def logged_completion(client: Any, **request: Any) -> Any:
         message = response.choices[0].message
         attempt.update(status="SUCCEEDED", output=message.content,
                        reasoning=getattr(message, "reasoning_content", None))
+        usage = getattr(response, 'usage', None)
+        if usage is not None:
+            attempt['usage'] = usage.model_dump() if hasattr(usage, 'model_dump') else usage
         return response
     except Exception as exc:
         attempt.update(status="FAILED", error={"type": type(exc).__name__, "message": str(exc)})

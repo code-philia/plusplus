@@ -5,6 +5,7 @@ import subprocess
 import socket
 import time
 import uuid
+import tempfile
 from urllib.request import urlopen
 from urllib.error import URLError
 from pathlib import Path
@@ -17,23 +18,28 @@ class TestRunner:
         self.root = Path(root).resolve()
         self.timeout = max(1, timeout)
         self.support = self.root / 'tests/tdd'
+        self._temporary = tempfile.TemporaryDirectory(prefix='.arc-tdd-', dir=self.root)
+        self.runtime = Path(self._temporary.name)
+
+    def close(self):
+        self._temporary.cleanup()
 
     def execute(self, argv, *, cwd=None, environment=None, timeout=None):
         env = {**os.environ, **(environment or {})}
-        log = self.root / '.arc/implementation/command-output.txt'
-        log.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with log.open('w', encoding='utf-8') as output:
+            with tempfile.TemporaryFile(mode='w+', encoding='utf-8') as output:
                 process = subprocess.Popen(argv, cwd=cwd or self.root, env=env, stdout=output,
                                            stderr=subprocess.STDOUT, **process_group_kwargs())
                 try:
                     code = process.wait(timeout=self.timeout if timeout is None else timeout)
                 except subprocess.TimeoutExpired:
                     terminate_process_tree(process)
+                    output.seek(0)
                     return {'status': 'FAILED', 'failure_kind': 'execution_timeout', 'command': argv, 'error': 'Command timed out',
-                            'output': log.read_text(encoding='utf-8')[-18000:]}
-            return {'status': 'PASSED' if code == 0 else 'FAILED', 'command': argv, 'exit_code': code,
-                    'output': log.read_text(encoding='utf-8')[-18000:]}
+                            'output': output.read()[-18000:]}
+                output.seek(0)
+                return {'status': 'PASSED' if code == 0 else 'FAILED', 'command': argv, 'exit_code': code,
+                        'output': output.read()[-18000:]}
         except OSError as exc:
             return {'status': 'FAILED', 'failure_kind': 'infrastructure', 'command': argv, 'error': str(exc)}
 
@@ -66,6 +72,7 @@ afterAll(() => client.close());
 const port = process.env.ARC_TDD_PORT ?? "33100";
 export default defineConfig({
   testDir: "../e2e", workers: 1, fullyParallel: false, retries: 0,
+  outputDir: process.env.ARC_TDD_RESULTS_DIR ?? "../test-results",
   timeout: 30000, use: { baseURL: "http://127.0.0.1:" + port },
   webServer: process.env.ARC_TDD_EXTERNAL_SERVER === "1" ? undefined : { command: "node backend/dist/server.js", cwd: "../..",
     url: "http://127.0.0.1:" + port + "/__arc/health", reuseExistingServer: false,
@@ -101,8 +108,7 @@ export default defineConfig({
     def compile(self):
         from compiler.lowering.planning import relative_import
         compiler = self.tool('typescript', 'bin/tsc')
-        artifact = self.root / '.arc/implementation'
-        artifact.mkdir(parents=True, exist_ok=True)
+        artifact = self.runtime
         results = []
         if (self.root / 'shared/tsconfig.json').is_file():
             result = self.execute(['node', compiler, '-b', 'shared/tsconfig.json'])
@@ -117,7 +123,7 @@ export default defineConfig({
             write_json_atomic(config, {'extends': relative_import(str(config), str(project), '.json'),
                 'compilerOptions': {'noEmit': True, 'composite': False, 'incremental': True,
                                     'tsBuildInfoFile': './' + layer + '.tsbuildinfo'},
-                'include': [f'../../{layer}/src/**/*'], 'exclude': [], 'references': []})
+                'include': [str(self.root / layer / 'src/**/*')], 'exclude': [], 'references': []})
             result = self.execute(['node', compiler, '-p', str(config)])
             results.append(result)
             if result['status'] != 'PASSED':
@@ -128,7 +134,7 @@ export default defineConfig({
         if not files:
             return [{'status': 'FAILED', 'error': 'No acceptance test targets'}]
         compiler = self.tool('typescript', 'bin/tsc')
-        config = self.root / '.arc/implementation/tests.tsconfig.json'
+        config = self.runtime / 'tests.tsconfig.json'
         write_json_atomic(config, {'compilerOptions': {
             'target': 'ES2022', 'module': 'NodeNext', 'moduleResolution': 'NodeNext', 'noEmit': True,
             'strict': True, 'esModuleInterop': True, 'skipLibCheck': True, 'jsx': 'react-jsx',
@@ -136,12 +142,14 @@ export default defineConfig({
         return [self.execute(['node', compiler, '-p', str(config)])]
 
     def run(self, files, *, port=33100, red=False):
+        with tempfile.TemporaryDirectory(prefix='arc-test-run-') as directory:
+            return self._run(files, port=port, red=red, artifact=Path(directory))
+
+    def _run(self, files, *, port, red, artifact):
         self.prepare()
         results = []
         unit = [path for path in files if not path.startswith('tests/e2e/')]
         browser = [path for path in files if path.startswith('tests/e2e/')]
-        artifact = self.root / '.arc/implementation/databases'
-        artifact.mkdir(parents=True, exist_ok=True)
         if unit:
             report = artifact / ('vitest-' + uuid.uuid4().hex + '.json')
             result = self.execute(['node', self.tool('vitest', 'vitest.mjs'), 'run', '--config',
@@ -177,6 +185,7 @@ export default defineConfig({
         except OSError as exc:
             return {'status': 'FAILED', 'failure_kind': 'infrastructure', 'error': str(exc)}
         environment = {'DATABASE_URL': db_path, 'PLAYWRIGHT_JSON_OUTPUT_FILE': str(report),
+                       'ARC_TDD_RESULTS_DIR': str(report.parent / 'results'),
                        'ARC_TDD_PORT': str(selected_port), 'PORT': str(selected_port),
                        'ARC_TDD_EXTERNAL_SERVER': '1', 'NODE_ENV': 'test', 'ARC_VALIDATION_PREPARED': '0'}
         server_log = report.with_suffix('.server.log')
@@ -210,7 +219,7 @@ export default defineConfig({
                 argv.append('--global-timeout=' + str(limit * 1000))
                 result = self.execute(argv + browser, environment=environment, timeout=limit + 30)
                 self._test_report(result, report, 'playwright', len(browser))
-                result['server_port'], result['server_log'] = selected_port, str(server_log)
+                result['server_port'] = selected_port
                 if result['status'] != 'PASSED':
                     result['application_output'] = server_log.read_text(encoding='utf-8')[-18000:]
                     if server.poll() is not None:
@@ -221,7 +230,7 @@ export default defineConfig({
             kind = 'application_startup' if server is not None and not ready else 'infrastructure'
             return {'status': 'FAILED', 'failure_kind': kind, 'error': str(exc),
                     'exit_code': server.poll() if server is not None else None,
-                    'server_port': selected_port, 'server_log': str(server_log),
+                    'server_port': selected_port,
                     'output': server_log.read_text(encoding='utf-8')[-18000:] if server_log.exists() else ''}
         finally:
             if server is not None:
@@ -297,8 +306,7 @@ export default defineConfig({
                 result['failure_kind'] = kind
             result['test_evidence'] = {'collected': collected, 'executed_files': len(executed_files),
                                       'failures': failures, 'failed_tests': failed_tests,
-                                      'behavior_failure': bool(failures) and kind == 'behavior',
-                                      'report_path': str(path)}
+                                      'behavior_failure': bool(failures) and kind == 'behavior'}
             if collected == 0 or len(executed_files) < expected_files:
                 result['status'] = 'FAILED'
                 result['failure_kind'] = result.get('failure_kind') or 'test_code'
@@ -309,7 +317,7 @@ export default defineConfig({
             # Missing reporter output alone is not proof that the environment is
             # broken: generated code can crash or hang before producing it.
             result.setdefault('failure_kind', 'test_execution')
-            result['report_error'] = 'Test report unavailable or malformed: ' + str(exc)
+            result['report_error'] = 'Test report unavailable or malformed: ' + type(exc).__name__
             result.setdefault('error', result['report_error'])
 
 

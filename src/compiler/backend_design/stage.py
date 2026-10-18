@@ -135,18 +135,14 @@ class BackendDesignPass:
             if feedback:
                 request['validation_feedback'], request['previous_output'] = feedback, previous
             self.sequence += 1
-            trace = {'requirement_id': rid, 'phase': kind, 'attempt': attempt + 1,
-                     'instructions': PROMPTS[kind], 'input': request}
             try:
                 output = self.model.generate_json(schema_name='backend_' + kind.lower(), instructions=PROMPTS[kind],
                                                  input_payload=request, output_schema=SCHEMAS[kind])
                 previous = output
-                trace['output'] = output
                 feedback = shape_errors(output, SCHEMAS[kind])
                 if not feedback:
                     added, conflicts = expand_module_context(base, kind, payload, output)
                     if added:
-                        trace['context_loaded_ids'] = added
                         feedback = [f'Loaded exact existing contracts {added} into reuse_candidates/reference_catalog/'
                                     'conflict_contracts. Review them and return a corrected design using the same output format.',
                                     *conflicts]
@@ -154,14 +150,10 @@ class BackendDesignPass:
                         candidate, selected = self._materialize(base, kind, rid, upstream, output, payload)
                         feedback = validate_ir(candidate, database)
                     if not feedback:
-                        trace['errors'] = []
-                        write_json_atomic(self.root / 'passes' / f'{self.sequence:05d}_{kind.lower()}.json', trace)
                         return candidate, selected
             except Exception as exc:
                 feedback = [describe_model_error(exc)]
-            trace['errors'] = feedback
             self.log.warning(f'{kind} validation rejected: ' + '; '.join(feedback), node_id=rid)
-            write_json_atomic(self.root / 'passes' / f'{self.sequence:05d}_{kind.lower()}.json', trace)
         raise ValueError(f'{kind}: ' + '; '.join(feedback))
 
     @staticmethod

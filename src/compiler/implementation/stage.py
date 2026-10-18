@@ -11,7 +11,6 @@ from compiler.lowering.planning import slug, token
 from model.client import describe_model_error
 from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
-from utils.archive import snapshot_workspace
 from .contracts import SCHEMA, PROMPTS
 from .file_context import FileContext
 from .working_context import WorkingContext
@@ -51,11 +50,21 @@ class NodeTDDOrchestrator:
         self.load_rounds = budget('ARC_TDD_LOAD_ROUNDS', 12)
         self.runner = runner or TestRunner(self.root)
         self.port, self.sequence = port, 0
+        self.test_status = {}
         if hasattr(model, 'set_usage_path'):
             model.set_usage_path(self.root / '.arc/model_usage.jsonl')
 
     def compile(self, requirements, database, backend, frontend, backend_plan, frontend_plan, database_plan,
                 *, skip_requirements=()):
+        try:
+            return self._compile(requirements, database, backend, frontend, backend_plan, frontend_plan,
+                                 database_plan, skip_requirements=skip_requirements)
+        finally:
+            if hasattr(self.runner, 'close'):
+                self.runner.close()
+
+    def _compile(self, requirements, database, backend, frontend, backend_plan, frontend_plan, database_plan,
+                 *, skip_requirements=()):
         self.context = FileContext(self.root, requirements, database, backend, frontend,
                                    backend_plan, frontend_plan, database_plan)
         required_shared = {'backend/src/db/seed.ts', 'backend/src/db/initialize.ts', 'backend/src/db/client.ts'}
@@ -156,7 +165,6 @@ class NodeTDDOrchestrator:
                 self.log.info('Leaf TDD: COMPLETED', node_id=rid)
                 completed_tests.extend(targets)
                 self._report(states, errors, warnings)
-                snapshot_workspace(self.root, rid)
             except EnvironmentBlocked as exc:
                 states[rid] = 'BLOCKED_ENVIRONMENT'
                 for remaining in scheduled:
@@ -246,29 +254,26 @@ class NodeTDDOrchestrator:
         return bool(failures) and all(row.get('test_evidence', {}).get('behavior_failure', False) for row in failures)
 
     def _model_patch(self, phase, rid, session, targets, evidence, snapshots, accept):
-        feedback, previous, requests = [], None, 0
+        feedback, rejected_files, requests = [], [], 0
         for attempt in range(self.attempts):
             self.log.info(f'{phase} attempt {attempt + 1}/{self.attempts}', node_id=rid)
             while True:
                 payload = self.context.build(rid, phase, session, targets, evidence)
                 expected_versions = source_versions(payload['editable_files'])
                 if feedback:
-                    payload['validation_feedback'], payload['previous_output'] = feedback, previous
+                    payload['validation_feedback'] = feedback
+                    payload['rejected_patch'] = {'installed': False, 'files': rejected_files}
                 self.sequence += 1
-                trace = {'requirement_id': rid, 'phase': phase, 'attempt': attempt + 1,
-                         'instructions': PROMPTS[phase], 'input': payload}
                 patch_snapshot = {}
                 output = None
                 try:
                     output = self.model.generate_json(schema_name='tdd_' + phase, instructions=PROMPTS[phase],
                                                        input_payload=payload, output_schema=SCHEMA)
-                    trace['output'] = output
                     # A known transport metadata echo carries no application semantics.
-                    # Preserve the raw trace; all other unexpected fields remain errors.
+                    # The raw response remains in model_logs; other fields remain errors.
                     if isinstance(output, dict) and output.get('type') == 'json_object':
                         output = {key: value for key, value in output.items() if key != 'type'}
-                        trace['protocol_normalization'] = 'Removed echoed type:json_object transport metadata'
-                        self.log.warning(trace['protocol_normalization'], node_id=rid)
+                        self.log.warning('Removed echoed type:json_object transport metadata', node_id=rid)
                     validation = shape_errors(output, SCHEMA)
                     if validation:
                         raise ValueError('; '.join(validation))
@@ -289,9 +294,6 @@ class NodeTDDOrchestrator:
                                       set(payload['context_state']['pinned_files']), self.sequence)
                         self.log.info('Context read: ' + ', '.join(sorted(paths))
                                       + '; release: ' + ', '.join(sorted(releases)), node_id=rid)
-                        trace['errors'] = []
-                        trace['context_operation'] = copy.deepcopy(session.last_operation)
-                        self._trace(trace)
                         continue
                     if not output['edits']:
                         raise ValueError('Provide implementation/test edits; no-op response cannot satisfy this task')
@@ -311,9 +313,6 @@ class NodeTDDOrchestrator:
                     for path, content in patch_snapshot.items():
                         snapshots.setdefault(path, content)
                     session.touch(patch_snapshot)
-                    trace['errors'] = []
-                    trace['gate'] = gate
-                    self._trace(trace)
                     return
                 except EnvironmentBlocked:
                     # This proposal has not passed its gate; retain earlier accepted
@@ -325,25 +324,27 @@ class NodeTDDOrchestrator:
                     if patch_snapshot:
                         restore(self.root, patch_snapshot)
                     feedback = [describe_model_error(exc)]
-                    if output is not None:
-                        previous = output
-                        if isinstance(output, dict):
-                            session.focus.update(edit['file'] for edit in output.get('edits', [])
-                                                 if isinstance(edit, dict) and edit.get('file') in payload['editable_files'])
+                    edits = output.get('edits', []) if isinstance(output, dict) else []
+                    rejected_files = sorted({edit['file'] for edit in edits
+                                             if isinstance(edit, dict) and isinstance(edit.get('file'), str)}) if isinstance(edits, list) else []
+                    session.focus.update(path for path in rejected_files if path in payload['editable_files'])
                     self.log.warning(f'{phase} rejected: ' + '; '.join(feedback), node_id=rid)
-                    trace['errors'] = feedback
-                    self._trace(trace)
                     break
         raise ValueError(phase + ': exhausted correction attempts: ' + '; '.join(feedback))
 
-    def _trace(self, trace):
-        write_json_atomic(self.artifact / 'passes' / f'{self.sequence:05d}.json', trace)
-
     def _gate(self, rid, phase, results):
         self.log.info(f'{phase}: ' + ('PASSED' if passed(results) else 'FAILED'), node_id=rid)
-        write_json_atomic(self.artifact / 'gates' / f'{slug(rid)}-{phase}.json', results)
+        self.test_status[rid] = {'phase': phase, 'results': [
+            {key: row[key] for key in ('status', 'failure_kind', 'exit_code', 'error', 'test_files') if key in row}
+            | ({'tests': {key: row['test_evidence'][key] for key in
+                         ('collected', 'executed_files') if key in row['test_evidence']}
+                         | {'failed_tests': [{key: test[key] for key in ('file', 'name', 'status', 'location') if key in test}
+                                             for test in row['test_evidence'].get('failed_tests', [])]}}
+               if 'test_evidence' in row else {}) for row in results]}
+        write_json_atomic(self.artifact / 'test_status.json', self.test_status)
 
     def _report(self, states, errors, warnings):
+        errors = [message[:1500] for message in errors]
         write_json_atomic(self.artifact / 'report.json', {'status': 'FAILED' if errors else 'IMPLEMENTED_WITH_WARNINGS' if warnings else 'IMPLEMENTED',
             'node_states': states, 'errors': errors, 'warnings': warnings, 'model_calls': self.sequence})
         if hasattr(self, 'test_manifest'):

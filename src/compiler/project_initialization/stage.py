@@ -92,19 +92,16 @@ class ProjectInitializer:
         commands = ([['npm', 'install', '--no-audit', '--no-fund'],
                      ['npm', 'exec', '--', 'playwright', 'install', 'chromium']]
                     if install_dependencies else [])
-        log = self.root / '.arc/project/install.log'
-        log.parent.mkdir(parents=True, exist_ok=True)
         report = {'status': 'INITIALIZING', 'created_files': created, 'port': self.port}
-        report_path = log.parent / 'report.json'
+        report_path = self.root / '.arc/project/report.json'
         write_json_atomic(report_path, report)
         try:
-            with log.open('a', encoding='utf-8') as output:
-                for argv in commands:
-                    self.log.info('Project initialization: ' + ' '.join(argv))
-                    result = subprocess.run(argv, cwd=self.root, stdout=output,
-                                            stderr=subprocess.STDOUT, timeout=600)
-                    if result.returncode:
-                        raise ValueError(f'Project initialization failed: {argv}; see {log}')
+            for argv in commands:
+                self.log.info('Project initialization: ' + ' '.join(argv))
+                result = subprocess.run(argv, cwd=self.root, capture_output=True, text=True, timeout=600)
+                if result.returncode:
+                    raise ValueError(f'Project initialization failed: {argv}; '
+                                     + (result.stdout + result.stderr)[-4000:])
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             report.update(status='FAILED', errors=[str(exc)])
             write_json_atomic(report_path, report)

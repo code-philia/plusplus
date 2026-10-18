@@ -58,7 +58,6 @@ def main(argv: list[str] | None = None) -> int:
         for error in result.errors:
             print('ERROR:', error, file=sys.stderr)
         print(f'Frontend IR: {arc / "design/frontend/frontend_ir.json"}')
-        print(f'UI tree: {arc / "design/frontend/ui.json"}')
         print(f'Report: {arc / "design/frontend/report.json"}')
         return 0 if result.ok else 1
     except (ModelConfigurationError, OSError, ValueError, KeyError, TypeError) as exc:

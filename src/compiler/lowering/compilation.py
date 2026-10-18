@@ -1,5 +1,6 @@
 """Compile generated skeletons with the initialized project's compiler settings."""
 import subprocess
+import tempfile
 from pathlib import Path
 from utils.jsonio import read_json, write_json_atomic
 
@@ -19,26 +20,28 @@ def check_compilation(output, stage):
         result = {'status': 'COMPILATION_UNAVAILABLE', 'message': 'Initialize the project tsconfig and install its TypeScript dependencies before lowering.'}
     else:
         from .planning import relative_import
-        check_config = artifact / 'tsconfig.skeleton.json'
         manifest = read_json(artifact / 'manifest.json', {})
         generated_files = manifest.get('files', {})
-        import posixpath
-        write_json_atomic(check_config, {
-            'extends': relative_import(str(check_config), str(project_config), '.json'),
-            'compilerOptions': {'noEmit': True, 'composite': False, 'incremental': True,
-                                'tsBuildInfoFile': './skeleton.tsbuildinfo'},
-            'files': [posixpath.relpath(str(output / path), str(artifact)) for path in generated_files],
-            'include': [], 'exclude': [], 'references': [],
-        })
-        try:
-            process = subprocess.run(['node', str(compiler), '-p', str(check_config)],
-                                     cwd=output, capture_output=True, text=True, timeout=60)
-            result = {'status': 'COMPILED' if process.returncode == 0 else 'COMPILATION_FAILED',
-                      'exit_code': process.returncode, 'output': (process.stdout + process.stderr).strip()}
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            result = {'status': 'COMPILATION_FAILED', 'message': str(exc)}
+        with tempfile.TemporaryDirectory(prefix='.arc-compile-', dir=output) as directory:
+            check_config = Path(directory) / 'tsconfig.json'
+            write_json_atomic(check_config, {
+                'extends': relative_import(str(check_config), str(project_config), '.json'),
+                'compilerOptions': {'noEmit': True, 'composite': False, 'incremental': True,
+                                    'tsBuildInfoFile': './skeleton.tsbuildinfo'},
+                'files': [str(output / path) for path in generated_files],
+                'include': [], 'exclude': [], 'references': [],
+            })
+            try:
+                process = subprocess.run(['node', str(compiler), '-p', str(check_config)],
+                                         cwd=output, capture_output=True, text=True, timeout=60)
+                result = {'status': 'COMPILED' if process.returncode == 0 else 'COMPILATION_FAILED',
+                          'exit_code': process.returncode, 'output': (process.stdout + process.stderr).strip()}
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                result = {'status': 'COMPILATION_FAILED', 'message': str(exc)}
     report = read_json(artifact / 'report.json', {})
-    report['status'], report['compilation'] = result['status'], result
+    report['status'], report['compilation'] = result['status'], {key: value for key, value in result.items() if key != 'output'}
+    if result.get('output') and result['status'] != 'COMPILED':
+        report['compilation']['message'] = result['output'][:1500]
     report['validation'] = 'Generated skeleton sources checked against the initialized project settings.'
     write_json_atomic(artifact / 'report.json', report)
     return result

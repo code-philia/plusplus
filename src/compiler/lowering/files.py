@@ -13,7 +13,6 @@ def write_stage(output, stage, plan, files, *, bootstrap_files=()):
     artifact = output / '.arc/lowering' / stage
     previous = read_json(artifact / 'manifest.json', {})
     owned = previous.get('files', {})
-    initial_entries = {}
     # Validate the entire write set before changing any source file.
     for relative, content in files.items():
         path = (output / relative).resolve()
@@ -22,14 +21,8 @@ def write_stage(output, stage, plan, files, *, bootstrap_files=()):
         if path.exists():
             current = path.read_text(encoding='utf-8')
             if current != content and owned.get(relative) != digest(current):
-                if relative in bootstrap_files and relative not in owned:
-                    initial_entries[relative] = current
-                else:
+                if relative not in bootstrap_files or relative in owned:
                     raise ValueError(f'Refusing to overwrite a file not owned by this stage or edited after lowering: {relative}')
-    for relative, content in initial_entries.items():
-        backup = artifact / 'initial_entrypoints' / relative
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        backup.write_text(content, encoding='utf-8')
     for relative, content in files.items():
         path = output / relative
         path.parent.mkdir(parents=True, exist_ok=True)

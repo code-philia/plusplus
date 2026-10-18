@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from model.usage import record_usage as record_cost_usage
 from model.logging import log_design_call, logged_completion
 
 
@@ -228,36 +226,18 @@ def record_model_usage(
     operation: str,
     model: str | None = None,
 ) -> None:
-    """Append provider token usage without making telemetry a compilation failure."""
+    """Print usage; persistent provider usage lives alongside its reply in model_logs."""
     if path is None:
         return
     usage = getattr(response, "usage", None)
     if usage is None:
         return
-    record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "operation": operation,
-        "schema_name": schema_name,
-        "model": model or getattr(response, "model", None),
-        "response_id": getattr(response, "id", None),
-        "usage": _jsonable(usage),
-    }
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-        # Usage files live at <workspace>/.arc/model_usage.jsonl; cost
-        # accounting is rooted at <workspace> so its artifacts share the
-        # same .arc directory rather than becoming .arc/.arc/...
-        record_cost_usage(path.parent.parent, model or getattr(response, "model", None) or "", record["usage"])
-        summary = record["usage"] if isinstance(record["usage"], dict) else {}
+    summary = _jsonable(usage)
+    if isinstance(summary, dict):
         print("MODEL_USAGE " + json.dumps({"schema_name": schema_name,
               "operation": operation, "prompt_tokens": summary.get("prompt_tokens"),
               "completion_tokens": summary.get("completion_tokens"),
               "total_tokens": summary.get("total_tokens")}, ensure_ascii=False))
-    except OSError:
-        # Usage accounting must never mask a valid model response.
-        return
 
 
 def _jsonable(value: Any) -> Any:
