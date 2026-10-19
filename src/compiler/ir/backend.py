@@ -1,5 +1,5 @@
 """Canonical backend symbol table; module identities and graph edges are compiler-owned."""
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict, NotRequired
 
 
 class BackendTypeDefinition(TypedDict):
@@ -40,3 +40,4 @@ class BackendIR(TypedDict):
     ir_kind: Literal['backend_design']
     types: list[BackendTypeDefinition]
     modules: list[APIModule | FunctionModule | DatabaseModule]
+    identity: NotRequired[dict[str, Any]]

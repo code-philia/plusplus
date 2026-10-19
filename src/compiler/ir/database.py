@@ -54,6 +54,7 @@ class ERModelIR(TypedDict):
     access: dict[str, dict[str, list[str]]]
     unique_constraints: NotRequired[list[dict[str, Any]]]
     reference: NotRequired[dict[str, Any]]
+    identity: NotRequired[dict[str, Any]]
 
 
 SchemaDataType = Literal["string", "integer", "number", "boolean", "date", "datetime", "json", "uuid"]
@@ -121,6 +122,7 @@ class SchemaIR(TypedDict):
     status: Literal["RESOLVED", "PROPOSED"]
     tables: list[SchemaTable]
     traceability: dict[str, Any]
+    identity: NotRequired[dict[str, Any]]
 
 
 def table_constraints(table: SchemaTable) -> list[SchemaConstraint]:
