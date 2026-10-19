@@ -28,6 +28,10 @@ class ProjectBuilder:
         self.environment = dict(os.environ if environment is None else environment)
 
     def build(self) -> ProjectBuildResult:
+        from compiler.identity.lowering import integration_errors
+        identity_errors = integration_errors(self.output_root)
+        if identity_errors:
+            return ProjectBuildResult(ok=False, errors=identity_errors)
         package_path = self.output_root / "package.json"
         if not package_path.is_file():
             return ProjectBuildResult(
