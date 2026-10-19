@@ -27,7 +27,7 @@ export function seedDatabase(connection: Database.Database): void {
 '''
 
 
-def runtime_sources(statements):
+def runtime_sources(statements, *, identity=False):
     initialize = ('import type Database from "better-sqlite3";\n'
                   + 'export const schemaInitializationStatements = ' + json.dumps(statements, ensure_ascii=False, indent=2) + ' as const;\n'
                   + 'export function initializeDatabase(connection: Database.Database): void {\n'
@@ -52,5 +52,12 @@ export let sqliteDatabase: Database.Database;
 export function bindDatabaseClient(client: DatabaseClient): void { sqliteDatabase = client.connection; }
 export function schemaTransaction<T>(work: () => T): T { return sqliteDatabase.transaction(work)(); }
 '''
+    seed = SEED_SOURCE
+    if identity:
+        seed = seed.replace('import type Database',
+            'import { initializeIdentity, bootstrapIdentityFromEnv } from "../identity/store.js";\nimport type Database', 1)
+        seed = seed.replace('  initializeDatabase(connection);',
+                            '  initializeDatabase(connection);\n  initializeIdentity(connection);', 1)
+        seed = seed.replace('  })();\n}', '  })();\n  bootstrapIdentityFromEnv(connection);\n}', 1)
     return {'backend/src/db/client.ts': client, 'backend/src/db/initialize.ts': initialize,
-            SEED_PATH: SEED_SOURCE}
+            SEED_PATH: seed}

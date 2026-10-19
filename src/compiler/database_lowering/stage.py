@@ -65,7 +65,10 @@ class DatabaseLoweringPass:
     def compile(self, schema, output_dir, *, dry_run=False):
         if schema.get('ir_kind') != 'database_schema' or schema.get('status') != 'RESOLVED':
             raise ValueError('Database lowering requires a RESOLVED SchemaIR')
-        files = runtime_sources([create_statement(table) for table in schema['tables']])
+        from compiler.identity.lowering import backend_sources
+        identity = backend_sources(schema)
+        files = runtime_sources([create_statement(table) for table in schema['tables']], identity=bool(identity))
+        files.update(identity)
         # The seed is cumulative implementation code, not a fresh placeholder on every lowering.
         from pathlib import Path
         seed = Path(output_dir) / SEED_PATH
@@ -79,6 +82,11 @@ class DatabaseLoweringPass:
                 'shared_modules': [{'id': 'SYSTEM.DB_CLIENT', 'name': 'Database connection', 'file_path': 'backend/src/db/client.ts'},
                     {'id': 'SYSTEM.DB_SCHEMA', 'name': 'Database table initialization', 'file_path': 'backend/src/db/initialize.ts'},
                     {'id': 'SYSTEM.SEED', 'name': 'Startup reset and cumulative seed', 'file_path': SEED_PATH}]}
+        if identity:
+            plan['identity'] = schema['identity']
+            plan['shared_modules'].extend({'id': 'SYSTEM.IDENTITY.' + path.rsplit('/', 1)[-1],
+                'name': 'Compiler-owned identity runtime: ' + path.rsplit('/', 1)[-1],
+                'file_path': path, 'read_only': True} for path in identity)
         if dry_run:
             return plan, files
         return write_stage(output_dir, 'database', plan, files,
