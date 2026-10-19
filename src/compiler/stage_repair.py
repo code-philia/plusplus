@@ -7,6 +7,7 @@ from compiler.implementation.contracts import SCHEMA
 from compiler.implementation.patcher import apply_edits, read_source, restore, source_versions
 from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
+from compiler.identity.lowering import infrastructure_file
 
 
 INSTRUCTIONS = '''## Background and role
@@ -46,6 +47,8 @@ def repair_gate(model, output, stage, check, evidence, *, contracts=None):
     configs = {path.relative_to(root).as_posix() for layer in ('backend', 'frontend', 'shared', '')
                for path in (root / layer).glob('*.json') if path.name in
                {'package.json', 'tsconfig.json', 'tsconfig.app.json'}}
+    configs.update(path for path in catalog if infrastructure_file(path))
+    catalog.difference_update(configs)
     loaded, feedback, rejected_files = set(), [], []
     for attempt in range(1, attempts + 1):
         log.info(f'{stage}: repair {attempt}/{attempts}')
