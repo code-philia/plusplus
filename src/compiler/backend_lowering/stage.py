@@ -9,6 +9,8 @@ from compiler.backend_design.validation import graph_errors, route_key
 
 class BackendLoweringPass:
     def compile(self, requirements, backend, output_dir, *, dry_run=False):
+        from compiler.identity.design import identity_enabled
+        identity = identity_enabled(requirements)
         if backend.get('ir_kind') != 'backend_design':
             raise ValueError('Expected backend_design IR')
         modules = backend['modules']
@@ -44,6 +46,9 @@ class BackendLoweringPass:
                             'group_requirement_id': group, 'file_path': path, 'export': row['name'],
                             'input_type': input_name, 'output_type': output_name, 'callees': row['callees']})
             if row['kind'] == 'API':
+                if identity and (row['path'].lower().rstrip('/') == '/api/auth'
+                                 or row['path'].lower().startswith('/api/auth/')):
+                    raise ValueError('The /api/auth namespace belongs to the identity runtime; reuse its fixed endpoints')
                 key = route_key(row)
                 if key in seen_routes or row['method'] not in {'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'}:
                     raise ValueError(f'Duplicate or invalid route: {key}')
@@ -85,9 +90,28 @@ class BackendLoweringPass:
             + '  client.close(); process.exitCode = 1;\n});\n'
             + 'server.on("close", () => client.close());\n'
             + 'process.once("SIGTERM", () => server.close());\nprocess.once("SIGINT", () => server.close());\n')
+        if identity:
+            files[app_path] = ('import { installIdentity } from "./identity/http.js";\n' + files[app_path]).replace(
+                '  app.use(express.json());', '  app.use(express.json());\n  installIdentity(app);', 1)
+            server_path = 'backend/src/server.ts'
+            files[server_path] = ('import { initializeIdentity, bootstrapIdentityFromEnv } from "./identity/store.js";\n'
+                + files[server_path]).replace(
+                    'try { if (process.env.ARC_VALIDATION_PREPARED === "1") initializeDatabase(client.connection);\n'
+                    'else seedDatabase(client.connection); bindDatabaseClient(client); }',
+                    'try {\n'
+                    '  const initialized = client.connection.prepare("SELECT name FROM sqlite_master WHERE type = \'table\' AND name NOT LIKE \'sqlite_%\' LIMIT 1").get();\n'
+                    '  if (process.env.ARC_RESET_DATABASE === "1" || !initialized) seedDatabase(client.connection);\n'
+                    '  else initializeDatabase(client.connection);\n'
+                    '  bindDatabaseClient(client);\n'
+                    '  initializeIdentity(client.connection);\n'
+                    '  bootstrapIdentityFromEnv(client.connection);\n'
+                    '}', 1)
         plan = {'ir_kind': 'backend_lowering', 'strategy': 'deterministic_parent_groups',
                 'entrypoint': 'backend/src/server.ts', 'modules': records, 'routes': routes,
                 'types': [{'name': row['name'], 'file_path': types_path, 'export': row['name']} for row in backend['types']]}
+        if identity:
+            plan['identity'] = {'mount': 'installIdentity(app)', 'reserved_namespace': '/api/auth',
+                                'startup': 'Preserve existing data; ARC_RESET_DATABASE=1 explicitly resets and seeds.'}
         if dry_run:
             return plan, files
         return write_stage(output_dir, 'backend', plan, files, bootstrap_files={'backend/src/app.ts', 'backend/src/server.ts'})
