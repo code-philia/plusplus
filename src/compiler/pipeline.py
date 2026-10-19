@@ -92,6 +92,9 @@ class Compiler:
             try:
                 return action()
             except Exception as exc:
+                from .identity.stage import IdentityDesignError
+                if isinstance(exc, IdentityDesignError):
+                    raise
                 await stage_failed(exc)
                 return fallback
 
@@ -161,6 +164,11 @@ class Compiler:
                 SimpleNamespace(schema=refine_er_model(empty_er, requirement_ids=set(leaves)).schema,
                     er_model=empty_er, node_states={rid: 'FAILED' for rid in leaves},
                     ok=False, errors=['Database design unavailable'], warnings=[]))
+            # Fail closed even if the generic database recovery caught an identity design error.
+            from .identity.design import identity_enabled
+            if identity_enabled(requirements) and not database.schema.get('identity'):
+                from .identity.stage import IdentityDesignError
+                raise IdentityDesignError('Identity design resolved but database storage is unavailable')
             await guarded(lambda: (
                 write_json_atomic(root / 'design/database/schema.json', database.schema),
                 write_json_atomic(root / 'design/database/er_model.json', database.er_model),
@@ -225,6 +233,8 @@ class Compiler:
                 return plan, effective
 
             database_plan, database.schema = await lower('database', DatabaseLoweringPass(), database.schema)
+            if database.schema.get('identity'):
+                artifacts['identity'] = str(root / 'design/identity/contract.json')
             await self._log('Waiting for visual evidence before backend design.')
             try:
                 visual_future.result()
