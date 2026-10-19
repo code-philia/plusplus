@@ -128,6 +128,11 @@ class FrontendLoweringPass:
                 'app': {'ui_id': frontend['ui']['id'], 'file_path': app_path, 'export': 'App'},
                 'components': components, 'ui': ui_records, 'data': data_records, 'events': events,
                 'handlers': handlers, 'types': [{'name': row['name'], 'file_path': types_path, 'export': row['name']} for row in frontend['types']]}
+        from compiler.identity.design import identity_enabled
+        if identity_enabled(requirements):
+            from compiler.identity.lowering import frontend_sources
+            files.update(frontend_sources())
+            plan['identity'] = {'client': 'frontend/src/identity/client.ts', 'read_only': True}
         if dry_run:
             return plan, files
         return write_stage(output_dir, 'frontend', plan, files, bootstrap_files={'frontend/src/App.tsx', 'frontend/src/main.tsx'})
