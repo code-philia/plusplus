@@ -116,6 +116,7 @@ class FrontendDesignPass:
                     mode = 'new' if new_page else 'bind' if parsed else 'extend'
                     subtree = next(row for row in trial['ui']['children'] if row['id'] == state['ui_id'])
                     payload = {'current_task': {'requirement': requirement, 'data_access': data_access},
+                               'identity_contract': backend.get('identity', {}),
                                'current_page': {'name': page['name'], 'reference': reference, 'ui_id': state['ui_id']},
                                'page_mode': mode, 'selected_ui_tree': copy.deepcopy(subtree),
                                'loaded_ui_ids': list(ui_index(subtree)[0])}
@@ -142,6 +143,7 @@ class FrontendDesignPass:
                 apis.extend(copy.deepcopy(row) for row in backend['modules']
                             if row['kind'] == 'API' and row['id'] in api_ids - known_api_ids)
                 payload = {'current_task': {'requirement': requirement, 'data_access': data_access},
+                           'identity_contract': backend.get('identity', {}),
                            'selected_ui_tree': pages, 'app': {key: trial['ui'][key] for key in ('id', 'name', 'kind')},
                            'loaded_ui_ids': sorted(loaded), 'api_contracts': apis,
                            'api_index': module_index([row for row in backend['modules'] if row['kind'] == 'API']),
@@ -227,7 +229,9 @@ class FrontendDesignPass:
                 request['validation_feedback'], request['previous_output'] = feedback, previous
             self.sequence += 1
             try:
-                kwargs = {'schema_name': 'frontend_design_' + phase, 'instructions': PROMPTS[phase],
+                from compiler.identity.lowering import DESIGN_INSTRUCTIONS
+                kwargs = {'schema_name': 'frontend_design_' + phase,
+                          'instructions': PROMPTS[phase] + (DESIGN_INSTRUCTIONS if payload.get('identity_contract') else ''),
                           'input_payload': request, 'output_schema': SCHEMAS[phase]}
                 if phase == 'visual':
                     if self.visual_model is None:
