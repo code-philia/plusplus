@@ -68,6 +68,7 @@ const environment = ENVIRONMENT as const;
 installValidationRuntime(environment);
 // Ordinary startup owns database reset and the shared cumulative seed.
 process.env.ARC_VALIDATION_PREPARED = "0";
+process.env.ARC_RESET_DATABASE = "1";
 await import("../server.js");
 '''.replace("ENVIRONMENT", json.dumps(environment, ensure_ascii=False)).replace(
         "TIMEZONE", "process.env.TZ = " + json.dumps(environment["timezone"]) + ";" if environment.get("timezone") else "")
