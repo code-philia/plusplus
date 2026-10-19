@@ -29,11 +29,7 @@ class RequirementPreprocessor:
     """Parse, normalize, validate, and schedule an ARC requirement document."""
 
     def compile(self, requirement_path: Path) -> PreprocessingResult:
-        source_path = requirement_path.expanduser().resolve()
-        if source_path.is_dir():
-            source_path = next((source_path / name for name in (
-                'requirements.yaml', 'requirements.yml', 'requirements/requirements.yaml',
-                'requirements/requirements.yml') if (source_path / name).is_file()), source_path / 'requirements.yaml')
+        source_path = resolve_requirement_path(requirement_path)
         errors: list[str] = []
         try:
             source_bytes = source_path.read_bytes()
@@ -105,6 +101,8 @@ class RequirementPreprocessor:
             try:
                 bundle = loader.load(requirement_ir)
                 requirement_ir['bundle'] = bundle
+                from .evidence import attach_bundle_pages
+                attach_bundle_pages(requirement_ir)
                 fingerprint = hashlib.sha256()
                 fingerprint.update(source_bytes)
                 for name, digest in bundle['files'].items():
@@ -379,3 +377,12 @@ def write_bundle_report(parsed: PreprocessingResult, artifact_root: Path) -> Pat
         'source': parsed.requirement_ir.get('source', {}), 'files': bundle['files'],
         'diagnostics': bundle['diagnostics'], 'bindings': bundle['bindings'], 'errors': parsed.errors})
     return path
+
+
+def resolve_requirement_path(requirement_path):
+    source_path = requirement_path.expanduser().resolve()
+    if source_path.is_dir():
+        source_path = next((source_path / name for name in (
+            'requirements.yaml', 'requirements.yml', 'requirements/requirements.yaml',
+            'requirements/requirements.yml') if (source_path / name).is_file()), source_path / 'requirements.yaml')
+    return source_path

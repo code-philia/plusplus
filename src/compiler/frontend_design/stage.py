@@ -19,6 +19,8 @@ from .contracts import PROMPTS, SCHEMAS, VISUAL_FIELDS, VISUAL_ANALYSIS_VERSION
 from .delta import apply_ui, apply_data, apply_interaction, make_ui
 from .validation import ui_index, validate_ir
 from .visual import image_evidence
+from .bundle import seed_bundle_ui, state_region, BUNDLE_UI_INSTRUCTIONS, navigation_context
+from compiler.preprocessing.evidence import requirement_evidence, EVIDENCE_INSTRUCTIONS, attach_bundle_pages
 
 
 @dataclass
@@ -59,13 +61,23 @@ class FrontendDesignPass:
             raise ValueError('Frontend design requires a RESOLVED er_model.json')
         if backend.get('ir_kind') != 'backend_design':
             raise ValueError('Frontend design requires backend_ir.json')
+        attach_bundle_pages(requirements)
         ir = {'ir_kind': 'frontend_design', 'ui': make_ui('UI_APP', 'Application', 'app', 'Application root.'),
               'data': [], 'events': [], 'handlers': [], 'types': copy.deepcopy(backend['types'])}
         self.backend_type_names = {row['name'] for row in backend['types']}
         initial_errors = validate_ir(ir, backend)
         if initial_errors:
             raise ValueError('Invalid imported backend types: ' + '; '.join(initial_errors))
-        page_states, states, warnings = [], {}, []
+        page_states, states, warnings = seed_bundle_ui(ir, requirements), {}, []
+        warnings.extend(row['code'] + ': ' + row.get('page_id', '') for row in ir.get('navigation', {}).get('diagnostics', []))
+        for shell_state in ir.get('navigation', {}).get('shell', {}).get('states', []):
+            for capture in shell_state['captures']:
+                reference = capture['files'].get('screenshot', {}).get('path')
+                if reference:
+                    try:
+                        shell_state['visual_analysis'] = self._analyze('Application shell', reference, requirements['root_id'])['analysis']
+                    except Exception as exc:
+                        warnings.append(f'Shared shell visual analysis unavailable: {reference}: {exc}')
         children = children_by_id(requirements)
         order = [rid for rid in postorder(requirements) if not children[rid]]
         for rid in order:
@@ -98,6 +110,7 @@ class FrontendDesignPass:
                 missing_page = any(not any(row['name'] == page['name'] for row in page_states)
                                    for page in requirement['pages'])
                 data_access = database_context(database, rid)
+                references = requirement_evidence(requirements, rid, database, visual_cache=self.visual_cache)
                 for page in requirement['pages']:
                     state = next((row for row in trial_pages if row['name'] == page['name']), None)
                     new_page = state is None
@@ -115,9 +128,18 @@ class FrontendDesignPass:
                                                   for row in state['references'])
                     mode = 'new' if new_page else 'bind' if parsed else 'extend'
                     subtree = next(row for row in trial['ui']['children'] if row['id'] == state['ui_id'])
+                    explicit_tree, explicit_state = state_region(trial, page)
+                    if explicit_state is not None:
+                        subtree = explicit_tree
+                        state_refs = explicit_state.setdefault('references', [])
+                        parsed = any(row['reference'] == reference and (not record or row['sha256'] == record['sha256']) for row in state_refs)
+                        mode = 'new' if not explicit_state.get('designed') else 'bind' if parsed else 'extend'
                     payload = {'current_task': {'requirement': requirement, 'data_access': data_access},
                                'identity_contract': backend.get('identity', {}),
-                               'current_page': {'name': page['name'], 'reference': reference, 'ui_id': state['ui_id']},
+                               'reference_evidence': references, 'navigation_contract': navigation_context(trial, rid),
+                               'page_state_contract': copy.deepcopy(explicit_state),
+                               'current_page': {'name': page['name'], 'reference': reference, 'ui_id': subtree['id'],
+                                                'page_id': page.get('page_id'), 'state_id': page.get('state_id')},
                                'page_mode': mode, 'selected_ui_tree': copy.deepcopy(subtree),
                                'loaded_ui_ids': list(ui_index(subtree)[0])}
                     if missing_page:
@@ -127,6 +149,13 @@ class FrontendDesignPass:
                         payload['baseline_page_states'] = {'name': state['name'], 'reference': baseline['reference'],
                                                            'analysis': self._page_analysis(state)}
                     trial = self._design('ui', rid, trial, payload, backend)
+                    if explicit_state is not None:
+                        # _design returns a copy; update the committed candidate's state record.
+                        _, explicit_state = state_region(trial, page)
+                        explicit_state['designed'] = True
+                        explicit_state.setdefault('references', [])
+                        if record and not any(row['reference'] == reference for row in explicit_state['references']):
+                            explicit_state['references'].append({key: record[key] for key in ('reference', 'sha256')})
                     if record:
                         old = next((index for index, row in enumerate(state['references']) if row['reference'] == reference), None)
                         if old is None:
@@ -144,6 +173,7 @@ class FrontendDesignPass:
                             if row['kind'] == 'API' and row['id'] in api_ids - known_api_ids)
                 payload = {'current_task': {'requirement': requirement, 'data_access': data_access},
                            'identity_contract': backend.get('identity', {}),
+                           'reference_evidence': references, 'navigation_contract': navigation_context(trial, rid),
                            'selected_ui_tree': pages, 'app': {key: trial['ui'][key] for key in ('id', 'name', 'kind')},
                            'loaded_ui_ids': sorted(loaded), 'api_contracts': apis,
                            'api_index': module_index([row for row in backend['modules'] if row['kind'] == 'API']),
@@ -231,7 +261,7 @@ class FrontendDesignPass:
             try:
                 from compiler.identity.lowering import DESIGN_INSTRUCTIONS
                 kwargs = {'schema_name': 'frontend_design_' + phase,
-                          'instructions': PROMPTS[phase] + (DESIGN_INSTRUCTIONS if payload.get('identity_contract') else ''),
+                          'instructions': PROMPTS[phase] + (BUNDLE_UI_INSTRUCTIONS + EVIDENCE_INSTRUCTIONS if payload.get('reference_evidence') else '') + (DESIGN_INSTRUCTIONS if payload.get('identity_contract') else ''),
                           'input_payload': request, 'output_schema': SCHEMAS[phase]}
                 if phase == 'visual':
                     if self.visual_model is None:
@@ -277,6 +307,10 @@ class FrontendDesignPass:
         return copy.deepcopy(record)
 
     def _save(self, ir, page_states):
+        for page in page_states:
+            if page.get('page_id'):
+                source = next(row for row in ir['navigation']['pages'] if row['id'] == page['page_id'])
+                page['states'] = copy.deepcopy(source['states'])
         write_json_atomic(self.root / 'frontend_ir.json', ir)
         write_json_atomic(self.root / 'page_states.json', page_states)
 

@@ -17,6 +17,12 @@ class FrontendLoweringPass:
         if frontend.get('ir_kind') != 'frontend_design':
             raise ValueError('Expected frontend_design IR')
         nodes, parents = ui_index(frontend['ui'])
+        from compiler.frontend_design.bundle import validate_navigation
+        navigation_errors = validate_navigation(frontend)
+        if navigation_errors:
+            raise ValueError('; '.join(navigation_errors))
+        explicit_states = {state['ui_id']: state for page in frontend.get('navigation', {}).get('pages', [])
+                           for state in page['states'] if state.get('ui_id')}
         definitions = {row['name']: row['schema'] for row in frontend['types']}
         types_path = 'frontend/src/types/contracts.ts'
         files = {types_path: type_file(frontend['types'])}
@@ -28,7 +34,7 @@ class FrontendLoweringPass:
         def size(row):
             return 1 + sum(size(child) for child in row['children'])
         def select(row, page, depth, owner=None):
-            extract = row['kind'] == 'page' or (depth <= self.component_depth and size(row) >= self.min_nodes
+            extract = row['id'] in explicit_states or row['kind'] == 'page' or (depth <= self.component_depth and size(row) >= self.min_nodes
                        and row['kind'] in {'region', 'form', 'list', 'dialog', 'navigation'})
             if extract:
                 reqs = sorted(subtree_reqs(row))
@@ -93,14 +99,23 @@ class FrontendLoweringPass:
             children = [component_by_ui[child] for child in child_components[key]]
             imports = ''.join('import { ' + child['export'] + ' } from ' + json.dumps(relative_import(path, child['file_path'], '')) + ';\n' for child in children)
             body = '\n'.join('    <' + child['export'] + ' />' for child in children)
+            if key in explicit_states:
+                from .navigation import RUNTIME_PATH
+                imports += 'import { PageStateView } from ' + json.dumps(relative_import(path, RUNTIME_PATH, '')) + ';\n'
             files[path] = (imports + state_contract(key, path) + f'export type {row["export"]}Props = {{}};\n'
                 + f'export function {row["export"]}(_props: {row["export"]}Props) {{\n'
                 + f'  return <section data-ui-id={json.dumps(key)}>\n{body}\n  </section>;\n}}\n')
+            if key in explicit_states:
+                files[path] = files[path].replace('return <section', 'return <PageStateView stateId={' + json.dumps(explicit_states[key]['id']) + '}><section').replace('</section>;', '</section></PageStateView>;')
         pages = [component_by_ui[page['id']] for page in frontend['ui']['children']]
         imports = ''.join('import { ' + row['export'] + ' } from ' + json.dumps(relative_import(app_path, row['file_path'], '')) + ';\n' for row in pages)
         files[app_path] = (imports + state_contract(frontend['ui']['id'], app_path)
                           + 'export function App() {\n  return <>\n'
                           + '\n'.join('    <' + row['export'] + ' />' for row in pages) + '\n  </>;\n}\nexport default App;\n')
+        from .navigation import lower_navigation
+        navigation_plan = lower_navigation(frontend, component_by_ui, files, app_path)
+        if navigation_plan is not None:
+            files[app_path] = state_contract(frontend['ui']['id'], app_path) + files[app_path]
         files['frontend/src/main.tsx'] = ('import "./index.css";\nimport { createRoot } from "react-dom/client";\nimport App from "./App";\n'
             + 'const root = document.getElementById("root");\nif (root) createRoot(root).render(<App />);\n')
         handlers = []
@@ -128,6 +143,8 @@ class FrontendLoweringPass:
                 'app': {'ui_id': frontend['ui']['id'], 'file_path': app_path, 'export': 'App'},
                 'components': components, 'ui': ui_records, 'data': data_records, 'events': events,
                 'handlers': handlers, 'types': [{'name': row['name'], 'file_path': types_path, 'export': row['name']} for row in frontend['types']]}
+        if navigation_plan is not None:
+            plan['navigation'] = navigation_plan
         from compiler.identity.design import identity_enabled
         if identity_enabled(requirements):
             from compiler.identity.lowering import frontend_sources

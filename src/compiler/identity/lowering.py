@@ -89,7 +89,7 @@ def frontend_sources():
 
 
 def infrastructure_file(path):
-    return path.startswith(('backend/src/identity/', 'frontend/src/identity/'))
+    return path.startswith(('backend/src/identity/', 'frontend/src/identity/')) or path == 'frontend/src/navigation/runtime.tsx'
 
 
 def integration_errors(root, *, require_wiring=True):

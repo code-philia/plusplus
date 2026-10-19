@@ -215,6 +215,10 @@ def phase_examples(phase):
     patch = {**PATCH_EXAMPLE, 'edits': [{**PATCH_EXAMPLE['edits'][0], 'file': edit_path}]}
     return json.dumps(load), json.dumps(patch)
 
+from compiler.preprocessing.evidence import EVIDENCE_INSTRUCTIONS
+from compiler.frontend_design.bundle import BUNDLE_UI_INSTRUCTIONS
+BACKGROUND += EVIDENCE_INSTRUCTIONS + BUNDLE_UI_INSTRUCTIONS
+
 PROMPTS = {phase: BACKGROUND + task + '\n## Return format\n' + json.dumps(SCHEMA)
            + '\n## Example: read a file when needed\n' + phase_examples(phase)[0]
            + '\n## Example: replace a changed file (use actual allowed paths and contents)\n' + phase_examples(phase)[1]

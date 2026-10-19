@@ -134,7 +134,8 @@ class Compiler:
                 await finish(root / 'project/report.json')
 
             model = self.model if self.model is not None else Model.from_env()
-            visual = FrontendDesignPass(model, root, reference_root=Path(request.requirement_path).resolve().parent)
+            from .preprocessing.stage import resolve_requirement_path
+            visual = FrontendDesignPass(model, root, reference_root=resolve_requirement_path(request.requirement_path).parent)
             await begin('visual_analysis')
             visual_report = reports[-1]
             def analyze_images():

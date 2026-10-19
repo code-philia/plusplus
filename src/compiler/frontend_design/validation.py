@@ -154,4 +154,6 @@ def validate_ir(ir, backend):
         for key in row['events']:
             if key not in events or events[key]['ui'] != row['id']:
                 errors.append(f'Nonreciprocal UI event: {row["id"]} -> {key}')
+    from .bundle import validate_navigation
+    errors.extend(validate_navigation(ir))
     return list(dict.fromkeys(errors))
