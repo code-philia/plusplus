@@ -66,6 +66,8 @@ def refine_er_model(
     relational = state.to_schema(status="RESOLVED")
     relational["status"] = "PROPOSED" if errors or er_model["status"] != "RESOLVED" else "RESOLVED"
     result = refine_schema(er_model, relational)
+    if er_model.get('identity'):
+        result.schema['identity'] = copy.deepcopy(er_model['identity'])
     result.errors[:0] = errors
     result.errors.extend(validate_schema_ir(result.schema))
     if result.errors:
@@ -226,7 +228,7 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
         return ["SCHEMA_IR_KIND_INVALID: expected database-neutral Schema IR"]
     if "target" in schema or "policies" in schema:
         errors.append("SCHEMA_IR_DIALECT_SPECIFIC: target/storage policies do not belong in Schema IR")
-    unknown = set(schema) - {"ir_kind", "status", "tables", "traceability"}
+    unknown = set(schema) - {"ir_kind", "status", "tables", "traceability", "identity"}
     if unknown:
         errors.append("SCHEMA_IR_UNKNOWN_SEMANTICS: " + ", ".join(sorted(unknown)))
     tables = {table["name"]: table for table in schema["tables"]}

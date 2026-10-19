@@ -32,6 +32,7 @@ from .refinement import refine_er_model
 from .state import DatabaseSchemaState
 from .imported import import_reference_er, REFERENCE_INSTRUCTIONS
 from .validation import _normalize_decision_context, _validate_decision_context, _validate_decision_shape
+from compiler.identity.lowering import public_contract, DESIGN_INSTRUCTIONS
 
 
 @dataclass(slots=True)
@@ -81,6 +82,9 @@ class DatabaseSchemaPass:
             write_json_atomic(self._artifact_root / 'design/database/import-report.json', imported)
             write_json_atomic(self._artifact_root / 'design/database/imported_er_model.json', state.to_er_model())
             state.warnings.extend(f"{row['code']}: {row['message']}" for row in imported['diagnostics'])
+        if state.identity:
+            write_json_atomic(self._artifact_root / 'design/identity/contract.json', {
+                'storage': state.identity, 'runtime': public_contract(state.identity)})
         passes: list[tuple[str, str, dict[str, Any], str, Callable[..., None]]] = [
             ("pass1_entities", "arc_database_entities", ENTITY_DECISION_SCHEMA, ENTITY_INSTRUCTIONS, state.apply_entities),
             ("pass2_fields", "arc_database_fields", FIELD_DECISION_SCHEMA, FIELD_INSTRUCTIONS, state.apply_fields),
@@ -97,7 +101,8 @@ class DatabaseSchemaPass:
                     phase=phase,
                     schema_name=schema_name,
                     output_schema=output_schema,
-                    instructions=instructions + (REFERENCE_INSTRUCTIONS if imported['entities'] else ''),
+                    instructions=instructions + (REFERENCE_INSTRUCTIONS if imported['entities'] else '')
+                                 + '\nA subsequent IdentityIR stage owns credentials, sessions and technical identity storage. Design domain facts only; do not invent password/session infrastructure.',
                     node_id=node_id,
                     context=self._context_for(
                         phase, node_id, node, nodes, state, effective_dependencies
@@ -131,13 +136,14 @@ class DatabaseSchemaPass:
 
         # Pass 3 is scheduled by ER entities, never by requirement nodes.
         # Entity discovery follows requirement postorder; retain that order here.
-        entity_keys = list(state.entities)
+        entity_keys = [key for key in state.entities if key not in state.identity.get('system_entities', [])]
         self._trace(f"PASS_START phase=pass3_relationships entities={len(entity_keys)}")
         for entity_key in entity_keys:
             decision = self._run_unit(
                 phase="pass3_relationships", schema_name="arc_database_relationships",
                 output_schema=RELATIONSHIP_DECISION_SCHEMA,
-                instructions=RELATIONSHIP_INSTRUCTIONS + (REFERENCE_INSTRUCTIONS if imported['entities'] else ''),
+                instructions=RELATIONSHIP_INSTRUCTIONS + (REFERENCE_INSTRUCTIONS if imported['entities'] else '')
+                             + '\nA subsequent IdentityIR stage owns credentials, sessions and technical identity storage. Design domain facts only; do not invent password/session infrastructure.',
                 node_id=entity_key,
                 context=self._relationship_context(entity_key, nodes, state, effective_dependencies),
                 errors=errors, warnings=state.warnings,
@@ -151,6 +157,11 @@ class DatabaseSchemaPass:
                     state.apply_relationships(requirement_id, {"relationships": [relationship]}, errors)
             self._trace(f"DECISION_APPLIED phase=pass3_relationships entity={entity_key}")
         self._trace(f"PASS_COMPLETED phase=pass3_relationships entities={len(entity_keys)}")
+
+        # Identity meaning is designed from the completed domain graph, before storage lowering.
+        from compiler.identity.stage import compile_identity
+        compile_identity(self._model, self._artifact_root, requirement_ir, state,
+                         domain_status='PROPOSED' if errors else 'RESOLVED')
 
         # Physical relationship mapping follows completion of the ER passes.
         er_model = state.to_er_model()
@@ -181,8 +192,11 @@ class DatabaseSchemaPass:
             nodes,
             effective_dependencies.get(node_id, node.get("dependencies", [])),
         )
+        if state.identity:
+            requirement['identity_contract'] = public_contract(state.identity)
         if phase == "pass1_entities":
-            return {"requirement": requirement, "existing_entities": state.entity_headers(),
+            return {"requirement": requirement, "existing_entities": [row for row in state.entity_headers()
+                    if row['key'] not in state.identity.get('system_entities', [])],
                     **self._reference_context(node_id)}
         if phase == "pass2_fields":
             return {"requirement": requirement, "related_entities": state.schema_slice(node_id)["entities"],
@@ -203,6 +217,7 @@ class DatabaseSchemaPass:
             related_ids.update(effective_dependencies.get(rid, nodes.get(rid, {}).get("dependencies", [])))
         return {
             "focus_entity": state._public_entity(state.entities[entity_key]),
+            'identity_contract': public_contract(state.identity),
             **self._reference_context(entity_key, entity=True),
             "related_requirements": [
                 _node_context(nodes[rid], nodes, effective_dependencies.get(rid, nodes[rid].get("dependencies", [])))
@@ -216,9 +231,11 @@ class DatabaseSchemaPass:
                                      "description": field["description"]}
                                     for field in sorted(item["fields"].values(), key=lambda field: field["name"])]}
                     for item in state._ordered_entities()
+                    if item['key'] not in state.identity.get('system_entities', [])
                 ],
                 "relationships": [copy.deepcopy(item) for item in sorted(
-                    state.relationships.values(), key=lambda item: item["id"])],
+                    state.relationships.values(), key=lambda item: item["id"])
+                    if not {item['parent'], item['child']} & set(state.identity.get('system_entities', []))],
             },
             "requirement_catalog": [
                 {"id": rid, "name": nodes[rid].get("name", ""),

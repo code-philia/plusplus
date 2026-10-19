@@ -38,6 +38,7 @@ class DatabaseSchemaState:
         self.reference_fields: dict[str, dict[str, Any]] = {}
         self.reference_relationships: dict[str, dict[str, Any]] = {}
         self.unique_constraints: list[dict[str, Any]] = []
+        self.identity: dict[str, Any] = {}
 
     def entity_headers(self) -> list[dict[str, Any]]:
         return [{"key": item["key"], "description": item["description"],
@@ -294,6 +295,7 @@ class DatabaseSchemaState:
             "conflicts": copy.deepcopy(self.conflicts),
             "access": {rid: {operation: sorted(targets) for operation, targets in access.items()}
                        for rid, access in sorted(self.requirement_access.items())},
+            **({'identity': copy.deepcopy(self.identity)} if self.identity else {}),
             **({'unique_constraints': copy.deepcopy(self.unique_constraints)} if self.unique_constraints else {}),
             "entities": [self._public_entity(item) for item in self._ordered_entities()],
             "relationships": [
