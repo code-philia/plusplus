@@ -6,6 +6,7 @@ from compiler.backend_design.context import terms
 from compiler.frontend_design.validation import ui_index
 from compiler.lowering.types import refs
 from .patcher import read_source
+from compiler.identity.lowering import infrastructure_file, public_contract
 
 SYSTEM_FILES = {
     'backend/src/db/seed.ts': ('SYSTEM.SEED', 'Single cumulative startup reset and fixture insertion module'),
@@ -57,7 +58,8 @@ class FileContext:
                     add(path, row['id'], source['reqs'], len(source['reqs']) > 1,
                         source.get('spec', source.get('name', row['id'])), contracts=source)
         for row in database_plan.get('shared_modules', []):
-            add(row['file_path'], row['id'], shared=True, spec=row['name'])
+            add(row['file_path'], row['id'], shared=True, spec=row['name'],
+                kind='infrastructure' if row.get('read_only') else 'source')
         for path, (key, summary) in SYSTEM_FILES.items():
             if (self.root / path).is_file():
                 add(path, key, shared=True, spec=summary)
@@ -87,6 +89,10 @@ class FileContext:
                     add(path.relative_to(self.root).as_posix(), 'CONFIG.' + path.name, spec=path.name, kind='configuration')
         if (self.root / 'package.json').is_file():
             add('package.json', 'CONFIG.WORKSPACE', spec='Workspace scripts and dependencies', kind='configuration')
+        for path, record in self.catalog.items():
+            if infrastructure_file(path):
+                record['kind'] = 'infrastructure'
+                record['shared'] = True
 
     def direct_files(self, rid):
         # Module/UI/data/event ownership supplies direct source. Table usage alone must
@@ -258,7 +264,8 @@ class FileContext:
                 for ref in refs(definitions[name]['schema']) - wanted_types:
                     wanted_types.add(ref); pending.append(ref)
         data_access = self.database.get('access', {}).get(rid, {'read': [], 'write': []})
-        return {'current_task': {'requirement': requirement, 'phase': phase, 'data_access': data_access,
+        return {'identity_contract': public_contract(self.database.get('identity')),
+                'current_task': {'requirement': requirement, 'phase': phase, 'data_access': data_access,
                                  **({'recovery': self.recovery[rid]} if rid in self.recovery else {})},
                 'current_contracts': contracts, 'types': [definitions[key] for key in sorted(wanted_types) if key in definitions],
                 'editable_files': editable, 'read_only_files': readonly,

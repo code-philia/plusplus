@@ -76,13 +76,31 @@ from reasoning: the compiler runs compilation and tests. Test edits must preserv
 and the intended acceptance behavior; never weaken tests merely to match a faulty implementation.
 
 ## Shared database and seed
-backend/src/db/seed.ts is the single cumulative seed module. Every application startup resets only its
-selected database connection, creates schema, then inserts all accumulated fixture data before listening.
+backend/src/db/seed.ts is the single cumulative seed module. Without identity infrastructure,
+application startup resets its selected database connection, creates schema, then inserts accumulated
+fixtures before listening. Identity-enabled startup/reset behavior is described below.
 Load seed.ts when GIVEN or description explicitly needs existing records. Add fixtures from this leaf;
 preserve all earlier fixtures. Do not create a session merely because a user account exists. Use the same
 encoding/hashing as real authentication. Seed must not derive fixtures from test code or incoming requests.
 Database connection and table-creation source are shared modules that can be loaded and edited explicitly.
 Do not add per-requirement seeds, test-local inserts, endpoint seeding or lazy fixture hacks.
+
+## Identity infrastructure
+When identity_contract is present, authentication already exists as compiler-owned, read-only
+modules under backend/src/identity and frontend/src/identity. Reuse these modules and fixed
+/api/auth/login, /api/auth/me and /api/auth/logout endpoints; do not implement another credential,
+cookie, session or role mechanism. Preserve installIdentity(app) before business routes and the
+identity initialization/bootstrap calls in server.ts. request.identity is derived from the server
+session, never request body/headers/query fields supplied by a caller. requireIdentity also checks
+CSRF for unsafe requests. authenticatedFetch sends cookies and the CSRF header for browser writes.
+Provision fixtures through provisionIdentityAccount in the shared seed using its explicit connection,
+not raw password inserts or fabricated sessions. The provisioner reuses the domain User.id and
+canonical policy roles; credentials never belong in DTOs or frontend state. Administrative service
+functions are not public APIs: authorize business administration before invoking them.
+For identity-enabled projects, ordinary startup preserves the database. First startup and explicit
+ARC_RESET_DATABASE=1 run the shared seed. Tests/validation opt into reset on their isolated databases.
+Loading infrastructure source never grants permission to rewrite it. API authorization and own/team/
+assigned resource filters still require explicit business rules; authenticated does not mean allowed.
 '''
 TASKS = {
     'test_generation': '''## Task: generate acceptance tests before implementing

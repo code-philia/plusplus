@@ -84,6 +84,12 @@ export default defineConfig({
 ''',
         }
         for name, content in configs.items():
+            if name == 'setup.ts' and (self.root / 'backend/src/identity/store.ts').is_file():
+                content = ('import { initializeIdentity, bootstrapIdentityFromEnv } from "../../backend/src/identity/store.js";\n'
+                    + content).replace('bindDatabaseClient(client);',
+                        'bindDatabaseClient(client);\ninitializeIdentity(client.connection);\nbootstrapIdentityFromEnv(client.connection);', 1)
+            if name == 'playwright.config.ts':
+                content = content.replace('NODE_ENV: "test",', 'NODE_ENV: "test", ARC_RESET_DATABASE: "1",')
             (self.support / name).write_text(content, encoding='utf-8')
 
     def check_environment(self, *, browser=False):
@@ -107,6 +113,10 @@ export default defineConfig({
         return [result]
 
     def compile(self):
+        from compiler.identity.lowering import integration_errors
+        errors = integration_errors(self.root)
+        if errors:
+            return [{'status': 'FAILED', 'failure_kind': 'identity_integration', 'error': '; '.join(errors)}]
         from compiler.lowering.planning import relative_import
         compiler = self.tool('typescript', 'bin/tsc')
         artifact = self.runtime
@@ -188,7 +198,8 @@ export default defineConfig({
         environment = {'DATABASE_URL': db_path, 'PLAYWRIGHT_JSON_OUTPUT_FILE': str(report),
                        'ARC_TDD_RESULTS_DIR': str(report.parent / 'results'),
                        'ARC_TDD_PORT': str(selected_port), 'PORT': str(selected_port),
-                       'ARC_TDD_EXTERNAL_SERVER': '1', 'NODE_ENV': 'test', 'ARC_VALIDATION_PREPARED': '0'}
+                       'ARC_TDD_EXTERNAL_SERVER': '1', 'NODE_ENV': 'test', 'ARC_VALIDATION_PREPARED': '0',
+                       'ARC_RESET_DATABASE': '1'}
         server_log = report.with_suffix('.server.log')
         server = None
         ready = False
