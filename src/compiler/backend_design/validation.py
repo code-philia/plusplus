@@ -161,6 +161,10 @@ def validate_ir(ir, database):
     targets = {entity['key'] for entity in database['entities']}
     targets.update(entity['key'] + '.' + field['name'] for entity in database['entities'] for field in entity['fields'])
     for row in modules:
+        if (database.get('identity') and row['kind'] == 'API'
+                and (row.get('path', '').lower().rstrip('/') == '/api/auth'
+                     or row.get('path', '').lower().startswith('/api/auth/'))):
+            errors.append('Reuse compiler-owned /api/auth endpoints instead of designing duplicate authentication routes')
         if row['name'].casefold() in names:
             errors.append(f'Globally duplicate module name: {row["name"]}')
         names.add(row['name'].casefold())
@@ -204,6 +208,8 @@ def validate_ir(ir, database):
                         raise ValueError(f'{row["name"]}.{operation}: expected JSON string array')
                     if len(set(references)) != len(references) or set(references) - targets:
                         raise ValueError(f'{row["name"]}.{operation}: duplicate or unknown database target')
+                    if database.get('identity') and any(ref.split('.')[0] in database['identity']['system_entities'] for ref in references):
+                        raise ValueError('Use the compiler-owned identity service instead of direct credential/session storage modules')
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             errors.append(str(exc))
     errors += graph_errors(ir)

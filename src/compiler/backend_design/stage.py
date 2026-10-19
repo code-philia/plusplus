@@ -14,6 +14,7 @@ from utils.logging import SynchronousLog
 from .contracts import PROMPTS, SCHEMAS
 from .context import database_context, retrieve, module_index, expand_module_context
 from .validation import shape_errors, validate_ir, parse_contract, normalize_contract
+from compiler.identity.lowering import DESIGN_INSTRUCTIONS
 
 
 @dataclass
@@ -46,6 +47,9 @@ class BackendDesignPass:
         if database.get('ir_kind') != 'er_model' or database.get('status') != 'RESOLVED':
             raise ValueError('Backend design requires a RESOLVED er_model.json')
         ir = {'ir_kind': 'backend_design', 'types': [], 'modules': []}
+        if database.get('identity'):
+            from compiler.identity.lowering import public_contract
+            ir['identity'] = public_contract(database['identity'])
         children = children_by_id(requirements)
         order = [rid for rid in postorder(requirements) if not children[rid]]
         states, warnings = {}, []
@@ -82,6 +86,7 @@ class BackendDesignPass:
                                 ancestor_ids.add(caller)
                                 pending.append(caller)
                     payload = {'current_task': {'requirement': requirement, 'data': data},
+                               'identity_contract': ir.get('identity', {}),
                                'upstream_modules': selected_upstream, 'reuse_candidates': candidates,
                                'existing_types': trial['types'],
                                'reference_catalog': references,
@@ -136,7 +141,8 @@ class BackendDesignPass:
                 request['validation_feedback'], request['previous_output'] = feedback, previous
             self.sequence += 1
             try:
-                output = self.model.generate_json(schema_name='backend_' + kind.lower(), instructions=PROMPTS[kind],
+                output = self.model.generate_json(schema_name='backend_' + kind.lower(),
+                                                 instructions=PROMPTS[kind] + (DESIGN_INSTRUCTIONS if payload.get('identity_contract') else ''),
                                                  input_payload=request, output_schema=SCHEMAS[kind])
                 previous = output
                 feedback = shape_errors(output, SCHEMAS[kind])
