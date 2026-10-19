@@ -86,6 +86,24 @@ def isolate_design(stage, lowerer, requirements, design, output):
         units = leaf_ids(requirements)
     else:
         units = design.get('tables', []) if stage == 'database' else design.get('ui', {}).get('children', [])
+    if stage == 'database' and design.get('identity'):
+        from compiler.ir.database import table_constraints
+        identity = design['identity']
+        required = {identity[key] for key in ('user_table', 'role_table', 'credential_table', 'session_table', 'membership_table')}
+        tables = {row['name']: row for row in design['tables']}
+        pending = list(required)
+        while pending:
+            name = pending.pop()
+            if name not in tables:
+                raise ValueError('Identity storage cannot be removed during recovery: ' + name)
+            for constraint in table_constraints(tables[name]):
+                if constraint['kind'] == 'FOREIGN_KEY' and constraint['referenced_table'] not in required:
+                    required.add(constraint['referenced_table'])
+                    pending.append(constraint['referenced_table'])
+        accepted = [row for row in units if row['name'] in required]
+        units = [row for row in units if row['name'] not in required]
+        candidate = {**design, 'status': 'RESOLVED', 'tables': accepted}
+        lowerer.compile(candidate, output, dry_run=True)
     for unit in units:
         try:
             if stage == 'backend':
@@ -143,6 +161,10 @@ def bind_recovery(output, stage, plan, reasons):
 def minimal_lowering(stage, lowerer, requirements, output):
     """Install a minimal runtime while respecting sources modified after generation."""
     output = Path(output)
+    if stage == 'database':
+        from compiler.identity.design import identity_enabled
+        if identity_enabled(requirements):
+            raise ValueError('Cannot replace identity-enabled database storage with an empty recovery schema')
     design = empty_design(stage)
     args = (design,) if stage == 'database' else (requirements, design)
     plan, files = lowerer.compile(*args, output, dry_run=True)

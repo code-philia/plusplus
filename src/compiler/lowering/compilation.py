@@ -10,6 +10,14 @@ from utils.jsonio import read_json, write_json_atomic
 def check_compilation(output, stage):
     output = Path(output).resolve()
     artifact = output / '.arc/lowering' / stage
+    from compiler.identity.lowering import integration_errors
+    identity_errors = integration_errors(output, require_wiring=stage != 'database')
+    if identity_errors:
+        result = {'status': 'COMPILATION_FAILED', 'message': '; '.join(identity_errors)}
+        report = read_json(artifact / 'report.json', {})
+        report.update(status=result['status'], compilation=result)
+        write_json_atomic(artifact / 'report.json', report)
+        return result
     project_stage = 'backend' if stage == 'database' else stage
     config_name = 'tsconfig.json' if project_stage == 'backend' else 'tsconfig.app.json'
     project_config = output / project_stage / config_name
