@@ -112,8 +112,11 @@ class BundleLoader:
                          if {relation['parent'], relation['child']} & set(binding['entities'])]
             relation['requirement_ids'] = explicit or endpoints
             relation['binding_basis'] = 'explicit_reference' if explicit else 'endpoint_references'
+        identity_path = 'reference/identity/model.json'
+        identity_proposal = self.json(identity_path) if (self.root / identity_path).is_file() else None
         return {'schema_version': 1, 'files': dict(sorted(self.files.items())), 'bindings': bindings,
                 'er': er, 'ui': ui, 'authorization': authorization, 'processes': processes,
+                'identity_proposal': identity_proposal,
                 'diagnostics': self.diagnostics}
 
     def er(self, bindings):
