@@ -9,9 +9,10 @@ from typing import Any
 
 from compiler.preprocessing.traversal import postorder, children_by_id
 from model.client import describe_model_error
-from utils.jsonio import write_json_atomic
+from utils.jsonio import read_json, write_json_atomic
 from utils.logging import SynchronousLog
-from .contracts import PROMPTS, SCHEMAS
+from .contracts import PROMPTS, SCHEMAS, REFERENCE_INSTRUCTIONS
+from compiler.preprocessing.evidence import requirement_evidence, attach_bundle_pages
 from .context import database_context, retrieve, module_index, expand_module_context
 from .validation import shape_errors, validate_ir, parse_contract, normalize_contract
 from compiler.identity.lowering import DESIGN_INSTRUCTIONS
@@ -46,6 +47,7 @@ class BackendDesignPass:
     def compile(self, requirements, database):
         if database.get('ir_kind') != 'er_model' or database.get('status') != 'RESOLVED':
             raise ValueError('Backend design requires a RESOLVED er_model.json')
+        attach_bundle_pages(requirements)
         ir = {'ir_kind': 'backend_design', 'types': [], 'modules': []}
         if database.get('identity'):
             from compiler.identity.lowering import public_contract
@@ -53,14 +55,20 @@ class BackendDesignPass:
         children = children_by_id(requirements)
         order = [rid for rid in postorder(requirements) if not children[rid]]
         states, warnings = {}, []
+        scoped_evidence = {}
         for rid in order:
             self.log.info('Leaf design: RUNNING', node_id=rid)
             trial = copy.deepcopy(ir)
             selected = []
             try:
                 node = requirements['nodes'][rid]
-                requirement = self._requirement(node, requirements['nodes'])
+                visual_cache = read_json(self.artifact_root / 'visual_cache.json', {})
+                requirement = self._requirement(node, requirements['nodes'], visual_cache=visual_cache)
                 data = database_context(database, rid)
+                references = requirement_evidence(requirements, rid, database, visual_cache=visual_cache)
+                if references:
+                    scoped_evidence[rid] = references
+                    write_json_atomic(self.root / 'reference_evidence.json', scoped_evidence)
                 for kind in ('API', 'FUNC', 'DB'):
                     if kind != 'API' and not selected:
                         break
@@ -91,6 +99,8 @@ class BackendDesignPass:
                                'existing_types': trial['types'],
                                'reference_catalog': references,
                                'module_index': module_index(trial['modules'])}
+                    if references:
+                        payload['reference_evidence'] = copy.deepcopy(references)
                     if kind == 'DB':
                         payload['upstream_api_contracts'] = [row for row in trial['modules']
                                                            if row['id'] in ancestor_ids and row['kind'] == 'API']
@@ -110,14 +120,14 @@ class BackendDesignPass:
         write_json_atomic(self.root / 'backend_ir.json', ir)
         write_json_atomic(self.root / 'report.json', {'status': 'GENERATED_WITH_WARNINGS' if warnings else 'GENERATED',
             'node_states': states, 'warnings': warnings, 'errors': [], 'leaf_order': order,
-            'model_attempt': self.attempts, 'model_calls': self.sequence})
+            'model_attempt': self.attempts, 'model_calls': self.sequence,
+            **({'reference_evidence': str(self.root / 'reference_evidence.json')} if scoped_evidence else {})})
         return result
 
-    def _requirement(self, node, nodes):
+    def _requirement(self, node, nodes, *, visual_cache=None):
         result = {key: copy.deepcopy(node[key]) for key in ('id', 'name', 'description', 'scenarios', 'pages') if key in node}
         # Visual stage stores analysis separately; attach only this leaf's reference evidence.
-        cache_path = self.artifact_root / 'visual_cache.json'
-        cache = json.loads(cache_path.read_text(encoding='utf-8-sig')) if cache_path.is_file() else {}
+        cache = visual_cache if visual_cache is not None else read_json(self.artifact_root / 'visual_cache.json', {})
         for page in result.get('pages', []):
             reference = page.get('reference')
             normalized = str(reference or '').replace('\\', '/')
@@ -142,7 +152,7 @@ class BackendDesignPass:
             self.sequence += 1
             try:
                 output = self.model.generate_json(schema_name='backend_' + kind.lower(),
-                                                 instructions=PROMPTS[kind] + (DESIGN_INSTRUCTIONS if payload.get('identity_contract') else ''),
+                                                 instructions=PROMPTS[kind] + (REFERENCE_INSTRUCTIONS[kind] if payload.get('reference_evidence') else '') + (DESIGN_INSTRUCTIONS if payload.get('identity_contract') else ''),
                                                  input_payload=request, output_schema=SCHEMAS[kind])
                 previous = output
                 feedback = shape_errors(output, SCHEMAS[kind])

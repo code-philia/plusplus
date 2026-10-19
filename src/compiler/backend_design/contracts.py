@@ -243,3 +243,68 @@ PROMPTS = {kind: BACKGROUND + task + '\n## Return format\n' + json.dumps(SCHEMAS
            + '\n## Wiring example (assume the shown contracts are loaded and behavior matches)\n'
            + json.dumps(WIRING_EXAMPLES[kind])
            for kind, task in TASKS.items()}
+
+
+# Evidence is supplied only for referenced bundles; plain YAML keeps its existing prompts.
+from compiler.preprocessing.evidence import EVIDENCE_INSTRUCTIONS
+
+REFERENCE_BACKGROUND = EVIDENCE_INSTRUCTIONS + """
+## Backend reference contracts
+reference_evidence is evidence for this leaf, not a second feature backlog. Direct bindings
+establish requirement scope; relationship endpoints, inherited constraints and resource-related
+policy rules supply context. Keep their provenance and unresolved diagnostics distinct.
+Current_task.data and the completed ER define the available storage symbols. Preserve stable
+UUID id versus published business keys, required/unique facts and relationship cardinalities.
+Use source ER references to explain constraints; never recreate tables, silently change fields
+or guess an unresolved rel_* ID. A conflict or missing identity/scope mapping is an explicit
+design gap, not permission to invent a field or weaken a rule.
+State relevant permission IDs, exact resource/action IDs, allow/deny and all/own/team/assigned
+scope in the existing spec. Include matching deny rules even when not directly cited. Preserve
+policy completeness gaps; absence of a published allow does not imply public access. The resource
+all_system_features is an ordinary ID, not a wildcard. Do not derive privileges from role labels,
+is_admin attributes, the exploration account or menu visibility.
+UI evidence supplies exact fields, selections, filters, commands and states that require backend
+behavior. A page route is not an API route. Opening a dialog or following a recipe is not itself
+a backend operation. Do not generate endpoints for every visible control or shared shell item.
+Use cited BPMN nodes, flows, conditions and lanes to describe business ordering, valid state
+transitions, actor responsibility and atomicity when supported. A lane is not an inferred role
+binding; a workflow does not authorize uncited features. Do not promise rollback across independent
+calls without describing a transaction boundary. Trace material constraints using source IDs in
+spec, without adding new output fields. Keep the existing JSON delta and typed-interface schema.
+"""
+REFERENCE_INSTRUCTIONS = {
+    'API': REFERENCE_BACKGROUND + """
+## API evidence obligations
+Specify which operations require a server-verified identity and the exact permission checks,
+resource lookup and ownership context needed before data is returned or mutated. Describe
+missing-identity, denied-access and invalid business-transition failures explicitly.
+When identity_contract exists, obtain the actor from request.identity, not a caller-supplied
+subject/role/team payload. API payload source supports path/query/header/body only: do not invent
+a source:context parameter or expose trusted actor fields as client authority. Describe server
+identity extraction in spec, and pass it through typed FUNC/DB arguments where needed. Distinguish
+a client-selected target user/record from the authenticated actor. Define inputs/outputs sufficient
+for the evidenced UI operations and subsequent transaction/scope enforcement.
+""",
+    'FUNC': REFERENCE_BACKGROUND + """
+## Business-function evidence obligations
+Carry authenticated actor and necessary authorization/ownership context explicitly in typed
+inputs, with spec mapping each value from the upstream API's verified context or collaborator
+results. FUNC cannot read HTTP requests, cookies or ambient sessions. Keep policy preconditions
+and denial behavior when reusing a collaborator; a broadly named existing function is not proof
+that its contract enforces this leaf's scope. Describe prerequisite lookups, workflow state checks,
+calculations, ordered writes and the transaction boundary for coupled business updates. Pass the
+validated query/write scope downstream rather than deferring filtering to the browser.
+""",
+    'DB': REFERENCE_BACKGROUND + """
+## Storage evidence obligations
+Declare the actual existing ER entities/fields in read/write and explicit typed selectors/values.
+For scoped operations, specify predicates binding rows to the trusted actor/team/assignment and
+where those values originate. own/team/assigned are policy concepts: identify an evidenced domain
+relationship/field before claiming enforcement; do not treat the credential team_id or a similarly
+named column as proof of a domain mapping. Missing mappings remain explicit design gaps.
+Filter reads/counts/pagination/exports and constrain mutations at the storage boundary as required;
+fetching all rows then hiding them in UI does not enforce scope. Preserve required/unique/business
+key and FK semantics, conditional state-transition writes and transaction participation needed by
+the upstream workflow. Emit contracts only, not SQL, migrations or a new permission runtime.
+""",
+}
