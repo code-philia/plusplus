@@ -52,6 +52,8 @@ class ERModelIR(TypedDict):
     contributions: dict[str, Any]
     conflicts: list[dict[str, Any]]
     access: dict[str, dict[str, list[str]]]
+    unique_constraints: NotRequired[list[dict[str, Any]]]
+    reference: NotRequired[dict[str, Any]]
 
 
 SchemaDataType = Literal["string", "integer", "number", "boolean", "date", "datetime", "json", "uuid"]

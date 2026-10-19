@@ -295,13 +295,15 @@ def _validate_decision_shape(phase: str, node_id: str, decision: Any) -> list[st
             if not isinstance(item, dict) or not isinstance(item.get("entity"), str):
                 errors.append("Pass 2 contains an invalid entity decision")
                 continue
-            if set(item) != {"entity", "new_fields", "update_fields"}:
-                errors.append("Pass 2 entity must contain only entity, new_fields and update_fields")
+            if set(item) != {"entity", "new_fields", "update_fields", "reuse_fields"}:
+                errors.append("Pass 2 entity must contain entity, new_fields, update_fields and reuse_fields")
             if not isinstance(item.get("new_fields"), list) or not isinstance(item.get("update_fields"), list):
                 errors.append("Pass 2 field lists must be arrays")
                 continue
-            if not item["new_fields"] and not item["update_fields"]:
-                errors.append("Pass 2 must omit entities with no field changes")
+            if not isinstance(item.get('reuse_fields'), list) or any(not isinstance(name, str) for name in item['reuse_fields']):
+                errors.append('Pass 2 reuse_fields must be an array of field names')
+            if not item["new_fields"] and not item["update_fields"] and not item.get('reuse_fields'):
+                errors.append("Pass 2 must omit entities with no field changes or reuse")
             for operation in ("new_fields", "update_fields"):
                 for field_item in item[operation]:
                     if not isinstance(field_item, dict):
@@ -397,6 +399,9 @@ def _validate_decision_context(
     related = set(related_by_key)
 
     if phase == "pass2_fields":
+        for unique in decision.get('unique_constraints', []):
+            if not isinstance(unique, dict) or unique.get('entity') not in related:
+                errors.append('Composite uniqueness must target an entity in related_entities')
         entities = decision.get("entities")
         if not isinstance(entities, list):
             return []

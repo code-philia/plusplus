@@ -35,6 +35,9 @@ class DatabaseSchemaState:
         self.contributions: dict[str, Any] = {"fields": {}, "relationships": {}}
         self.conflicts: list[dict[str, Any]] = []
         self.requirement_access: dict[str, dict[str, set[str]]] = {}
+        self.reference_fields: dict[str, dict[str, Any]] = {}
+        self.reference_relationships: dict[str, dict[str, Any]] = {}
+        self.unique_constraints: list[dict[str, Any]] = []
 
     def entity_headers(self) -> list[dict[str, Any]]:
         return [{"key": item["key"], "description": item["description"],
@@ -98,6 +101,25 @@ class DatabaseSchemaState:
                 else:
                     self._link_field(requirement_id, key, name)
         self._apply_access(requirement_id, decision, errors)
+        for unique in decision.get('unique_constraints', []):
+            try:
+                self.add_unique(unique['entity'], unique['fields'], [requirement_id], unique['description'])
+            except (KeyError, TypeError, ValueError) as exc:
+                errors.append(f'Invalid composite business key: {exc}')
+
+    def add_unique(self, entity, fields, requirements, description):
+        if (entity not in self.entities or not isinstance(fields, list) or len(fields) < 2
+                or any(not isinstance(name, str) for name in fields)
+                or len(fields) != len(set(fields)) or set(fields) - self.entities[entity]['fields'].keys()
+                or not isinstance(description, str) or not description.strip()):
+            raise ValueError(f'{entity}: expected existing distinct fields and a business-key description')
+        names = sorted(fields)
+        existing = next((row for row in self.unique_constraints if row['entity'] == entity and row['fields'] == names), None)
+        if existing:
+            existing['requirement_ids'] = sorted(set(existing['requirement_ids']) | set(requirements))
+        else:
+            self.unique_constraints.append({'entity': entity, 'fields': names,
+                                            'description': description, 'requirement_ids': sorted(set(requirements))})
 
     def _apply_access(self, rid: str, decision: dict[str, Any], errors: list[str]) -> None:
         self.ensure_requirement(rid)
@@ -118,8 +140,17 @@ class DatabaseSchemaState:
         reference = key + "." + raw["name"]
         candidates = copy.deepcopy(self.contributions["fields"].get(reference, {}))
         candidates[rid] = copy.deepcopy(raw)
+        published = self.reference_fields.get(reference)
+        if published and raw['type'] != published['type']:
+            self._record_conflict(key + '.' + raw['name'], rid, raw, 'Field type conflicts with published ER.', errors)
+            return
         try:
-            merged = merge_field_contributions(key, candidates)
+            merged = merge_field_contributions(key, {**({'': published} if published else {}), **candidates})
+            if published:
+                from .validation import _field_property_errors
+                invalid = _field_property_errors(key, merged)
+                if invalid:
+                    raise ValueError('; '.join(invalid))
         except ValueError as exc:
             self._record_conflict(reference, rid, raw, str(exc), errors)
             return
@@ -142,6 +173,11 @@ class DatabaseSchemaState:
             parent = _normalize_identifier(str(raw.get("parent", "")))
             child = _normalize_identifier(str(raw.get("child", "")))
             relationship_type = str(raw.get("type", ""))
+            reference = self.reference_relationships.get(relationship_key)
+            if reference and any(raw.get(name) != reference[name] for name in
+                                 ('parent', 'child', 'type', 'parent_min', 'parent_max', 'child_min', 'child_max')):
+                errors.append(f'Published ER relationship cannot be redefined: {relationship_key}')
+                continue
             if parent not in self.entities or child not in self.entities:
                 errors.append(_format_error("ARC2231", f"Relationship references unknown entities: {parent} -> {child}.", node_id=requirement_id))
                 continue
@@ -190,6 +226,10 @@ class DatabaseSchemaState:
     def add_static_constraints(self) -> None:
         """Lower structural facts to constraints without an LLM call."""
 
+        for unique in self.unique_constraints:
+            for rid in unique['requirement_ids']:
+                self._add_constraint('COMPOSITE_UNIQUE',
+                    [f'{unique["entity"]}.{name}' for name in unique['fields']], unique['description'], rid)
         for entity in self._ordered_entities():
             for field_item in entity["fields"].values():
                 ref = f"{entity['key']}.{field_item['name']}"
@@ -254,6 +294,7 @@ class DatabaseSchemaState:
             "conflicts": copy.deepcopy(self.conflicts),
             "access": {rid: {operation: sorted(targets) for operation, targets in access.items()}
                        for rid, access in sorted(self.requirement_access.items())},
+            **({'unique_constraints': copy.deepcopy(self.unique_constraints)} if self.unique_constraints else {}),
             "entities": [self._public_entity(item) for item in self._ordered_entities()],
             "relationships": [
                 {name: copy.deepcopy(item[name]) for name in (

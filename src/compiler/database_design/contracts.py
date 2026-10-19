@@ -83,6 +83,13 @@ FIELD_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False, "required": ["requirement_id", "entities"],
     "properties": {
         "requirement_id": {"type": "string"},
+        "unique_constraints": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["entity", "fields", "description"],
+            "properties": {"entity": {"type": "string"},
+                "fields": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+                "description": {"type": "string"}},
+        }},
         "entities": {
             "type": "array",
             "items": {
@@ -288,4 +295,10 @@ including compiler-owned id, must be listed in reuse_fields unless declared in n
 update_fields. read/write may contain entity keys and entity.field references. Do not invent
 fields to satisfy access. Refer only to related_entities and fields declared in this reply.
 Empty output: {"requirement_id":"REQ-1", "entities":[], "read":[], "write":[]}.
+The optional root unique_constraints array may declare an explicitly documented
+composite business key: {"entity": existing_key, "fields": [existing_field_names],
+"description": source-backed reason}. Do not infer composite uniqueness from
+co-occurrence or examples. This is the sole exception to the cross-field constraint
+restriction above. Every field must already exist or be declared in this reply.
+Use [] when no composite key is stated. Existing published keys remain in force.
 """

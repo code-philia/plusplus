@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from .bundle import BundleLoader
+
 SUPPORTED_NODE_TYPES = {"FOLDER", "ATOMIC"}
 
 
@@ -16,6 +18,7 @@ class PreprocessingResult:
     requirement_ir: dict[str, Any]
     dependency_graph: dict[str, Any]
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -27,6 +30,10 @@ class RequirementPreprocessor:
 
     def compile(self, requirement_path: Path) -> PreprocessingResult:
         source_path = requirement_path.expanduser().resolve()
+        if source_path.is_dir():
+            source_path = next((source_path / name for name in (
+                'requirements.yaml', 'requirements.yml', 'requirements/requirements.yaml',
+                'requirements/requirements.yml') if (source_path / name).is_file()), source_path / 'requirements.yaml')
         errors: list[str] = []
         try:
             source_bytes = source_path.read_bytes()
@@ -89,6 +96,27 @@ class RequirementPreprocessor:
         for key in ("environment", "data"):
             if key in payload:
                 requirement_ir[key] = copy.deepcopy(payload[key])
+        warnings: list[str] = []
+        if (source_path.parent / 'reference').is_dir() or any(
+            '[ER:' in node['description'] or '[OPA:' in node['description'] or '[BPMN:' in node['description']
+            for node in nodes.values()
+        ):
+            loader = BundleLoader(source_path.parent)
+            try:
+                bundle = loader.load(requirement_ir)
+                requirement_ir['bundle'] = bundle
+                fingerprint = hashlib.sha256()
+                fingerprint.update(source_bytes)
+                for name, digest in bundle['files'].items():
+                    fingerprint.update(f'\0{name}\0{digest}'.encode('utf-8'))
+                requirement_ir['source']['bundle_sha256'] = fingerprint.hexdigest()
+                warnings.extend(f"{row['code']}: {row['message']}" for row in bundle['diagnostics']
+                                if row['severity'] == 'warning')
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, SyntaxError) as exc:
+                errors.append(_format_error('ARC1401', f'Invalid requirements bundle: {exc}', source=str(source_path)))
+                requirement_ir['bundle'] = {'schema_version': 1, 'files': dict(sorted(loader.files.items())),
+                    'bindings': {}, 'diagnostics': [*loader.diagnostics,
+                        {'severity': 'error', 'code': 'BUNDLE_INVALID', 'message': str(exc)}]}
         dependency_graph = {
             "requirement_dependencies": dict(sorted(requirement_dependencies.items())),
             "atomic_dependencies": dict(sorted(effective_dependencies.items())),
@@ -97,7 +125,7 @@ class RequirementPreprocessor:
         }
         if not root_id:
             errors.append(_format_error("ARC1003", "Requirement root id is missing.", source=str(source_path)))
-        return PreprocessingResult(requirement_ir, dependency_graph, errors)
+        return PreprocessingResult(requirement_ir, dependency_graph, errors, warnings)
 
     def _normalize_node(
         self,
@@ -338,3 +366,16 @@ class RequirementPreprocessor:
 def _format_error(code: str, message: str, *, node_id: str | None = None, source: str | None = None) -> str:
     context = ", ".join(value for value in (node_id, source) if value)
     return f"{code}: {message}" + (f" ({context})" if context else "")
+
+
+def write_bundle_report(parsed: PreprocessingResult, artifact_root: Path) -> Path | None:
+    """Keep the same source/diagnostic report for full and standalone compilation."""
+    from utils.jsonio import write_json_atomic
+    bundle = parsed.requirement_ir.get('bundle')
+    if bundle is None:
+        return None
+    path = artifact_root / 'preprocessing/bundle-report.json'
+    write_json_atomic(path, {'status': 'RESOLVED' if parsed.ok else 'INVALID',
+        'source': parsed.requirement_ir.get('source', {}), 'files': bundle['files'],
+        'diagnostics': bundle['diagnostics'], 'bindings': bundle['bindings'], 'errors': parsed.errors})
+    return path

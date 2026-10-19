@@ -56,12 +56,20 @@ def refine_er_model(
     for relationship in er_model["relationships"]:
         for rid in relationship["requirement_ids"]:
             state.apply_relationships(rid, {"relationships": [relationship]}, errors)
+    for unique in er_model.get('unique_constraints', []):
+        try:
+            state.add_unique(unique['entity'], unique['fields'], unique['requirement_ids'], unique['description'])
+        except (KeyError, TypeError, ValueError) as exc:
+            errors.append(f'SCHEMA_IR_BUSINESS_KEY_INVALID: {exc}')
     state.lower_relationships(errors)
     state.add_static_constraints()
     relational = state.to_schema(status="RESOLVED")
     relational["status"] = "PROPOSED" if errors or er_model["status"] != "RESOLVED" else "RESOLVED"
     result = refine_schema(er_model, relational)
     result.errors[:0] = errors
+    result.errors.extend(validate_schema_ir(result.schema))
+    if result.errors:
+        result.schema['status'] = 'PROPOSED'
     return result
 
 
@@ -337,9 +345,12 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
         constraint_names = {constraint["name"] for table in tables.values()
                             for constraint in table_constraints(table)}
         for rid, links in traceability.items():
-            if (set(links) - {"tables", "columns", "constraints"}
+            if (set(links) - {"tables", "columns", "constraints", "read", "write"}
                     or set(links.get("tables", [])) - tables.keys()
                     or set(links.get("columns", [])) - column_refs
-                    or set(links.get("constraints", [])) - constraint_names):
+                    or set(links.get("constraints", [])) - constraint_names
+                    or any(not isinstance(links.get(operation, []), list)
+                           or any(ref not in column_refs and ref not in tables for ref in links.get(operation, []))
+                           for operation in ('read', 'write'))):
                 errors.append(f"SCHEMA_IR_TRACEABILITY_INVALID: {rid}")
     return errors

@@ -10,6 +10,7 @@ from typing import Any
 
 from .contracts import CompilationRequest, CompilationResult
 from .preprocessing import RequirementPreprocessor
+from .preprocessing.stage import write_bundle_report
 from .preprocessing.traversal import children_by_id, postorder
 from utils.jsonio import read_json, write_json_atomic
 from utils.logging import SynchronousLog, set_run_id
@@ -33,11 +34,12 @@ class Compiler:
             raise ValueError('Checkpoint resume is not supported by the current IR; use the individual stage scripts.')
         if not 1 <= request.web_port <= 65535:
             raise ValueError('Port must be between 1 and 65535')
-        parsed = RequirementPreprocessor().compile(request.requirement_path)
-        if not parsed.ok:
-            raise ValueError('; '.join(parsed.errors))
         output = request.output_dir.expanduser().resolve()
         root = output / '.arc'
+        parsed = RequirementPreprocessor().compile(request.requirement_path)
+        if not parsed.ok:
+            write_bundle_report(parsed, root)
+            raise ValueError('; '.join(parsed.errors))
         self.logger = SynchronousLog('Compiler', workspace_root=output)
         requirements = parsed.requirement_ir
         children = children_by_id(requirements)
@@ -49,6 +51,9 @@ class Compiler:
         write_json_atomic(root / 'preprocessing/requirement_ir.json', requirements)
         write_json_atomic(root / 'preprocessing/dependency_graph.json', parsed.dependency_graph)
         artifacts = {'requirements': str(root / 'preprocessing/requirement_ir.json')}
+        bundle_report = write_bundle_report(parsed, root)
+        if bundle_report:
+            artifacts['bundle'] = str(bundle_report)
         reports, failed, errors = [], [], []
         run_id = uuid.uuid4().hex
         set_run_id(run_id)
@@ -96,6 +101,9 @@ class Compiler:
                 await finish(path, result.warnings)
             else:
                 await stage_failed('; '.join(result.errors))
+
+        for warning in parsed.warnings:
+            await self._log(warning, 'warning')
 
         visual_executor = None
         visual_future = None

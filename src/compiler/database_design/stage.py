@@ -18,6 +18,7 @@ from ..ir.database import ERModelIR, SchemaIR
 from model.contracts import StructuredModel
 from model.client import describe_model_error
 from utils.trace import format_payload_trace
+from utils.jsonio import write_json_atomic
 from .common import _format_error
 from .contracts import (
     ENTITY_DECISION_SCHEMA,
@@ -29,7 +30,8 @@ from .contracts import (
 )
 from .refinement import refine_er_model
 from .state import DatabaseSchemaState
-from .validation import _normalize_decision_context
+from .imported import import_reference_er, REFERENCE_INSTRUCTIONS
+from .validation import _normalize_decision_context, _validate_decision_context, _validate_decision_shape
 
 
 @dataclass(slots=True)
@@ -72,6 +74,13 @@ class DatabaseSchemaPass:
         state = DatabaseSchemaState()
         for node_id in requirements:
             state.ensure_requirement(node_id)
+        imported = import_reference_er(state, requirement_ir)
+        self._reference = imported
+        if imported['entities']:
+            self._trace(f'ER_IMPORTED entities={len(imported["entities"])} relationships={len(imported["relationships"])}')
+            write_json_atomic(self._artifact_root / 'design/database/import-report.json', imported)
+            write_json_atomic(self._artifact_root / 'design/database/imported_er_model.json', state.to_er_model())
+            state.warnings.extend(f"{row['code']}: {row['message']}" for row in imported['diagnostics'])
         passes: list[tuple[str, str, dict[str, Any], str, Callable[..., None]]] = [
             ("pass1_entities", "arc_database_entities", ENTITY_DECISION_SCHEMA, ENTITY_INSTRUCTIONS, state.apply_entities),
             ("pass2_fields", "arc_database_fields", FIELD_DECISION_SCHEMA, FIELD_INSTRUCTIONS, state.apply_fields),
@@ -88,7 +97,7 @@ class DatabaseSchemaPass:
                     phase=phase,
                     schema_name=schema_name,
                     output_schema=output_schema,
-                    instructions=instructions,
+                    instructions=instructions + (REFERENCE_INSTRUCTIONS if imported['entities'] else ''),
                     node_id=node_id,
                     context=self._context_for(
                         phase, node_id, node, nodes, state, effective_dependencies
@@ -127,10 +136,12 @@ class DatabaseSchemaPass:
         for entity_key in entity_keys:
             decision = self._run_unit(
                 phase="pass3_relationships", schema_name="arc_database_relationships",
-                output_schema=RELATIONSHIP_DECISION_SCHEMA, instructions=RELATIONSHIP_INSTRUCTIONS,
+                output_schema=RELATIONSHIP_DECISION_SCHEMA,
+                instructions=RELATIONSHIP_INSTRUCTIONS + (REFERENCE_INSTRUCTIONS if imported['entities'] else ''),
                 node_id=entity_key,
                 context=self._relationship_context(entity_key, nodes, state, effective_dependencies),
                 errors=errors, warnings=state.warnings,
+                validate=lambda value, entity=entity_key: _validate_relationship_decision(state, entity, value),
             )
             if decision is None:
                 continue
@@ -143,6 +154,8 @@ class DatabaseSchemaPass:
 
         # Physical relationship mapping follows completion of the ER passes.
         er_model = state.to_er_model()
+        if imported['entities']:
+            er_model['reference'] = imported
         er_model["status"] = "RESOLVED" if not errors else "PROPOSED"
         refined = refine_er_model(er_model, requirement_ids=set(requirements))
         errors.extend(refined.errors)
@@ -169,11 +182,14 @@ class DatabaseSchemaPass:
             effective_dependencies.get(node_id, node.get("dependencies", [])),
         )
         if phase == "pass1_entities":
-            return {"requirement": requirement, "existing_entities": state.entity_headers()}
+            return {"requirement": requirement, "existing_entities": state.entity_headers(),
+                    **self._reference_context(node_id)}
         if phase == "pass2_fields":
             return {"requirement": requirement, "related_entities": state.schema_slice(node_id)["entities"],
                     "own_field_contributions": {key: copy.deepcopy(rows[node_id])
-                                                for key, rows in state.contributions["fields"].items() if node_id in rows}}
+                                                for key, rows in state.contributions["fields"].items() if node_id in rows},
+                    'existing_unique_constraints': copy.deepcopy(state.unique_constraints),
+                    **self._reference_context(node_id)}
         raise ValueError(f"Unknown database design phase: {phase}")
 
     def _relationship_context(
@@ -187,6 +203,7 @@ class DatabaseSchemaPass:
             related_ids.update(effective_dependencies.get(rid, nodes.get(rid, {}).get("dependencies", [])))
         return {
             "focus_entity": state._public_entity(state.entities[entity_key]),
+            **self._reference_context(entity_key, entity=True),
             "related_requirements": [
                 _node_context(nodes[rid], nodes, effective_dependencies.get(rid, nodes[rid].get("dependencies", [])))
                 for rid in sorted(related_ids) if isinstance(nodes.get(rid), dict)
@@ -210,6 +227,21 @@ class DatabaseSchemaPass:
                 for rid in sorted(state.requirement_entity_links) if isinstance(nodes.get(rid), dict)
             ],
         }
+
+    def _reference_context(self, key, *, entity=False):
+        reference = getattr(self, '_reference', {})
+        rows = [row for row in reference.get('entities', [])
+                if (row['key'] == key if entity else key in row['requirement_ids'])]
+        if not rows:
+            return {}
+        keys = {row['key'] for row in rows}
+        rids = {rid for row in rows for rid in row['requirement_ids']} if entity else {key}
+        return {'reference_contract': {'entities': copy.deepcopy(rows),
+            'relationships': [copy.deepcopy(row) for row in reference.get('relationships', [])
+                              if row['parent'] in keys or row['child'] in keys],
+            'diagnostics': [copy.deepcopy(row) for row in reference.get('diagnostics', [])
+                            if row.get('node_id') in rids or row.get('entity') in keys
+                            or not (row.get('node_id') or row.get('entity'))]}}
 
     def _run_unit(
         self,
@@ -277,6 +309,10 @@ class DatabaseSchemaPass:
                     decision, normalization_notes = _normalize_decision_context(
                         phase, decision, context
                     )
+                    feedback = _validate_decision_context(phase, decision, context)
+                    if feedback:
+                        self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
+                        continue
                     if validate is not None:
                         feedback = validate(decision)
                         if feedback:
@@ -311,7 +347,7 @@ def _validate_access_decision(state: DatabaseSchemaState, phase: str, rid: str,
     """Check metadata and references on an isolated trial before committing a pass."""
     if not isinstance(value, dict) or value.get('requirement_id') != rid:
         return ['Return an object with the exact current requirement_id.']
-    errors = []
+    errors = _validate_decision_shape(phase, rid, value)
     for operation in ('read', 'write'):
         references = value.get(operation)
         if not isinstance(references, list) or any(not isinstance(ref, str) for ref in references):
@@ -342,6 +378,17 @@ def _validate_access_decision(state: DatabaseSchemaState, phase: str, rid: str,
                 trial.apply_fields(rid, value, errors)
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
         errors.append(f'Invalid database design declaration: {exc}')
+    return errors
+
+
+def _validate_relationship_decision(state, entity, value):
+    errors = _validate_decision_shape('pass3_relationships', entity, value)
+    if errors:
+        return errors
+    trial = copy.deepcopy(state)
+    for relation in value['relationships']:
+        for rid in relation['evidence_requirement_ids']:
+            trial.apply_relationships(rid, {'relationships': [relation]}, errors)
     return errors
 
 

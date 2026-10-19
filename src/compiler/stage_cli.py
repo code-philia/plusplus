@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 from .preprocessing import RequirementPreprocessor
+from .preprocessing.stage import write_bundle_report
 from .workflow import WorkflowContext, plan_stage
 from utils.jsonio import write_json_atomic
 
@@ -20,6 +21,7 @@ def main(stage: str, argv: list[str] | None = None) -> int:
             from cli.commands import _locate_requirement_file
             parsed = RequirementPreprocessor().compile(Path(_locate_requirement_file(args.requirement_path)))
             if not parsed.ok:
+                write_bundle_report(parsed, output / '.arc')
                 raise ValueError('; '.join(parsed.errors))
             requirements, dependencies = parsed.requirement_ir, parsed.dependency_graph
             if (root / 'requirement_ir.json').is_file():
@@ -29,6 +31,7 @@ def main(stage: str, argv: list[str] | None = None) -> int:
             else:
                 write_json_atomic(root / 'requirement_ir.json', requirements)
                 write_json_atomic(root / 'dependency_graph.json', dependencies)
+            write_bundle_report(parsed, output / '.arc')
         else:
             requirements = json.loads((root / 'requirement_ir.json').read_text(encoding='utf-8-sig'))
             dependencies = json.loads((root / 'dependency_graph.json').read_text(encoding='utf-8-sig'))

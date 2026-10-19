@@ -34,8 +34,18 @@ def create_statement(table):
         kind = item['kind']
         columns = ', '.join(quote(name) for name in item['columns'])
         if kind == 'CHECK':
-            continue
-        if kind == 'PRIMARY_KEY':
+            predicate = item['predicate']
+            column, op, value = quote(predicate['column']), predicate['operator'], predicate['value']
+            if op in {'length_gte', 'length_lte'}:
+                expression = f'length({column}) {">=" if op == "length_gte" else "<="} {literal(value)}'
+            elif op in {'gte', 'lte'}:
+                expression = f'{column} {">=" if op == "gte" else "<="} {literal(value)}'
+            elif op == 'in' and value:
+                expression = column + ' IN (' + ', '.join(literal(entry) for entry in value) + ')'
+            else:
+                raise ValueError(f'Unsupported CHECK predicate: {predicate}')
+            clause = 'CHECK (' + expression + ')'
+        elif kind == 'PRIMARY_KEY':
             clause = 'PRIMARY KEY (' + columns + ')'
         elif kind == 'UNIQUE':
             if item.get('comparison') == 'case_insensitive':

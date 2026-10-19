@@ -5,7 +5,6 @@ Usage: python scripts/design_database.py requirements.yaml -o output-directory
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -18,7 +17,7 @@ from cli.commands import _ensure_dotenv_loaded, _locate_requirement_file
 from utils.jsonio import write_json_atomic
 from compiler.database_design import DatabaseSchemaPass
 from model.client import Model, ModelConfigurationError
-from compiler.preprocessing.stage import RequirementPreprocessor
+from compiler.preprocessing.stage import RequirementPreprocessor, write_bundle_report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,6 +43,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Database design workspace: {output}", flush=True)
         requirement_path = preprocessing_root / "requirement_ir.json"
         dependency_path = preprocessing_root / "dependency_graph.json"
+        preprocessing = RequirementPreprocessor().compile(requirement)
+        if not preprocessing.ok:
+            write_bundle_report(preprocessing, artifact_root)
+            for error in preprocessing.errors:
+                print(f"ERROR: {error}", file=sys.stderr)
+            return 1
         if requirement_path.exists() or dependency_path.exists():
             if not requirement_path.is_file() or not dependency_path.is_file():
                 raise ValueError("Existing preprocessing artifacts are incomplete; they will not be overwritten")
@@ -51,17 +56,15 @@ def main(argv: list[str] | None = None) -> int:
             dependency_graph = json.loads(dependency_path.read_text(encoding="utf-8-sig"))
             if not isinstance(requirement_ir, dict) or not isinstance(dependency_graph, dict):
                 raise ValueError("Existing preprocessing artifacts must be JSON objects")
-            if requirement_ir.get("source", {}).get("sha256") != hashlib.sha256(requirement.read_bytes()).hexdigest():
-                raise ValueError("Requirement file differs from existing preprocessing; use a new workspace for changed requirements")
+            if requirement_ir.get('source') != preprocessing.requirement_ir['source']:
+                raise ValueError("Requirements or bundle references differ from existing preprocessing; use a new workspace")
         else:
-            preprocessing = RequirementPreprocessor().compile(requirement)
-            if not preprocessing.ok:
-                for error in preprocessing.errors:
-                    print(f"ERROR: {error}", file=sys.stderr)
-                return 1
             requirement_ir = preprocessing.requirement_ir
             dependency_graph = preprocessing.dependency_graph
 
+        write_bundle_report(preprocessing, artifact_root)
+        for warning in preprocessing.warnings:
+            print(f'WARNING: {warning}', flush=True)
         model = Model.from_env()
         if not requirement_path.exists():
             write_json_atomic(requirement_path, requirement_ir)
