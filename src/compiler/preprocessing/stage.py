@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from .bundle import BundleLoader
+from compiler.identity.policy import authentication_policy
 
 SUPPORTED_NODE_TYPES = {"FOLDER", "ATOMIC"}
 
@@ -87,6 +88,7 @@ class RequirementPreprocessor:
             "folder_nodes": folder_ids,
             "nodes": dict(sorted(nodes.items())),
         }
+        requirement_ir['authentication_policy'] = authentication_policy()
         # External validation setup is preserved as metadata, not expanded into
         # requirement descriptions or the internal TDD task scope.
         for key in ("environment", "data"):

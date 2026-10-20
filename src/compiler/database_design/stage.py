@@ -33,6 +33,7 @@ from .state import DatabaseSchemaState
 from .imported import import_reference_er, REFERENCE_INSTRUCTIONS
 from .validation import _normalize_decision_context, _validate_decision_context, _validate_decision_shape
 from compiler.identity.lowering import public_contract, DESIGN_INSTRUCTIONS
+from compiler.identity.policy import POLICY_INSTRUCTIONS, authentication_policy
 
 
 @dataclass(slots=True)
@@ -273,9 +274,11 @@ class DatabaseSchemaPass:
         warnings: list[str],
         validate: Callable[[dict[str, Any]], list[str]] | None = None,
     ) -> dict[str, Any] | None:
+        instructions += POLICY_INSTRUCTIONS
         feedback: list[str] = []
         for attempt in range(self._attempts):
             payload = copy.deepcopy(context)
+            payload['authentication_policy'] = authentication_policy()
             if feedback:
                 payload["previous_validation_errors"] = feedback
             started_at = time.monotonic()

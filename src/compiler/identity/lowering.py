@@ -6,9 +6,11 @@ import json
 from pathlib import Path
 
 ASSETS = Path(__file__).parent / 'assets'
+from .policy import POLICY_INSTRUCTIONS, authentication_policy
+
 BACKEND_FILES = ('types.ts', 'password.ts', 'store.ts', 'http.ts')
 
-DESIGN_INSTRUCTIONS = """
+DESIGN_INSTRUCTIONS = POLICY_INSTRUCTIONS + """
 When identity_contract is supplied, identity is compiler-owned existing infrastructure.
 Reuse its domain subject UUID, canonical role IDs, server context, provisioning functions,
 fixed HTTP endpoints and browser client. Do not create another user/credential/session store,
@@ -26,7 +28,7 @@ infrastructure capability, invoked through the supplied client/service contracts
 def public_contract(identity):
     if not identity:
         return {}
-    return {'subject': {'id': f'The domain {identity["user_table"]}.id UUID; never a name or client payload.',
+    return {'authentication_policy': {key: value for key, value in authentication_policy().items() if key != 'bootstrap'}, 'subject': {'id': f'The domain {identity["user_table"]}.id UUID; never a name or client payload.',
                         'roles': 'Canonical policy role IDs loaded from database and published bindings.',
                         'team_id': 'Optional trusted team ID from the credential record.'},
         'routes': [{'method': 'POST', 'path': '/api/auth/login', 'body': ['username', 'password'],
@@ -40,10 +42,13 @@ def public_contract(identity):
         'provisioning': {'module': 'backend/src/identity/store.ts',
             'functions': ['provisionIdentityAccount', 'setIdentityPassword', 'setIdentityRoles', 'setIdentityDisabled'],
             'restriction': 'Server-side functions only; business routes must authorize administration before calling.'},
+        'login_ui': {'module': 'frontend/src/identity/login.tsx', 'component': 'IdentityGate',
+                     'behavior': 'Restore current session; show username/password login when anonymous; provide logout. Reuse this fixed UI rather than adding registration/OTP/external login.'},
         'frontend': {'module': 'frontend/src/identity/client.ts',
                      'functions': ['login', 'logout', 'currentIdentity', 'authenticatedFetch']},
         'reserved_path': '/api/auth',
         'obligations': ['Preserve installIdentity(app) before business routes and bootstrapIdentityFromEnv at startup.',
+                        'Preserve the IdentityGate wrapper around application content; reuse its login/current-user/logout UI.',
                         'Reuse this infrastructure; do not generate duplicate login/session/password mechanisms.',
                         'Business authorization and resource ownership filters are separate from authentication.',
                         'Never expose credential/session tables through APIs, DTOs or frontend data models.']}
@@ -78,14 +83,15 @@ def backend_sources(schema):
         config[kind + '_columns'] = [{key: row[key] for key in ('name', 'type', 'nullable', 'default', 'generation')}
                                     for row in tables[identity[kind + '_table']]['columns']]
     files = {'backend/src/identity/' + name: (ASSETS / name).read_text(encoding='utf-8') for name in BACKEND_FILES}
-    files['backend/src/identity/config.ts'] = ('// Compiler-owned identity mapping; no account secrets.\n'
+    files['backend/src/identity/config.ts'] = ('// Compiler-owned identity mapping; optional explicitly configured bootstrap account.\n'
         'import type { IdentityConfiguration } from "./types.js";\n'
         'export const identityConfig: IdentityConfiguration = ' + json.dumps(config, ensure_ascii=False, indent=2) + ';\n')
     return files
 
 
 def frontend_sources():
-    return {'frontend/src/identity/client.ts': (ASSETS / 'client.ts').read_text(encoding='utf-8')}
+    return {'frontend/src/identity/' + name: (ASSETS / name).read_text(encoding='utf-8')
+            for name in ('client.ts', 'login.tsx')}
 
 
 def infrastructure_file(path):

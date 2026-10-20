@@ -19,6 +19,7 @@ from .contracts import PROMPTS, SCHEMAS, VISUAL_FIELDS, VISUAL_ANALYSIS_VERSION
 from .delta import apply_ui, apply_data, apply_interaction, make_ui
 from .validation import ui_index, validate_ir
 from .visual import image_evidence
+from compiler.identity.policy import POLICY_INSTRUCTIONS, authentication_policy
 from .bundle import seed_bundle_ui, state_region, BUNDLE_UI_INSTRUCTIONS, navigation_context
 from compiler.preprocessing.evidence import requirement_evidence, EVIDENCE_INSTRUCTIONS, attach_bundle_pages
 
@@ -255,13 +256,15 @@ class FrontendDesignPass:
             logger = self.visual_log if phase == 'visual' else self.log
             logger.info(f'{phase} design attempt {attempt}/{self.attempts}', node_id=rid)
             request = copy.deepcopy(payload)
+            if phase != 'visual':
+                request['authentication_policy'] = authentication_policy()
             if feedback:
                 request['validation_feedback'], request['previous_output'] = feedback, previous
             self.sequence += 1
             try:
                 from compiler.identity.lowering import DESIGN_INSTRUCTIONS
                 kwargs = {'schema_name': 'frontend_design_' + phase,
-                          'instructions': PROMPTS[phase] + (BUNDLE_UI_INSTRUCTIONS + EVIDENCE_INSTRUCTIONS if payload.get('reference_evidence') else '') + (DESIGN_INSTRUCTIONS if payload.get('identity_contract') else ''),
+                          'instructions': PROMPTS[phase] + (POLICY_INSTRUCTIONS if phase != 'visual' else '') + (BUNDLE_UI_INSTRUCTIONS + EVIDENCE_INSTRUCTIONS if payload.get('reference_evidence') else '') + (DESIGN_INSTRUCTIONS if payload.get('identity_contract') else ''),
                           'input_payload': request, 'output_schema': SCHEMAS[phase]}
                 if phase == 'visual':
                     if self.visual_model is None:

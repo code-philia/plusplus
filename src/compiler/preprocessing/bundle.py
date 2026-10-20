@@ -114,9 +114,11 @@ class BundleLoader:
             relation['binding_basis'] = 'explicit_reference' if explicit else 'endpoint_references'
         identity_path = 'reference/identity/model.json'
         identity_proposal = self.json(identity_path) if (self.root / identity_path).is_file() else None
+        bootstrap_path = 'reference/identity/bootstrap.json'
+        identity_bootstrap = self.json(bootstrap_path) if (self.root / bootstrap_path).is_file() else None
         return {'schema_version': 1, 'files': dict(sorted(self.files.items())), 'bindings': bindings,
                 'er': er, 'ui': ui, 'authorization': authorization, 'processes': processes,
-                'identity_proposal': identity_proposal,
+                'identity_proposal': identity_proposal, 'identity_bootstrap': identity_bootstrap,
                 'diagnostics': self.diagnostics}
 
     def er(self, bindings):

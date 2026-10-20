@@ -9,13 +9,14 @@ from pathlib import Path
 from compiler.backend_design.validation import shape_errors
 from utils.jsonio import write_json_atomic
 from .contracts import SCHEMA, INSTRUCTIONS
+from .policy import authentication_policy, normalize_authentication
 
 class IdentityDesignError(ValueError):
     """A blocked identity decision must never fall back to an anonymous application."""
 
 
 def evidence_registry(requirements, state):
-    registry = {}
+    registry = {'compiler:authentication_policy': authentication_policy()}
     for rid, node in requirements.get('nodes', {}).items():
         registry['requirement:' + rid] = {key: copy.deepcopy(node.get(key)) for key in
             ('name', 'description', 'scenarios', 'pages', 'parent_id')}
@@ -77,6 +78,9 @@ def validate_proposal(value, requirements, state, evidence):
         errors.append('required decision cannot contain blocking gaps; use unresolved')
     if select_strategy(value)[1]:
         return errors
+    if ('bootstrap_profile' not in value
+            and requirements.get('bundle', {}).get('identity_bootstrap') is None):
+        errors.append('Provide bootstrap_profile as an encoded JSON object for required domain profile fields; the compiler initializes admin/admin123456')
     subject, roles = value['subject'], value['roles']
     for label, row in (('subject', subject), ('roles', roles)):
         if row['binding'] not in ('existing', 'new'):
@@ -141,6 +145,14 @@ def validate_proposal(value, requirements, state, evidence):
         actual = [{key: row[key] for key in ('id', 'name', 'aliases')} for row in definitions]
         if sorted(expected, key=lambda row: row['id']) != sorted(actual, key=lambda row: row['id']):
             errors.append('Role definitions must preserve the complete policy catalogue exactly')
+    if value.get('bootstrap_profile') is not None:
+        from .design import bootstrap_profile_errors
+        try:
+            profile = json.loads(value['bootstrap_profile'])
+        except (ValueError, TypeError):
+            errors.append('bootstrap_profile must encode a JSON object')
+        else:
+            errors.extend(bootstrap_profile_errors(state, subject['entity'], subject['login_field'], profile))
     allowed_values = (key_field or {}).get('properties', {}).get('enum')
     if allowed_values and not set(ids) <= set(allowed_values):
         errors.append('Canonical role IDs conflict with existing field enum')
@@ -192,7 +204,9 @@ def design_identity(model, artifact_root, requirements, state, *, reviewed_propo
     source = reviewed_proposal if reviewed_proposal is not None else requirements.get('bundle', {}).get('identity_proposal')
     domain_er = state.to_er_model()
     domain_er['status'] = domain_status
-    context = {'evidence': evidence, 'domain_er': domain_er}
+    requirements['authentication_policy'] = authentication_policy()
+    context = {'evidence': evidence, 'domain_er': domain_er, 'authentication_policy': authentication_policy(),
+               'bootstrap_configuration_supplied': requirements.get('bundle', {}).get('identity_bootstrap') is not None}
     fingerprint = hashlib.sha256(json.dumps({'context': context, 'proposal': source}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     write_json_atomic(root / 'domain_er.json', domain_er)
     write_json_atomic(root / 'evidence.json', evidence)
@@ -203,7 +217,7 @@ def design_identity(model, artifact_root, requirements, state, *, reviewed_propo
     write_json_atomic(Path(artifact_root) / 'preprocessing/requirement_ir.json', requirements)
     write_json_atomic(root / 'contract.json', {'status': 'UNRESOLVED', 'storage': {}, 'runtime': {}})
     feedback = []
-    value = None
+    value, raw_value, normalizations = None, None, []
     try:
         attempts = max(1, min(int(os.getenv('MODEL_ATTEMPT', '5')), 20))
     except ValueError:
@@ -212,13 +226,14 @@ def design_identity(model, artifact_root, requirements, state, *, reviewed_propo
         attempts = 1
     for attempt in range(attempts):
         try:
-            value = copy.deepcopy(source) if source is not None else model.generate_json(
+            raw_value = copy.deepcopy(source) if source is not None else model.generate_json(
                 schema_name='arc_identity_semantics', instructions=INSTRUCTIONS,
                 input_payload={**context, 'previous_validation_errors': feedback}, output_schema=SCHEMA)
+            value, normalizations = normalize_authentication(raw_value)
             feedback = validate_proposal(value, requirements, state, evidence)
         except Exception as exc:
             feedback = [f'Identity semantic analysis failed: {type(exc).__name__}: {exc}']
-        write_json_atomic(root / f'attempt-{attempt + 1}.json', {'proposal': value, 'errors': feedback})
+        write_json_atomic(root / f'attempt-{attempt + 1}.json', {'source_proposal': raw_value, 'proposal': value, 'normalizations': normalizations, 'errors': feedback})
         if not feedback:
             break
     strategy, capabilities = select_strategy(value) if not feedback else ('', [])
@@ -227,10 +242,11 @@ def design_identity(model, artifact_root, requirements, state, *, reviewed_propo
               else 'UNSUPPORTED' if capabilities else 'RESOLVED')
     result = {'ir_kind': 'identity_design', 'version': 1, 'status': status,
               'input_sha256': fingerprint, 'origin': 'reviewed_binding' if reviewed_proposal is not None else 'bundle_binding' if source is not None else 'model',
-              'strategy': strategy, 'proposal': value, 'diagnostics': diagnostics}
+              'strategy': strategy, 'proposal': value, 'source_proposal': raw_value,
+              'authentication_policy': authentication_policy(), 'normalizations': normalizations, 'diagnostics': diagnostics}
     requirements['identity_design'] = result
     write_json_atomic(root / 'identity_ir.json', result)
-    write_json_atomic(root / 'report.json', {key: value for key, value in result.items() if key != 'proposal'})
+    write_json_atomic(root / 'report.json', {key: value for key, value in result.items() if key not in ('proposal', 'source_proposal')})
     write_json_atomic(Path(artifact_root) / 'preprocessing/requirement_ir.json', requirements)
     if status != 'RESOLVED':
         raise IdentityDesignError('; '.join(diagnostics) + '. Review .arc/design/identity/identity_ir.json')
@@ -247,7 +263,7 @@ def compile_identity(model, artifact_root, requirements, state, *, reviewed_prop
         result.update(status='INVALID', diagnostics=[f'Identity storage binding failed: {exc}'])
         write_json_atomic(Path(artifact_root) / 'design/identity/identity_ir.json', result)
         write_json_atomic(Path(artifact_root) / 'design/identity/report.json',
-                          {key: value for key, value in result.items() if key != 'proposal'})
+                          {key: value for key, value in result.items() if key not in ('proposal', 'source_proposal')})
         write_json_atomic(Path(artifact_root) / 'preprocessing/requirement_ir.json', requirements)
         raise IdentityDesignError(result['diagnostics'][0]) from exc
     write_json_atomic(Path(artifact_root) / 'design/identity/contract.json', {

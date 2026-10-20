@@ -7,6 +7,8 @@ def enum(*values):
     return {'type': 'string', 'enum': list(values)}
 S = {'type': 'string'}
 E = arr(S)
+from .policy import POLICY_INSTRUCTIONS
+
 SCHEMA = obj(
     decision=enum('required', 'not_required', 'unresolved'), rationale=S, evidence_ids=E,
     authentication=obj(methods=arr(enum('password', 'sms_otp', 'email_otp', 'oidc', 'saml', 'oauth', 'webauthn', 'external', 'unknown')),
@@ -30,7 +32,9 @@ not assume User, Role, account_name or is_admin. Infer the actor, login identifi
 catalogue and assignment from descriptions, relations, requirements, policy and UI contracts.
 Do not cite an unrelated requirement to justify a guess. A blank validation password proves
 nothing about authentication. Recognize password, SMS/OTP, external identity, SSO and multiple
-methods accurately, even if runtime support is absent. Do not downgrade these to password.
+methods in the source evidence, but apply compiler:authentication_policy to the generated
+authentication: password plus Cookie. Do not treat the original authentication method or
+unspecified original transport as a blocking gap under this explicit policy.
 Distinguish global role membership from organization/project/tenant scoped assignments and
 scoped account namespaces. Preserve ambiguity as unresolved and list blocking gaps.
 Required: provide authentication, subject, roles, assignment and boundary evidence separately.
@@ -47,5 +51,13 @@ Represent join entities and scalar role assignments honestly; runtime strategy s
 performed afterwards. Existing M:N relationship must be explicitly selected, not guessed.
 not_required is valid only when the entire application has no identity requirement, with all
 bindings none, methods empty and no policy roles, permissions or subject bindings. Explain why.
-Use empty strings for inapplicable fields. Do not include credentials or account secrets.
-"""
+When decision=required and no explicit bootstrap file is supplied, return bootstrap_profile as
+an encoded JSON object containing concrete values for required subject profile fields, excluding
+id and login_field. These are synthetic first-version fixture values, not extracted user data.
+Use existing field types/enums/constraints and cite selected profile fields in subject.evidence_ids.
+Do not invent fields or roles. The compiler supplies the admin login/password separately.
+Use empty strings for inapplicable fields. Do not include extracted account secrets.
+""" + POLICY_INSTRUCTIONS
+
+# Optional for older reviewed bindings; new model decisions supply required fixture values here.
+SCHEMA['properties']['bootstrap_profile'] = S

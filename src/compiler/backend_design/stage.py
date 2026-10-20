@@ -16,6 +16,7 @@ from compiler.preprocessing.evidence import requirement_evidence, attach_bundle_
 from .context import database_context, retrieve, module_index, expand_module_context
 from .validation import shape_errors, validate_ir, parse_contract, normalize_contract
 from compiler.identity.lowering import DESIGN_INSTRUCTIONS
+from compiler.identity.policy import POLICY_INSTRUCTIONS, authentication_policy
 
 
 @dataclass
@@ -95,6 +96,7 @@ class BackendDesignPass:
                                 pending.append(caller)
                     payload = {'current_task': {'requirement': requirement, 'data': data},
                                'identity_contract': ir.get('identity', {}),
+                               'authentication_policy': authentication_policy(),
                                'upstream_modules': selected_upstream, 'reuse_candidates': candidates,
                                'existing_types': trial['types'],
                                'reference_catalog': references,
@@ -152,7 +154,7 @@ class BackendDesignPass:
             self.sequence += 1
             try:
                 output = self.model.generate_json(schema_name='backend_' + kind.lower(),
-                                                 instructions=PROMPTS[kind] + (REFERENCE_INSTRUCTIONS[kind] if payload.get('reference_evidence') else '') + (DESIGN_INSTRUCTIONS if payload.get('identity_contract') else ''),
+                                                 instructions=PROMPTS[kind] + POLICY_INSTRUCTIONS + (REFERENCE_INSTRUCTIONS[kind] if payload.get('reference_evidence') else '') + (DESIGN_INSTRUCTIONS if payload.get('identity_contract') else ''),
                                                  input_payload=request, output_schema=SCHEMAS[kind])
                 previous = output
                 feedback = shape_errors(output, SCHEMAS[kind])

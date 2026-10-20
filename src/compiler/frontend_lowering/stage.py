@@ -149,7 +149,11 @@ class FrontendLoweringPass:
         if identity_enabled(requirements):
             from compiler.identity.lowering import frontend_sources
             files.update(frontend_sources())
-            plan['identity'] = {'client': 'frontend/src/identity/client.ts', 'read_only': True}
+            files[app_path] = ('import { IdentityGate } from "./identity/login";\n'
+                + files[app_path].replace('export function App()', 'function ApplicationContent()')
+                + '\nexport function App() { return <IdentityGate><ApplicationContent /></IdentityGate>; }\n')
+            plan['identity'] = {'client': 'frontend/src/identity/client.ts',
+                                'login_ui': 'frontend/src/identity/login.tsx', 'read_only': True}
         if dry_run:
             return plan, files
         return write_stage(output_dir, 'frontend', plan, files, bootstrap_files={'frontend/src/App.tsx', 'frontend/src/main.tsx'})

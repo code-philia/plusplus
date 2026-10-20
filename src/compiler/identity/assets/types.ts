@@ -40,4 +40,5 @@ export interface IdentityConfiguration {
   roles: Array<{ id: string; name: string; aliases: string[]; administrative: boolean }>;
   role_bindings: Array<{ subject_ref: string; role_ref: string }>;
   bootstrap_roles: string[];
+  bootstrap_account?: { username: string; password: string; roles: string[]; profile: Record<string, unknown> };
 }

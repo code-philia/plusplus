@@ -7,6 +7,7 @@ from compiler.frontend_design.validation import ui_index
 from compiler.lowering.types import refs
 from .patcher import read_source
 from compiler.identity.lowering import infrastructure_file, public_contract
+from compiler.identity.policy import authentication_policy
 from compiler.preprocessing.evidence import requirement_evidence, attach_bundle_pages
 from compiler.frontend_design.bundle import navigation_context
 
@@ -271,7 +272,7 @@ class FileContext:
                 for ref in refs(definitions[name]['schema']) - wanted_types:
                     wanted_types.add(ref); pending.append(ref)
         data_access = self.database.get('access', {}).get(rid, {'read': [], 'write': []})
-        return {'reference_evidence': requirement_evidence(self.requirements, rid, self.database, visual_cache=visual_cache),
+        return {'authentication_policy': authentication_policy(), 'reference_evidence': requirement_evidence(self.requirements, rid, self.database, visual_cache=visual_cache),
                 'navigation_contract': navigation_context(self.frontend, rid),
                 'identity_contract': public_contract(self.database.get('identity')),
                 'current_task': {'requirement': requirement, 'phase': phase, 'data_access': data_access,

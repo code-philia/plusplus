@@ -187,18 +187,20 @@ export function setIdentityDisabled(userId: string, disabled: boolean, connectio
 
 /** Explicit one-time bootstrap. Existing credentials/role assignments are never overwritten on restart. */
 export function bootstrapIdentityFromEnv(connection: Connection = sqliteDatabase): void {
-  const username = process.env.ARC_AUTH_BOOTSTRAP_USERNAME;
-  const password = process.env.ARC_AUTH_BOOTSTRAP_PASSWORD;
+  const override = process.env.ARC_AUTH_BOOTSTRAP_USERNAME !== undefined || process.env.ARC_AUTH_BOOTSTRAP_PASSWORD !== undefined;
+  const defaults = override ? undefined : config.bootstrap_account;
+  const username = override ? process.env.ARC_AUTH_BOOTSTRAP_USERNAME : defaults?.username;
+  const password = override ? process.env.ARC_AUTH_BOOTSTRAP_PASSWORD : defaults?.password;
   if (username === undefined && password === undefined) return;
   if (!username || !password) throw new Error("Set both ARC_AUTH_BOOTSTRAP_USERNAME and ARC_AUTH_BOOTSTRAP_PASSWORD");
   const existing = connection.prepare("SELECT c.id FROM " + table(config.credential_table) + " c JOIN "
     + table(config.user_table) + " u ON u.id = c." + quote(config.user_fk) + " WHERE u."
     + quote(config.login_column) + " = ?").get(username);
   if (existing) return;
-  const roles = process.env.ARC_AUTH_BOOTSTRAP_ROLES === undefined ? config.bootstrap_roles
+  const roles = process.env.ARC_AUTH_BOOTSTRAP_ROLES === undefined ? (defaults?.roles ?? config.bootstrap_roles)
     : process.env.ARC_AUTH_BOOTSTRAP_ROLES.split(",").map(value => value.trim()).filter(Boolean);
   provisionIdentityAccount({ username, password, roles,
-    profile: parseObject(process.env.ARC_AUTH_BOOTSTRAP_PROFILE, "ARC_AUTH_BOOTSTRAP_PROFILE") }, connection);
+    profile: { ...defaults?.profile, ...parseObject(process.env.ARC_AUTH_BOOTSTRAP_PROFILE, "ARC_AUTH_BOOTSTRAP_PROFILE") } }, connection);
 }
 
 export function sessionLifetime(): number {
