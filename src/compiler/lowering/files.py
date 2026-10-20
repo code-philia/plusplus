@@ -1,11 +1,27 @@
 """Write only the current stage's files; refuse to overwrite edited generated files."""
 import hashlib
+import json
 from pathlib import Path
 from utils.jsonio import read_json, write_json_atomic
 
 
 def digest(content):
     return hashlib.sha256(content.encode('utf-8')).hexdigest()
+
+
+def preserve_design_input(output, stage, design):
+    """Archive the complete design before lowering can isolate or replace it.
+
+    Content-addressed snapshots retain earlier input even when a standalone
+    lowering command is rerun after a previous fallback wrote an empty IR.
+    """
+    if stage not in {'database', 'backend', 'frontend'}:
+        raise ValueError(f'Unknown lowering stage: {stage}')
+    fingerprint = digest(json.dumps(design, ensure_ascii=False, sort_keys=True))
+    path = Path(output).resolve() / '.arc/lowering' / stage / 'design-inputs' / (fingerprint + '.json')
+    if not path.exists():
+        write_json_atomic(path, design)
+    return path
 
 
 def write_stage(output, stage, plan, files, *, bootstrap_files=()):

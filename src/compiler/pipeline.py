@@ -187,6 +187,8 @@ class Compiler:
             async def lower(name, lowerer, *args):
                 await begin(name + '_lowering')
                 plan, effective = None, args[-1]
+                from .lowering.files import preserve_design_input
+                artifacts[name + '_lowering_input'] = str(preserve_design_input(output, name, effective))
                 def render():
                     render_args = (effective,) if name == 'database' else (requirements, effective)
                     return lowerer.compile(*render_args, output)

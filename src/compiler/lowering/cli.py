@@ -27,7 +27,10 @@ def main(stage, argv=None):
             from compiler.frontend_lowering import FrontendLoweringPass
             lowerer = FrontendLoweringPass(component_depth=args.component_depth, min_nodes=args.min_component_nodes)
         from .recovery import isolate_design, minimal_lowering, bind_recovery, leaf_ids
+        from .files import preserve_design_input
         from utils.jsonio import read_json, write_json_atomic
+        input_snapshot = preserve_design_input(output, stage, design)
+        print(f'Design input: {input_snapshot}')
         reasons = {}
         if stage == 'backend':
             reasons.update(read_json(arc / 'lowering/database/plan.json', {}).get('recovery_requirements', {}))

@@ -32,13 +32,19 @@ def check_compilation(output, stage):
         from .planning import relative_import
         manifest = read_json(artifact / 'manifest.json', {})
         generated_files = manifest.get('files', {})
+        # The manifest also owns CSS and other assets. TypeScript accepts CSS
+        # side-effect imports, but rejects CSS as a root entry in tsconfig.files.
+        # Imported assets remain in the source and are checked by the Vite build.
+        source_files = [path for path in generated_files
+                        if Path(path).suffix.lower() in {'.ts', '.tsx', '.mts', '.cts'}]
+        asset_files = [path for path in generated_files if path not in source_files]
         with tempfile.TemporaryDirectory(prefix='.arc-compile-', dir=output) as directory:
             check_config = Path(directory) / 'tsconfig.json'
             write_json_atomic(check_config, {
                 'extends': relative_import(str(check_config), str(project_config), '.json'),
                 'compilerOptions': {'noEmit': True, 'composite': False, 'incremental': True,
                                     'tsBuildInfoFile': './skeleton.tsbuildinfo'},
-                'files': [str(output / path) for path in generated_files],
+                'files': [str(output / path) for path in source_files],
                 'include': [], 'exclude': [], 'references': [],
             })
             try:
@@ -49,6 +55,8 @@ def check_compilation(output, stage):
                           'exit_code': process.returncode, 'output': (process.stdout + process.stderr).strip()}
             except (OSError, subprocess.TimeoutExpired) as exc:
                 result = {'status': 'COMPILATION_FAILED', 'message': str(exc)}
+        result['checked_source_files'] = len(source_files)
+        result['non_source_assets'] = asset_files
     report = read_json(artifact / 'report.json', {})
     report['status'], report['compilation'] = result['status'], {key: value for key, value in result.items() if key != 'output'}
     if result.get('output') and result['status'] != 'COMPILED':
