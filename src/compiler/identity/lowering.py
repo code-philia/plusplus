@@ -19,7 +19,8 @@ identity. Caller IDs needed by business functions must come from request.identit
 boundary. Keep credentials, session hashes and internal identity columns out of public DTOs.
 Reserve identity-owned storage and integrate its service functions rather than designing raw
 password/session DB modules. Authentication is not authorization: explicitly preserve the
-requirement's role/resource/action and own/team/assigned restrictions in business contracts.
+requirement's role/resource/action and own/team/assigned restrictions for ordinary users, and
+the explicit full-access branch for the server-verified bootstrap administrator, in business contracts.
 Do not invent backend module IDs for the fixed identity endpoints; they are an external
 infrastructure capability, invoked through the supplied client/service contracts.
 """

@@ -268,7 +268,10 @@ State relevant permission IDs, exact resource/action IDs, allow/deny and all/own
 scope in the existing spec. Include matching deny rules even when not directly cited. Preserve
 policy completeness gaps; absence of a published allow does not imply public access. The resource
 all_system_features is an ordinary ID, not a wildcard. Do not derive privileges from role labels,
-is_admin attributes, the exploration account or menu visibility.
+is_admin attributes, the exploration account or menu visibility. The compiler's explicit
+server-verified bootstrap-administrator grant is the exception: specify full access to all business
+resources/actions/data before applying ordinary allow/deny or own/team/assigned restrictions.
+This grant comes from the compiler policy, not a wildcard interpretation of source resource IDs.
 UI evidence supplies exact fields, selections, filters, commands and states that require backend
 behavior. A page route is not an API route. Opening a dialog or following a recipe is not itself
 a backend operation. Do not generate endpoints for every visible control or shared shell item.
