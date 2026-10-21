@@ -93,8 +93,6 @@ def apply_ui(base, output, rid, payload):
     trial = copy.deepcopy(base)
     nodes, _ = ui_index(trial['ui'])
     loaded = set(payload['loaded_ui_ids'])
-    if payload['page_mode'] == 'bind' and (output['add_nodes'] or output['updates']):
-        raise ValueError('Already parsed page/reference permits requirement bindings only')
     aliases = {}
     for source in output['add_nodes']:
         if source['name'] in aliases:

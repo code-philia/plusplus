@@ -37,6 +37,7 @@ You are a frontend architect designing one leaf requirement in an existing appli
 Produce framework-neutral contracts, not React components, source code, CSS, tests or SQL.
 Requirements and scenario steps define behavior. Images define visible structure and states;
 image evidence must not invent authentication policies, persistence or server capabilities.
+Requirements may also specify controls and interaction states not shown in an image.
 Ancestor descriptions constrain the leaf; do not implement parent or unrelated requirements.
 
 ## Identity and response protocol
@@ -69,16 +70,23 @@ current_task.requirement.pages lists ALL pages involved in this requirement, not
 introduced by it. A repeated name/reference still requires binding the current requirement's
 controls/regions and designing its state and interactions in the subsequent passes.
 Work only in current_page. selected_ui_tree is this page's nested tree, not a flat component list.
-page_mode=new: with an analysis, discover ALL visible regions, controls, text, dialogs and states,
-not only those in the leaf's scenarios. Without an image, derive structure from requirement evidence.
-Use one representative item template for repeated content. Then bind only the nodes implementing
-current requirement description/scenario steps. Do not bind every visual node automatically.
-page_mode=bind: the page/reference is already parsed; add_nodes and updates MUST be empty. Bind
-existing nodes even when no structure changes; do not return an obsolete reuse_ids field.
-page_mode=extend: compare current pages.analysis to baseline_page_states.analysis and insert ONLY
-new controls into the existing page. Keep existing nodes and IDs. updates change description only,
-recording alternative states without overwriting unrelated requirements. Baseline contains analysis,
-not another UI tree. Never duplicate the page or create an app/page node.
+In every mode, use pages.analysis to cover ALL visible regions, controls, text, dialogs and states,
+not only those in the leaf's scenarios. Also include the controls and transient states needed by
+current requirement description/scenario steps, even when not shown in the image: editable forms,
+row actions, menus and confirmation dialogs must have their actual interaction-site nodes.
+Without an image analysis, derive structure from requirement evidence and the supplied page tree.
+Use one representative item template for repeated content. Reuse existing matching nodes and IDs;
+insert missing nodes under their appropriate existing or new parent. Preserve unrelated structure.
+page_mode=new: discover the complete page structure from the analysis and requirement evidence.
+page_mode=bind: the page/reference has already been analyzed. The existing tree guides reuse and
+placement; use the same discovery scope as new and add any missing visible or requirement-defined
+UI. An analyzed reference does not imply that the existing tree contains every needed interaction.
+page_mode=extend: compare current pages.analysis to baseline_page_states.analysis to identify
+additional visible states, and integrate them with the current requirement's UI in the same tree.
+Baseline contains analysis, not another UI tree. Never duplicate the page or create an app/page node.
+updates change descriptions only, recording additional states without overwriting unrelated behavior.
+Then bind only the nodes implementing current requirement description/scenario steps. Always bind
+relevant existing nodes even when no structure changes. Do not bind every visual node automatically.
 New nodes have page-local unique PascalCase names. parent may be a loaded ID or @Name from add_nodes.
 updates target loaded existing page nodes. bindings target loaded or new nodes; each description
 must extract the requirement's wording or scenario action and explain which part this UI realizes.
@@ -90,6 +98,8 @@ The next passes can use any loaded UI in the declared pages, including their pag
 ''',
     'data': '''## Task: minimal typed frontend state
 Design only state required by this leaf: inputs, fetched results, selections, loading and error state.
+Include the state needed for the current scenario's controls and transient UI, such as which editor
+or confirmation dialog is open and which record it targets, so subsequent handlers can use it.
 Do not create separate UIData/UIValue, duplicate DTO fields as unrelated global state, or model static
 labels as data. owner describes state lifetime: choose the smallest suitable common UI ancestor of
 display consumers AND the controls/regions whose handlers need to read/write that state. Use a page

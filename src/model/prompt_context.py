@@ -39,7 +39,7 @@ STAGE_GROUPS = {
         "Reference and discovery": ("Reusable modules and dependency context", "reuse_context.modules/types are loaded reusable contracts; module_catalog/type_catalog entries are discovery summaries. Request missing records before relying on their detailed contracts."),
     },
     "frontend": {
-        "Current task": ("Current task", "requirement.pages presents each page name, optional image path and cached analysis together. The stage instructions specify full visual parsing, existing-tree binding or new-state comparison. Requirements define behavior and node ownership."),
+        "Current task": ("Current task", "requirement.pages presents each page name, optional image path and cached analysis together. Discover complete visible UI and current scenario controls in every page mode. Existing trees guide reuse and placement; requirements define behavior and node ownership."),
         "Established contracts": ("Backend API and frontend type contracts", "Use these exact API IDs and named types at the backend boundary. Report missing capabilities rather than inventing APIs."),
         "Current working region": ("Selected page subtree and frontend state", "existing.ui contains nested loaded UI records. Work within the selected page; preserve stable node IDs, unrelated sibling controls and existing events. Keep state scope consistent with the UI tree."),
         "Reference and discovery": ("UI tree summary and discovery", "The compact app/page summary is supplied only when a declared page has no existing subtree. Catalogs locate records and do not grant edit permission. Page visual analysis is supplied with the requirement in Current task."),

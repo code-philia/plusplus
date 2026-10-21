@@ -7,7 +7,7 @@ SCHEMA = obj({
     'release_files': STRINGS,
     'edits': {'type': 'array', 'items': obj({'file': STRING, 'content': STRING})},
     'blocked_reason': STRING,
-}, required=['request_files', 'edits', 'blocked_reason'])
+})
 BACKGROUND = '''## Background and role
 You implement ONE leaf requirement in a generated TypeScript Express/React application using TDD.
 The database, backend and frontend symbol tables and lowering plans supply exact contracts and file paths.
@@ -59,7 +59,8 @@ Every invocation refreshes source from disk; old source versions and full histor
 not in this prompt. Context requests do not install rejected edits.
 
 ## Patch protocol and corrections
-Return exactly the JSON schema: request_files, edits, blocked_reason, and optional release_files, no Markdown.
+Return exactly the JSON schema: request_files, release_files, edits, blocked_reason, no Markdown.
+Include all four fields. Use [] for unused arrays and "" for an empty blocked_reason.
 These are the only allowed top-level keys. Never emit type, json_object, response_format,
 schema, status or explanatory fields. JSON Schema's type and the API transport's json_object mode
 describe the format; they are NOT fields to copy into your response. Start with {"request_files": ...}.
@@ -181,8 +182,8 @@ behavior. Wire the required interactions instead of leaving lowering's event.wir
 After this phase the compiler executes only the current requirement's acceptance tests, then repairs.
 Historical test sources are checked for compilation only; no runtime regression suite is executed.
 '''
-EXAMPLE = {'request_files': ['backend/src/db/seed.ts'], 'edits': [], 'blocked_reason': ''}
-PATCH_EXAMPLE = {'request_files': [], 'edits': [{'file': 'tests/unit/example.test.ts',
+EXAMPLE = {'request_files': ['backend/src/db/seed.ts'], 'release_files': [], 'edits': [], 'blocked_reason': ''}
+PATCH_EXAMPLE = {'request_files': [], 'release_files': [], 'edits': [{'file': 'tests/unit/example.test.ts',
                  'content': '<complete changed file contents>'}], 'blocked_reason': ''}
 EXAMPLE_PATHS = {
     'test_generation': ('tests/tdd/vitest.config.ts', 'tests/unit/example.test.ts'),
