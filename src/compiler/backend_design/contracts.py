@@ -250,6 +250,12 @@ from compiler.preprocessing.evidence import EVIDENCE_INSTRUCTIONS
 
 REFERENCE_BACKGROUND = EVIDENCE_INSTRUCTIONS + """
 ## Backend reference contracts
+Design capabilities for every operation and constraint in the current leaf description, not just
+the examples exercised by its scenarios. Cover each cited CRUD operation with an existing or new
+API/business/storage path and preserve its validation, permissions and observable result in spec.
+State required/optional and null acceptance separately at every boundary. Reuse declared schemas;
+do not let SQL column nullability silently broaden HTTP/service inputs. Describe PATCH omission
+versus explicit clearing and any contract-authorized normalization in spec.
 reference_evidence is evidence for this leaf, not a second feature backlog. Direct bindings
 establish requirement scope; relationship endpoints, inherited constraints and resource-related
 policy rules supply context. Keep their provenance and unresolved diagnostics distinct.

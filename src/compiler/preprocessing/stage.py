@@ -375,8 +375,21 @@ def write_bundle_report(parsed: PreprocessingResult, artifact_root: Path) -> Pat
     if bundle is None:
         return None
     path = artifact_root / 'preprocessing/bundle-report.json'
+    references = [{'requirement_id': rid, **copy.deepcopy(ref)}
+                  for rid, binding in bundle['bindings'].items() for ref in binding.get('references', [])]
+    unresolved = [ref for ref in references if not ref.get('resolved')]
+    screenshots = [capture['files']['screenshot']
+                   for capture in bundle.get('ui', {}).get('captures', {}).values()
+                   if 'screenshot' in capture.get('files', {})]
     write_json_atomic(path, {'status': 'RESOLVED' if parsed.ok else 'INVALID',
         'source': parsed.requirement_ir.get('source', {}), 'files': bundle['files'],
+        'reference_audit': {'status': 'GAPS' if unresolved else 'COMPLETE',
+            'resolved_count': len(references) - len(unresolved), 'unresolved': unresolved,
+            'relationships_without_published_ids': [row['key'] for row in bundle.get('er', {}).get('relationships', [])
+                                                     if not row.get('source_id')],
+            'screenshots': [{'path': row['path'], 'sha256': row.get('sha256'),
+                             'status': 'FILE_VERIFIED', 'analysis_status': 'NOT_CHECKED_IN_PREPROCESSING'}
+                            for row in screenshots]},
         'diagnostics': bundle['diagnostics'], 'bindings': bundle['bindings'], 'errors': parsed.errors})
     return path
 

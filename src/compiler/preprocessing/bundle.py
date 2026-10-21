@@ -63,7 +63,7 @@ class BundleLoader:
                 ref = {'kind': kind, 'path': path, 'fragment': fragment, 'resolved': False}
                 if ref not in refs:
                     refs.append(ref)
-            bindings[rid] = {'references': refs, 'entities': [], 'crud': [], 'permissions': [],
+            bindings[rid] = {'references': refs, 'entities': [], 'relationships': [], 'crud': [], 'permissions': [],
                              'processes': [], 'ui_states': []}
         er = self.er(bindings)
         authorization = self.authorization()
@@ -78,15 +78,21 @@ class BundleLoader:
                 if kind == 'ER':
                     target = entities.get(fragment) or relationships.get(fragment)
                     if target:
-                        ref.update(resolved=True, target=target)
+                        ref.update(resolved=True, target=target,
+                                   target_kind='entity' if fragment in entities else 'relationship')
                         if fragment in entities and target not in binding['entities']:
                             binding['entities'].append(target)
+                        elif fragment in relationships and target not in binding['relationships']:
+                            binding['relationships'].append(target)
                     else:
+                        ref['reason'] = 'The published ER has no entity or explicit relationship ID matching this fragment.'
                         self.diagnostic('BUNDLE_ER_REFERENCE_UNRESOLVED',
                             f'ER fragment {fragment!r} is not published; no guessed binding was created.',
-                            node_id=rid, path=ref['path'])
+                            node_id=rid, path=ref['path'], fragment=fragment,
+                            remediation='Publish reference/er/model.json with the original relationship IDs, '
+                                        'or an explicit Mermaid %% relationship_id: <id> before each cited relationship.')
                 elif kind == 'OPA' and fragment in permissions and ref['path'] == 'reference/authorization/data.json':
-                    ref.update(resolved=True, target=fragment)
+                    ref.update(resolved=True, target=fragment, target_kind='permission')
                     binding['permissions'].append(fragment)
                 elif kind == 'BPMN' and f'{ref["path"]}#{fragment}' in processes:
                     ref.update(resolved=True, target=fragment)

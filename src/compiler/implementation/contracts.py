@@ -13,6 +13,12 @@ You implement ONE leaf requirement in a generated TypeScript Express/React appli
 The database, backend and frontend symbol tables and lowering plans supply exact contracts and file paths.
 Parent descriptions constrain behavior; dependency requirements are not additional implementation tasks.
 Preserve previously implemented behavior, especially when files/components are shared.
+Implement the full current requirement description, including each declared CRUD operation,
+field/business constraint, permission and workflow. Scenarios illustrate that scope; a smaller
+generated test suite does not reduce it. Before returning, reconcile the full description with
+the implemented routes, services, persistence, page states and interactions. Use existing response
+fields only. A missing design module is a design gap to resolve within authorized source files,
+not permission to omit a described feature. Explain an essential unresolved contract in blocked_reason.
 When current_task.recovery is present, design or lowering could not supply complete contracts.
 Its file_paths are loaded editable recovery files, not implemented modules. Derive missing interfaces
 and behavior from the requirement/scenarios, implement those files, and load shared app/router,
@@ -104,7 +110,10 @@ assigned resource filters still require explicit business rules; authenticated d
 '''
 TASKS = {
     'test_generation': '''## Task: generate acceptance tests before implementing
-Write tests only at test_targets. Derive observable expected results from this requirement's scenarios.
+Write tests only at test_targets. Derive observable expected results from the full current requirement
+description and scenarios. Cover described CRUD operations, field/business rules, authorization and
+workflow transitions even when no scenario repeats them. Include persistence/readback for mutations
+and supported negative cases; assert exact required formats/capabilities rather than a weaker substitute.
 Requirements, scenarios and ancestor constraints define acceptance behavior. IR contracts identify typed
 seams and paths; visual analysis describes presentation. Neither implementation placeholders nor IR
 details may create new acceptance requirements. Do not test every visible control merely because the
@@ -172,6 +181,24 @@ TASKS['backend_implementation'] = '''## Task: implement the initial backend vers
 Tests have been generated and compiled, but have NOT been executed yet. Implement the current leaf's
 API/controllers, services/business functions and repositories/storage contracts as one coherent version.
 Wire server routes, parameter/result data flow, authentication transport and required startup fixtures.
+Reuse the exported generated Input/Output types and current_contracts; do not handwrite divergent DTOs.
+Optional means the property may be omitted; nullable means null is an accepted value. A nullable SQL
+column does not authorize null in an HTTP or service input. Preserve required, optional and nullable
+independently across validator, controller and service. Reject invalid null at the boundary; normalize
+only where the declared contract explicitly makes absent/null equivalent. For PATCH, omitted normally
+means unchanged while null clears only explicitly nullable fields; never erase this distinction.
+When TS2345 reports a mismatch, load both caller and callee and fix the violating value/validation
+using the declared schema. Do not widen contracts, use any, unchecked casts or non-null assertions
+to silence it. Load shared types through request_files if their exact definitions are missing.
+Complete every current requirement API, including routes not exercised by the generated tests.
+Wire routes to real controllers/services/repositories; merely implementing an uncalled function does
+not replace a route's 501 skeleton. Check required modules for Not implemented/empty bodies and routes
+for placeholder responses before submitting. Keep unrelated/infrastructure routes intact.
+Use cited ER relationships for joins, ownership, delete restrictions and transaction boundaries.
+Enforce exact cited OPA resource/action/scope on the server with trusted identity, including denial
+precedence. A default_entry permission chooses the landing page and cannot substitute for read access.
+Fixtures may provide requirement-supported initial records; they never substitute for persisted CRUD,
+real calculations, imports/exports, state transitions or permission checks.
 Only backend source and backend shared source are in scope. Frontend source is deliberately omitted.
 Acceptance tests are visible for expected behavior but read-only in this phase.
 Preserve contracts and previously implemented behavior. Return complete changed source files; do not
@@ -196,6 +223,13 @@ Only frontend source and frontend shared source are in scope. Backend implementa
 omitted; use the supplied backend API contracts for integration. Acceptance tests are read-only in this phase.
 Preserve contracts and earlier UI
 behavior. Wire the required interactions instead of leaving lowering's event.wired=false as completion.
+For every control implementing the current description, connect its event to state/navigation or
+the actual API and render success, validation and failure results. Navigation must mount the actual
+page instead of an empty fallback. Do not replace downloads with a different format under the same
+extension, recording/scanning with text input, or editable administration with read-only tables.
+If a required capability is unavailable, report the precise gap rather than presenting it as complete.
+Apply evidenced default_entry only to the permitted landing behavior; other actions require their
+own authorization. UI visibility alone is never the authorization boundary.
 After this phase the compiler executes only the current requirement's acceptance tests, then repairs.
 Historical test sources are checked for compilation only; no runtime regression suite is executed.
 '''

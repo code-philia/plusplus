@@ -152,6 +152,7 @@ class NodeTDDOrchestrator:
                 # Execute only this requirement; historical test sources remain
                 # covered by the compilation gates above and during repair.
                 evidence = self._run_tests(targets, rid, 'initial_implementation')
+                evidence += self._backend_completion_gate(rid)
                 self._gate(rid, 'initial_implementation', evidence)
                 success = passed(evidence)
                 for iteration in range(1, self.iterations + 1):
@@ -162,6 +163,7 @@ class NodeTDDOrchestrator:
                     self._model_patch('repair', rid, session, targets, evidence, snapshots,
                                       accept=lambda: self.runner.compile() + self.runner.check_tests(completed_tests + targets))
                     evidence = self._run_tests(targets, rid, f'repair_{iteration}')
+                    evidence += self._backend_completion_gate(rid)
                     self._gate(rid, f'repair_{iteration}', evidence)
                     if passed(evidence):
                         success = True
@@ -220,6 +222,37 @@ class NodeTDDOrchestrator:
         if not passed(final):
             errors.append('Final compilation failed')
         return self._report(states, errors, warnings)
+
+    def _backend_completion_gate(self, rid):
+        """Reject known generated backend placeholders even if narrow scenarios pass.
+
+        This is deliberately limited to compiler skeleton markers owned by this
+        requirement. It is not a proof of semantic completeness or a ban on 501.
+        """
+        pending, apis = [], set()
+        for path, record in self.context.catalog.items():
+            if not path.startswith('backend/'):
+                continue
+            modules = [row for row in record.get('contracts', [])
+                       if rid in row.get('reqs', []) and row.get('kind') in {'API', 'FUNC', 'DB'}]
+            if not modules:
+                continue
+            apis.update(row['id'] for row in modules if row['kind'] == 'API')
+            content = read_source(self.root, path)
+            if not content.strip() or re.search(
+                    r'''^\s*throw new Error\(\s*["']Not implemented["']\s*\);?\s*$''', content, re.MULTILINE):
+                pending.append({'file': path, 'module_ids': [row['id'] for row in modules],
+                                'reason': 'Required module still contains the generated placeholder.'})
+        app = read_source(self.root, 'backend/src/app.ts')
+        for match in re.finditer(r'\b\w+\.status\(\s*501\s*\)\.json\(\s*\{[^{}]*\}\s*\)', app):
+            module = re.search(r'''\bmodule_id\s*:\s*["']([^"']+)["']''', match[0])
+            if module and module[1] in apis and 'Not implemented' in match[0]:
+                pending.append({'file': 'backend/src/app.ts', 'module_ids': [module[1]],
+                                'reason': 'Required API still returns the generated HTTP 501 response.'})
+        return [{'status': 'FAILED' if pending else 'PASSED', 'gate': 'backend_completeness',
+                 'requirement_id': rid, 'pending_placeholders': pending,
+                 'output': 'Implement the required modules and wire their routes; generated tests do not reduce scope.'
+                           if pending else ''}]
 
     @staticmethod
     def _descends(rid, parent, requirements):
@@ -367,7 +400,8 @@ class NodeTDDOrchestrator:
     def _gate(self, rid, phase, results):
         self.log.info(f'{phase}: ' + ('PASSED' if passed(results) else 'FAILED'), node_id=rid)
         self.test_status[rid] = {'phase': phase, 'results': [
-            {key: row[key] for key in ('status', 'failure_kind', 'exit_code', 'error', 'test_files') if key in row}
+            {key: row[key] for key in ('status', 'failure_kind', 'exit_code', 'error', 'test_files',
+                                     'gate', 'requirement_id', 'pending_placeholders') if key in row}
             | ({'tests': {key: row['test_evidence'][key] for key in
                          ('collected', 'executed_files') if key in row['test_evidence']}
                          | {'failed_tests': [{key: test[key] for key in ('file', 'name', 'status', 'location') if key in test}

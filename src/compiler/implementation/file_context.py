@@ -8,7 +8,7 @@ from compiler.lowering.types import refs
 from .patcher import read_source
 from compiler.identity.lowering import infrastructure_file, public_contract
 from compiler.identity.policy import authentication_policy
-from compiler.preprocessing.evidence import requirement_evidence, attach_bundle_pages
+from compiler.preprocessing.evidence import requirement_evidence, attach_bundle_pages, attach_visual_analysis
 from compiler.frontend_design.bundle import navigation_context
 
 SYSTEM_FILES = {
@@ -241,7 +241,8 @@ class FileContext:
             reference = str(page.get('reference', '')).replace('\\', '/')
             if not reference and records:
                 reference = records[0]['reference']
-            page['analysis'] = visual_cache.get(reference, {}).get('analysis')
+            page['reference'] = reference
+        attach_visual_analysis(requirement.get('pages', []), self.requirements.get('bundle', {}), visual_cache)
         constraints, parent = [], requirement.get('parent_id')
         seen = set()
         while parent in self.requirements['nodes'] and parent not in seen:
@@ -305,7 +306,8 @@ def error_feedback(evidence):
             continue
         item = {key: copy.deepcopy(row[key]) for key in
                 ('status', 'failure_kind', 'command', 'exit_code', 'error', 'report_error', 'output',
-                 'application_output', 'application_exit_code') if key in row}
+                 'application_output', 'application_exit_code', 'gate', 'requirement_id',
+                 'pending_placeholders') if key in row}
         test = row.get('test_evidence')
         if test:
             item['test_evidence'] = {key: copy.deepcopy(test[key]) for key in

@@ -19,9 +19,17 @@ def parse_mermaid(text: str, path: str) -> dict[str, Any]:
     """Parse the serializer's Mermaid ER subset; reject unrecognized semantics."""
     entities, relationships = [], []
     current = None
+    relationship_id = None
     header = False
     for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
+        if line.startswith('%% relationship_id:'):
+            if current is not None or relationship_id is not None:
+                raise ValueError(f'{path}:{number}: misplaced relationship ID')
+            relationship_id = line.partition(':')[2].strip()
+            if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', relationship_id):
+                raise ValueError(f'{path}:{number}: invalid relationship ID')
+            continue
         if not line or line.startswith('%%'):
             continue
         source = {'path': path, 'line': number}
@@ -52,6 +60,8 @@ def parse_mermaid(text: str, path: str) -> dict[str, Any]:
             continue
         match = re.fullmatch(r'(\w+)\s*\{', line)
         if match:
+            if relationship_id is not None:
+                raise ValueError(f'{path}:{number}: relationship ID must precede a relationship')
             current = {'id': match[1], 'name': match[1], 'attributes': [], 'source': source}
             entities.append(current)
             continue
@@ -62,10 +72,11 @@ def parse_mermaid(text: str, path: str) -> dict[str, Any]:
         right = {'||': '1', 'o|': '0..1', '|o': '0..1', 'o{': '0..*', '|{': '1..*'}
         if match[2] not in left or match[4] not in right:
             raise ValueError(f'{path}:{number}: invalid ER cardinality')
-        relationships.append({'id': None, 'name': match[6], 'source_ref': match[1],
+        relationships.append({'id': relationship_id, 'name': match[6], 'source_ref': match[1],
                               'target_ref': match[5], 'source_cardinality': left[match[2]],
                               'target_cardinality': right[match[4]], 'source': source})
-    if current is not None or not header or not entities:
+        relationship_id = None
+    if current is not None or relationship_id is not None or not header or not entities:
         raise ValueError(f'{path}: incomplete ER diagram')
     return normalize_er({'entities': entities, 'relationships': relationships}, path)
 

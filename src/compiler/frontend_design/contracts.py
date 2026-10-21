@@ -46,6 +46,10 @@ for new records. Reference supplied records by exact ID; reference same-reply ne
 Do not guess IDs. Names are semantic, not framework-specific. Preserve unrelated existing design.
 validation_feedback and previous_output describe a rejected delta: return a full corrected delta.
 Before returning, check each current scenario step has the UI/state/interaction needed in this layer.
+Also cover the full current description, including CRUD, validation, permissions and workflow actions
+not repeated in scenarios. Identify required controls and their eventual state/event/API path; a
+decorative control is not an implemented action. Preserve shared-shell layout without importing
+unrelated business scope. Explicitly report required backend gaps in the interaction blocked_reason.
 Do not create implementation detail nodes or speculative operations just to fill the response.
 '''
 TYPES = '''## Type and reuse conventions

@@ -12,7 +12,7 @@ from model.client import describe_model_error
 from utils.jsonio import read_json, write_json_atomic
 from utils.logging import SynchronousLog
 from .contracts import PROMPTS, SCHEMAS, REFERENCE_INSTRUCTIONS
-from compiler.preprocessing.evidence import requirement_evidence, attach_bundle_pages
+from compiler.preprocessing.evidence import requirement_evidence, attach_bundle_pages, attach_visual_analysis
 from .context import database_context, retrieve, module_index, expand_module_context
 from .validation import shape_errors, validate_ir, parse_contract, normalize_contract
 from compiler.identity.lowering import DESIGN_INSTRUCTIONS
@@ -64,7 +64,8 @@ class BackendDesignPass:
             try:
                 node = requirements['nodes'][rid]
                 visual_cache = read_json(self.artifact_root / 'visual_cache.json', {})
-                requirement = self._requirement(node, requirements['nodes'], visual_cache=visual_cache)
+                requirement = self._requirement(node, requirements['nodes'], visual_cache=visual_cache,
+                                                bundle=requirements.get('bundle', {}))
                 data = database_context(database, rid)
                 references = requirement_evidence(requirements, rid, database, visual_cache=visual_cache)
                 if references:
@@ -126,15 +127,11 @@ class BackendDesignPass:
             **({'reference_evidence': str(self.root / 'reference_evidence.json')} if scoped_evidence else {})})
         return result
 
-    def _requirement(self, node, nodes, *, visual_cache=None):
+    def _requirement(self, node, nodes, *, visual_cache=None, bundle=None):
         result = {key: copy.deepcopy(node[key]) for key in ('id', 'name', 'description', 'scenarios', 'pages') if key in node}
         # Visual stage stores analysis separately; attach only this leaf's reference evidence.
         cache = visual_cache if visual_cache is not None else read_json(self.artifact_root / 'visual_cache.json', {})
-        for page in result.get('pages', []):
-            reference = page.get('reference')
-            normalized = str(reference or '').replace('\\', '/')
-            record = cache.get(normalized, {})
-            page['analysis'] = page.get('analysis', record.get('analysis') if isinstance(record, dict) else None)
+        attach_visual_analysis(result.get('pages', []), bundle or {}, cache)
         ancestors, seen = [], set()
         parent = node.get('parent_id')
         while parent in nodes and parent not in seen:
