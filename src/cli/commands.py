@@ -18,11 +18,9 @@ def _ensure_dotenv_loaded() -> None:
 
 
 def _locate_requirement_file(input_path: str) -> str:
-    path = Path(input_path).expanduser().resolve()
-    if path.is_dir():
-        path = next((path / name for name in ('requirements.yaml', 'requirements.yml')
-                     if (path / name).is_file()), path)
-    if not path.is_file() or path.suffix not in ('.yaml', '.yml'):
+    from compiler.preprocessing.stage import resolve_requirement_path
+    path = resolve_requirement_path(Path(input_path))
+    if not path.is_file() or path.suffix.lower() not in ('.yaml', '.yml'):
         raise ValueError(f'Requirements YAML not found: {path}')
     return str(path)
 
@@ -32,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--version', action='version', version='ARC 1.2.0')
     commands = parser.add_subparsers(dest='command', required=True)
     compile_parser = commands.add_parser('compile', help='Design, lower and implement an application')
-    compile_parser.add_argument('requirement_path')
+    compile_parser.add_argument('requirement_path', help='YAML file, requirements bundle, or explore output containing requirements/')
     compile_parser.add_argument('-o', '--output-dir', required=True)
     compile_parser.add_argument('--port', type=int, default=3000)
     compile_parser.add_argument('--stop-after-lowering', action='store_true')

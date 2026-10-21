@@ -394,10 +394,11 @@ def write_bundle_report(parsed: PreprocessingResult, artifact_root: Path) -> Pat
     return path
 
 
-def resolve_requirement_path(requirement_path):
-    source_path = requirement_path.expanduser().resolve()
+def resolve_requirement_path(requirement_path: Path | str) -> Path:
+    """Locate a YAML input in a bundle or explore output, including symlinked bundles."""
+    source_path = Path(requirement_path).expanduser().resolve()
     if source_path.is_dir():
         source_path = next((source_path / name for name in (
             'requirements.yaml', 'requirements.yml', 'requirements/requirements.yaml',
             'requirements/requirements.yml') if (source_path / name).is_file()), source_path / 'requirements.yaml')
-    return source_path
+    return source_path.resolve()
