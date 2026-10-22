@@ -65,10 +65,10 @@ def check_config() -> dict[str, Any]:
     except ValueError:
         warnings.append(f"ARC_STRUCTURED_OUTPUT_RETRY_COUNT must be an integer, got: {retry_count}")
 
-    # Check .env file presence
-    env_file = Path(".env")
+    # Inspect the selected reproduction profile instead of requiring a separate .env.
+    env_file = Path(os.environ.get("ARC_ENV_FILE") or ".env").expanduser()
     if not env_file.exists():
-        warnings.append("No .env file found in current directory (copy .env_example to .env)")
+        warnings.append(f"Configuration file not found: {env_file}. Configure .env.gpt or .env.deepseek and set ARC_ENV_FILE.")
     else:
         info.append(f"Configuration loaded from {env_file.resolve()}")
 

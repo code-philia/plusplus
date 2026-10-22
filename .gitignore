@@ -9,9 +9,17 @@ __pycache__
 *.db
 .env
 .env.*
+# Track the two credential-free reproduction profiles.
+!.env.deepseek
+!.env.gpt
 arc_compiler.egg-info
 
 /build
 example/smoke-smoke
 
 *.log
+# Reproduction run records (scripts remain tracked).
+/reproduction/
+
+# Local source checkout; publish only the selected bundled task materials.
+/arc-bench/

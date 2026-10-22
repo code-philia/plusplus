@@ -1,0 +1,90 @@
+{
+  "format_version": 2,
+  "description": "Bundled requirements, visual references, and independent acceptance tests for the main experiment.",
+  "tasks": {
+    "keep": {
+      "input": {
+        "path": "input/keep",
+        "files": 21,
+        "bytes": 2017969,
+        "sha256": "a742b0018c67fcc1b9ac26232c4c97990f4c951004e30c1c78b5ce395b75308c"
+      },
+      "test": {
+        "path": "test/keep",
+        "files": 19,
+        "bytes": 36538,
+        "sha256": "ed2b39bf9ecb0f0ca2eeda3e8d2344b505777cfd3e65f9396f24d6ee056454e8"
+      }
+    },
+    "bookstack": {
+      "input": {
+        "path": "input/bookstack",
+        "files": 20,
+        "bytes": 13269398,
+        "sha256": "e2349f7a2b6b9b4f7f77d7de43b4b9bc543a125518eb53b5e31677cfa691f8c7"
+      },
+      "test": {
+        "path": "test/bookstack",
+        "files": 25,
+        "bytes": 26197,
+        "sha256": "2b7c005c379c0ad0995bd7034bbaa47a4162cb3752ec9ecd355af79ec87cf4a7"
+      }
+    },
+    "prestashop": {
+      "input": {
+        "path": "input/prestashop",
+        "files": 39,
+        "bytes": 20361628,
+        "sha256": "2957589e7322ca5551ee1f1cd7bc9d0c8a5372ce00dcbc1159cf6159b31a365b"
+      },
+      "test": {
+        "path": "test/prestashop",
+        "files": 56,
+        "bytes": 87195,
+        "sha256": "6a731494863a02865aa1f570153f1b90c1ea268b0b0dc98d89a55f8ba15a20f6"
+      }
+    },
+    "stackoverflow": {
+      "input": {
+        "path": "input/stackoverflow",
+        "files": 17,
+        "bytes": 6670055,
+        "sha256": "ee2f307f2ba22a46b5be825c61a291e1bc94c6507e6681859731a5c7c637915f"
+      },
+      "test": {
+        "path": "test/stackoverflow",
+        "files": 54,
+        "bytes": 71367,
+        "sha256": "1edfb54e9f72e9997e99003962a845598fe6d4b6c4c96f1888e88cc32a610706"
+      }
+    },
+    "12306": {
+      "input": {
+        "path": "input/12306",
+        "files": 27,
+        "bytes": 9787177,
+        "sha256": "180d48c8892c83a106491327683989a2948f5af6e674167e0257b610c38d7913"
+      },
+      "test": {
+        "path": "test/12306",
+        "files": 96,
+        "bytes": 103946,
+        "sha256": "04d6aa9732627eec8e978c21d646f2fda58c3c13e8a10fb10f3eb2bda3552a03"
+      }
+    },
+    "ctrip": {
+      "input": {
+        "path": "input/ctrip",
+        "files": 47,
+        "bytes": 24558676,
+        "sha256": "f3d93f0447c0f53a10e47b8895c0bdda37f321c79f32eab45b9fb5db853ba1dc"
+      },
+      "test": {
+        "path": "test/ctrip",
+        "files": 99,
+        "bytes": 140619,
+        "sha256": "d27395053760ae0f088674df590e6bb18f6ed1446bdfc601a47c7ce0b40bab4f"
+      }
+    }
+  }
+}
