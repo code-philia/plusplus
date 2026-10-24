@@ -1,10 +1,29 @@
 """Bounded-depth region components and typed handler skeletons for React."""
 import json
 import re
+from dataclasses import dataclass
+from typing import Any
 from compiler.frontend_design.validation import ui_index
 from compiler.lowering.files import write_stage
 from compiler.lowering.planning import group_for, group_directory, unique_name, portable_stem, relative_import
 from compiler.lowering.types import contract, refs, type_file
+
+
+@dataclass
+class _ComponentLayout:
+    components: list[dict[str, Any]]
+    ownership: dict[str, str | None]
+    child_components: dict[str, list[str]]
+    by_ui: dict[str, dict[str, Any]]
+    ui_records: list[dict[str, Any]]
+    app_path: str
+
+
+@dataclass
+class _StateLayout:
+    records: list[dict[str, Any]]
+    by_component: dict[str, list[dict[str, Any]]]
+    properties: dict[str, str]
 
 
 class FrontendLoweringPass:
@@ -20,6 +39,40 @@ class FrontendLoweringPass:
         definitions = {row['name']: row['schema'] for row in frontend['types']}
         types_path = 'frontend/src/types/contracts.ts'
         files = {types_path: type_file(frontend['types'])}
+        # Resolve ownership before rendering so source generation only reads the layout.
+        layout = self._select_components(requirements, frontend, nodes)
+        state_layout = self._collect_state(frontend, layout)
+        files.update(self._render_components(frontend, layout, state_layout, definitions, types_path))
+        handlers = []
+        for row in frontend['handlers']:
+            if not re.fullmatch(r'[A-Z][A-Za-z0-9]*', row['name']):
+                raise ValueError(f'Invalid handler export name: {row["name"]}')
+            group = group_for(row['reqs'], requirements)
+            path = f'frontend/src/features/{group_directory(group, requirements)}/handlers/{portable_stem(row["name"])}.ts'
+            needed = sorted(refs(row['input']) | refs(row['output']))
+            imports = ('import type * as Contracts from ' + json.dumps(relative_import(path, types_path, '')) + ';\n') if needed else ''
+            files[path] = (imports + f'export type {row["name"]}Input = {contract(row["input"], definitions, namespace="Contracts.")};\n'
+                + f'export type {row["name"]}Output = {contract(row["output"], definitions, namespace="Contracts.")};\n'
+                + f'export async function {row["name"]}(_input: {row["name"]}Input): Promise<{row["name"]}Output> {{\n'
+                + '  throw new Error("Not implemented");\n}\n')
+            handlers.append({'id': row['id'], 'name': row['name'], 'reqs': row['reqs'], 'group_requirement_id': group,
+                             'file_path': path, 'export': row['name'], 'input_type': row['name'] + 'Input',
+                             'output_type': row['name'] + 'Output', 'read': row['read'], 'write': row['write'], 'apis': row['apis']})
+        handler_paths = {row['id']: row['file_path'] for row in handlers}
+        events = [{'id': row['id'], 'ui_id': row['ui'], 'handler_id': row['handler'],
+                   'component_file_path': layout.by_ui[layout.ownership[row['ui']]]['file_path'],
+                   'handler_file_path': handler_paths[row['handler']], 'wired': False} for row in frontend['events']]
+        plan = {'ir_kind': 'frontend_lowering', 'strategy': 'shallow_structural_subtrees',
+                'component_depth': self.component_depth, 'min_nodes': self.min_nodes,
+                'entrypoint': 'frontend/src/main.tsx', 'app_file_path': layout.app_path,
+                'app': {'ui_id': frontend['ui']['id'], 'file_path': layout.app_path, 'export': 'App'},
+                'components': layout.components, 'ui': layout.ui_records, 'data': state_layout.records, 'events': events,
+                'handlers': handlers, 'types': [{'name': row['name'], 'file_path': types_path, 'export': row['name']} for row in frontend['types']]}
+        if dry_run:
+            return plan, files
+        return write_stage(output_dir, 'frontend', plan, files, bootstrap_files={'frontend/src/App.tsx', 'frontend/src/main.tsx'})
+
+    def _select_components(self, requirements, frontend, nodes):
         components, ownership, child_components = [], {}, {}
         component_by_ui = {}
         export_names = {'App', 'AppState', 'AppProps', 'Contracts'}
@@ -62,6 +115,11 @@ class FrontendLoweringPass:
             owner = ownership[row['id']]
             ui_records.append({'id': row['id'], 'component_ui_id': owner,
                                'file_path': component_by_ui[owner]['file_path'], 'standalone': row['id'] == owner})
+        return _ComponentLayout(components, ownership, child_components, component_by_ui, ui_records, app_path)
+
+    def _collect_state(self, frontend, layout):
+        ownership = layout.ownership
+        component_by_ui = layout.by_ui
         data_records = []
         state_by_component = {}
         state_properties = {}
@@ -82,6 +140,16 @@ class FrontendLoweringPass:
             data_records.append({'id': row['id'], 'owner_ui_id': row['owner'], 'component_ui_id': owner,
                                  'file_path': component_by_ui[owner]['file_path'], 'export': component_by_ui[owner]['export'] + 'State',
                                  'property': prop})
+        return _StateLayout(data_records, state_by_component, state_properties)
+
+    def _render_components(self, frontend, layout, state_layout, definitions, types_path):
+        components = layout.components
+        component_by_ui = layout.by_ui
+        child_components = layout.child_components
+        app_path = layout.app_path
+        state_by_component = state_layout.by_component
+        state_properties = state_layout.properties
+        files = {}
         def state_contract(owner, path):
             states = state_by_component.get(owner, [])
             needed = sorted(set().union(*(refs(row['schema']) for row in states))) if states else []
@@ -103,31 +171,4 @@ class FrontendLoweringPass:
                           + '\n'.join('    <' + row['export'] + ' />' for row in pages) + '\n  </>;\n}\nexport default App;\n')
         files['frontend/src/main.tsx'] = ('import "./index.css";\nimport { createRoot } from "react-dom/client";\nimport App from "./App";\n'
             + 'const root = document.getElementById("root");\nif (root) createRoot(root).render(<App />);\n')
-        handlers = []
-        for row in frontend['handlers']:
-            if not re.fullmatch(r'[A-Z][A-Za-z0-9]*', row['name']):
-                raise ValueError(f'Invalid handler export name: {row["name"]}')
-            group = group_for(row['reqs'], requirements)
-            path = f'frontend/src/features/{group_directory(group, requirements)}/handlers/{portable_stem(row["name"])}.ts'
-            needed = sorted(refs(row['input']) | refs(row['output']))
-            imports = ('import type * as Contracts from ' + json.dumps(relative_import(path, types_path, '')) + ';\n') if needed else ''
-            files[path] = (imports + f'export type {row["name"]}Input = {contract(row["input"], definitions, namespace="Contracts.")};\n'
-                + f'export type {row["name"]}Output = {contract(row["output"], definitions, namespace="Contracts.")};\n'
-                + f'export async function {row["name"]}(_input: {row["name"]}Input): Promise<{row["name"]}Output> {{\n'
-                + '  throw new Error("Not implemented");\n}\n')
-            handlers.append({'id': row['id'], 'name': row['name'], 'reqs': row['reqs'], 'group_requirement_id': group,
-                             'file_path': path, 'export': row['name'], 'input_type': row['name'] + 'Input',
-                             'output_type': row['name'] + 'Output', 'read': row['read'], 'write': row['write'], 'apis': row['apis']})
-        handler_paths = {row['id']: row['file_path'] for row in handlers}
-        events = [{'id': row['id'], 'ui_id': row['ui'], 'handler_id': row['handler'],
-                   'component_file_path': component_by_ui[ownership[row['ui']]]['file_path'],
-                   'handler_file_path': handler_paths[row['handler']], 'wired': False} for row in frontend['events']]
-        plan = {'ir_kind': 'frontend_lowering', 'strategy': 'shallow_structural_subtrees',
-                'component_depth': self.component_depth, 'min_nodes': self.min_nodes,
-                'entrypoint': 'frontend/src/main.tsx', 'app_file_path': app_path,
-                'app': {'ui_id': frontend['ui']['id'], 'file_path': app_path, 'export': 'App'},
-                'components': components, 'ui': ui_records, 'data': data_records, 'events': events,
-                'handlers': handlers, 'types': [{'name': row['name'], 'file_path': types_path, 'export': row['name']} for row in frontend['types']]}
-        if dry_run:
-            return plan, files
-        return write_stage(output_dir, 'frontend', plan, files, bootstrap_files={'frontend/src/App.tsx', 'frontend/src/main.tsx'})
+        return files

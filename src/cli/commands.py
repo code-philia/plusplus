@@ -2,7 +2,6 @@
 from __future__ import annotations
 import argparse
 import asyncio
-import os
 import sys
 import time
 from pathlib import Path
@@ -11,20 +10,15 @@ from utils.encoding import configure_utf8_console
 
 
 def _ensure_dotenv_loaded() -> None:
-    from dotenv import load_dotenv
-    path = Path(os.environ.get('ARC_ENV_FILE') or Path(__file__).resolve().parents[2] / '.env')
-    if path.is_file():
-        load_dotenv(path, override=False, encoding="utf-8-sig")
+    # Keep the script-facing import path while configuration lives outside the CLI.
+    from utils.environment import ensure_dotenv_loaded
+    ensure_dotenv_loaded()
 
 
 def _locate_requirement_file(input_path: str) -> str:
-    path = Path(input_path).expanduser().resolve()
-    if path.is_dir():
-        path = next((path / name for name in ('requirements.yaml', 'requirements.yml')
-                     if (path / name).is_file()), path)
-    if not path.is_file() or path.suffix not in ('.yaml', '.yml'):
-        raise ValueError(f'Requirements YAML not found: {path}')
-    return str(path)
+    # Existing stage scripts still import this private compatibility entrypoint.
+    from compiler.preprocessing.paths import locate_requirement_file
+    return locate_requirement_file(input_path)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -84,6 +84,9 @@ class DatabaseSchemaPass:
                     errors.append(_format_error("ARC2101", "Requirement is missing from Requirement IR.", node_id=node_id))
                     states[node_id] = "FAILED"
                     continue
+                def validate_access(value, rid=node_id, phase_name=phase):
+                    return _validate_access_decision(state, phase_name, rid, value)
+
                 decision = self._run_unit(
                     phase=phase,
                     schema_name=schema_name,
@@ -95,8 +98,7 @@ class DatabaseSchemaPass:
                     ),
                     errors=errors,
                     warnings=state.warnings,
-                    validate=lambda value, rid=node_id, phase_name=phase: _validate_access_decision(
-                        state, phase_name, rid, value),
+                    validate=validate_access,
                 )
                 if decision is None:
                     states[node_id] = "FAILED"
@@ -226,31 +228,10 @@ class DatabaseSchemaPass:
     ) -> dict[str, Any] | None:
         feedback: list[str] = []
         for attempt in range(self._attempts):
-            payload = copy.deepcopy(context)
-            if feedback:
-                payload["previous_validation_errors"] = feedback
-            started_at = time.monotonic()
-            self._trace(
-                f"MODEL_REQUEST phase={phase} requirement={node_id} "
-                f"attempt={attempt + 1}/{self._attempts} schema={schema_name}"
-            )
-            request_payload = {
-                "schema_name": schema_name,
-                "instructions": instructions,
-                "input_payload": payload,
-                "output_schema": output_schema,
-            }
-            self._trace(
-                _context_audit(
-                    phase=phase,
-                    requirement_id=node_id,
-                    attempt=attempt + 1,
-                    request_payload=request_payload,
-                )
-            )
-            self._trace(
-                f"MODEL_INPUT phase={phase} requirement={node_id} attempt={attempt + 1}\n"
-                + format_payload_trace(request_payload)
+            payload, started_at = self._prepare_decision_request(
+                phase=phase, schema_name=schema_name, output_schema=output_schema,
+                instructions=instructions, node_id=node_id, context=context, feedback=feedback,
+                attempt=attempt,
             )
             try:
                 decision = self._model.generate_json(
@@ -273,24 +254,12 @@ class DatabaseSchemaPass:
                     f"attempt={attempt + 1} duration_ms={duration_ms}\n"
                     + format_payload_trace(decision)
                 )
-                try:
-                    decision, normalization_notes = _normalize_decision_context(
-                        phase, decision, context
-                    )
-                    if validate is not None:
-                        feedback = validate(decision)
-                        if feedback:
-                            self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
-                            continue
-                except Exception as exc:
-                    feedback = [f'Invalid design response: {describe_model_error(exc)}']
-                    self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={feedback[0]}")
+                decision, feedback, accepted = self._process_decision_response(
+                    phase=phase, node_id=node_id, decision=decision, context=context,
+                    feedback=feedback, validate=validate,
+                )
+                if not accepted:
                     continue
-                for note in normalization_notes:
-                    self._trace(
-                        f"MODEL_NORMALIZED phase={phase} requirement={node_id} "
-                        f"action={note}"
-                    )
                 self._trace(
                     f"MODEL_ACCEPTED phase={phase} requirement={node_id} "
                     f"attempt={attempt + 1} duration_ms={duration_ms}"
@@ -300,6 +269,65 @@ class DatabaseSchemaPass:
         errors.append(_format_error("ARC2103", f"{phase} failed: {'; '.join(feedback)}", node_id=node_id))
         return None
 
+
+    def _prepare_decision_request(
+        self, *, phase: str, schema_name: str, output_schema: dict[str, Any],
+        instructions: str, node_id: str, context: dict[str, Any], feedback: list[str],
+        attempt: int,
+    ) -> tuple[dict[str, Any], float]:
+        # Copy each attempt independently; normalization still uses the original context.
+        payload = copy.deepcopy(context)
+        if feedback:
+            payload["previous_validation_errors"] = feedback
+        started_at = time.monotonic()
+        self._trace(
+            f"MODEL_REQUEST phase={phase} requirement={node_id} "
+            f"attempt={attempt + 1}/{self._attempts} schema={schema_name}"
+        )
+        request_payload = {
+            "schema_name": schema_name,
+            "instructions": instructions,
+            "input_payload": payload,
+            "output_schema": output_schema,
+        }
+        self._trace(
+            _context_audit(
+                phase=phase,
+                requirement_id=node_id,
+                attempt=attempt + 1,
+                request_payload=request_payload,
+            )
+        )
+        self._trace(
+            f"MODEL_INPUT phase={phase} requirement={node_id} attempt={attempt + 1}\n"
+            + format_payload_trace(request_payload)
+        )
+        return payload, started_at
+
+    def _process_decision_response(
+        self, *, phase: str, node_id: str, decision: Any, context: dict[str, Any],
+        feedback: list[str], validate: Callable[[dict[str, Any]], list[str]] | None,
+    ) -> tuple[Any, list[str], bool]:
+        # Rejections stay inside the retry loop; applying accepted decisions stays with the caller.
+        try:
+            decision, normalization_notes = _normalize_decision_context(
+                phase, decision, context
+            )
+            if validate is not None:
+                feedback = validate(decision)
+                if feedback:
+                    self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
+                    return decision, feedback, False
+        except Exception as exc:
+            feedback = [f'Invalid design response: {describe_model_error(exc)}']
+            self._trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={feedback[0]}")
+            return decision, feedback, False
+        for note in normalization_notes:
+            self._trace(
+                f"MODEL_NORMALIZED phase={phase} requirement={node_id} "
+                f"action={note}"
+            )
+        return decision, feedback, True
 
     def _trace(self, message: str) -> None:
         if self._trace_enabled:

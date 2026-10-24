@@ -3,8 +3,13 @@ from __future__ import annotations
 import copy
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+from compiler.ir.backend import BackendIR
+from compiler.ir.database import ERModelIR
+from compiler.ir.frontend import FrontendIR
 from compiler.ir.shape_validation import shape_errors
 from compiler.preprocessing.traversal import children_by_id, postorder
 from compiler.lowering.planning import slug, token
@@ -25,7 +30,7 @@ class TDDResult:
     warnings: list[str] = field(default_factory=list)
 
     @property
-    def ok(self):
+    def ok(self) -> bool:
         return not self.errors
 
 
@@ -54,8 +59,11 @@ class NodeTDDOrchestrator:
         if hasattr(model, 'set_usage_path'):
             model.set_usage_path(self.root / '.arc/model_usage.jsonl')
 
-    def compile(self, requirements, database, backend, frontend, backend_plan, frontend_plan, database_plan,
-                *, skip_requirements=()):
+    def compile(
+        self, requirements: dict[str, Any], database: ERModelIR, backend: BackendIR,
+        frontend: FrontendIR, backend_plan: dict[str, Any], frontend_plan: dict[str, Any],
+        database_plan: dict[str, Any], *, skip_requirements: Iterable[str] = (),
+    ) -> TDDResult:
         try:
             return self._compile(requirements, database, backend, frontend, backend_plan, frontend_plan,
                                  database_plan, skip_requirements=skip_requirements)
@@ -63,8 +71,11 @@ class NodeTDDOrchestrator:
             if hasattr(self.runner, 'close'):
                 self.runner.close()
 
-    def _compile(self, requirements, database, backend, frontend, backend_plan, frontend_plan, database_plan,
-                 *, skip_requirements=()):
+    def _compile(
+        self, requirements: dict[str, Any], database: ERModelIR, backend: BackendIR,
+        frontend: FrontendIR, backend_plan: dict[str, Any], frontend_plan: dict[str, Any],
+        database_plan: dict[str, Any], *, skip_requirements: Iterable[str] = (),
+    ) -> TDDResult:
         self.context = FileContext(self.root, requirements, database, backend, frontend,
                                    backend_plan, frontend_plan, database_plan)
         required_shared = {'backend/src/db/seed.ts', 'backend/src/db/initialize.ts', 'backend/src/db/client.ts'}

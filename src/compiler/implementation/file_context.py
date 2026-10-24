@@ -1,11 +1,19 @@
 """Direct requirement ownership, all-shared discovery, and request-scoped file loading."""
+from __future__ import annotations
 import copy
 import json
+from collections.abc import Collection, Sequence
 from pathlib import Path
+from typing import Any
+from compiler.ir.backend import BackendIR
+from compiler.ir.database import ERModelIR
+from compiler.ir.frontend import FrontendIR
 from compiler.backend_design.context import terms
 from compiler.frontend_design.validation import ui_index
 from compiler.lowering.types import refs
 from .patcher import read_source
+from .context_types import ImplementationContext
+from .working_context import WorkingContext
 
 SYSTEM_FILES = {
     'backend/src/db/seed.ts': ('SYSTEM.SEED', 'Single cumulative startup reset and fixture insertion module'),
@@ -23,7 +31,11 @@ SYSTEM_FILES = {
 
 
 class FileContext:
-    def __init__(self, root, requirements, database, backend, frontend, backend_plan, frontend_plan, database_plan):
+    def __init__(
+        self, root: str | Path, requirements: dict[str, Any], database: ERModelIR,
+        backend: BackendIR, frontend: FrontendIR, backend_plan: dict[str, Any],
+        frontend_plan: dict[str, Any], database_plan: dict[str, Any],
+    ) -> None:
         self.root = Path(root).resolve()
         self.requirements, self.database, self.backend, self.frontend = requirements, database, backend, frontend
         self.catalog = {}
@@ -200,7 +212,10 @@ class FileContext:
             parent = node.get('parent_id')
         return list(reversed(constraints))
 
-    def build(self, rid, phase, session, test_targets, evidence):
+    def build(
+        self, rid: str, phase: str, session: WorkingContext, test_targets: Collection[str],
+        evidence: Sequence[dict[str, Any]],
+    ) -> ImplementationContext:
         direct = self.direct_files(rid)
         source_paths = (direct | session.active) - session.released
         if phase == 'backend_implementation':

@@ -118,8 +118,8 @@ class Compiler:
             from .validation_preparation.stage import ValidationPreparationPass, check_validation_readiness
             from .stage_repair import repair_gate
 
-            from cli.commands import _ensure_dotenv_loaded
-            _ensure_dotenv_loaded()
+            from utils.environment import ensure_dotenv_loaded
+            ensure_dotenv_loaded()
             await begin('project_initialization')
 
             def initialize_project():
