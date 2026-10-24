@@ -66,8 +66,8 @@ class VisualModel:
             base_url=os.environ.get("VISUAL_BASE_URL", "").strip()
             or os.environ.get("OPENAI_BASE_URL", "").strip()
             or "https://api.openai.com/v1",
-            timeout_seconds=_positive_env_float("ARC_VISUAL_TIMEOUT_SECONDS", 120.0),
-            transport_retries=_nonnegative_env_int("ARC_MODEL_TRANSPORT_RETRIES", 3),
+            timeout_seconds=positive_env_float("ARC_VISUAL_TIMEOUT_SECONDS", 120.0),
+            transport_retries=nonnegative_env_int("ARC_MODEL_TRANSPORT_RETRIES", 3),
         )
 
     @log_design_call
@@ -83,7 +83,7 @@ class VisualModel:
         output_schema = dict(output_schema)
         force_json = output_schema.pop("x-arc-output-mode", None) == "json_object"
         self._last_output_mode = "json_object" if force_json else self._structured_output_mode
-        messages = _visual_messages(instructions, input_payload, image_data_url, schema_name=schema_name)
+        messages = visual_messages(instructions, input_payload, image_data_url, schema_name=schema_name)
         response = None
         if not force_json and self._structured_output_mode == "json_schema":
             try:
@@ -119,7 +119,7 @@ class VisualModel:
             "the schema permits them (such as literal JSON objects). Do not use Markdown:\n"
             f"{json.dumps(output_schema, ensure_ascii=False, separators=(',', ':'))}"
         )
-        fallback_messages = _visual_messages(
+        fallback_messages = visual_messages(
             fallback_instructions,
             input_payload,
             image_data_url,
@@ -162,7 +162,7 @@ class VisualModel:
         return value
 
 
-def _visual_messages(
+def visual_messages(
     instructions: str,
     input_payload: dict[str, Any],
     image_data_url: str,
@@ -189,7 +189,7 @@ def _visual_messages(
     ]
 
 
-def _positive_env_float(name: str, default: float) -> float:
+def positive_env_float(name: str, default: float) -> float:
     try:
         value = float(os.environ.get(name, str(default)))
     except ValueError:
@@ -197,7 +197,7 @@ def _positive_env_float(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
-def _nonnegative_env_int(name: str, default: int) -> int:
+def nonnegative_env_int(name: str, default: int) -> int:
     try:
         return max(0, int(os.environ.get(name, str(default))))
     except ValueError:

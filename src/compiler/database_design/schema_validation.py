@@ -10,8 +10,8 @@ from .contracts import (
     IDENTIFIER_PATTERN,
     RELATIONSHIP_TYPES,
 )
-from .decision_validation import _validate_decision_shape
-from .field_validation import _field_property_errors
+from .decision_validation import validate_decision_shape
+from .field_validation import field_property_errors
 
 
 def validate_database_schema(
@@ -65,7 +65,7 @@ def validate_database_schema(
                 errors.append(f"invalid field origin: {key}.{name}")
             if not isinstance(field_item.get("nullable"), bool):
                 errors.append(f"invalid nullable flag: {key}.{name}")
-            errors.extend(_field_property_errors(key, field_item))
+            errors.extend(field_property_errors(key, field_item))
         if "id" not in names:
             errors.append(f"entity has no id field: {key}")
         else:
@@ -91,7 +91,7 @@ def validate_database_schema(
             definition = {name: relationship.get(name) for name in (
                 "key", "parent", "child", "type", "parent_min", "parent_max", "child_min", "child_max", "description", "evidence_requirement_ids",
             )}
-            errors.extend(_validate_decision_shape("pass3_relationships", "FINAL", {
+            errors.extend(validate_decision_shape("pass3_relationships", "FINAL", {
                 "entity_key": "FINAL", "relationships": [definition],
             }))
             if relationship.get("child_required") != (relationship.get("child_min") == 1):

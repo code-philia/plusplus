@@ -68,7 +68,7 @@ STAGE_GROUPS = {
 }
 
 
-def _stage_family(schema_name: str) -> str:
+def stage_family(schema_name: str) -> str:
     if schema_name == "arc_validation_seed":
         return "validation_preparation"
     if schema_name.startswith("arc_database_"):
@@ -109,7 +109,7 @@ GROUPS = (
 )
 
 
-def _block(value: Any, language: str = "json") -> str:
+def block(value: Any, language: str = "json") -> str:
     text = value if isinstance(value, str) and language != "json" else json.dumps(value, ensure_ascii=False, indent=2)
     # Source/literal strings can contain Markdown fences; keep the envelope intact.
     fence = "`" * max(3, 1 + max((len(match) for match in re.findall(r"`+", text)), default=0))
@@ -120,18 +120,18 @@ def render_section(name: str, purpose: str, payload: dict[str, Any]) -> str:
     parts = [f"## {name}", purpose] if purpose else [f"## {name}"]
     metadata = {key: value for key, value in payload.items() if key not in SOURCE_FIELDS}
     if metadata:
-        parts.append(_block(metadata))
+        parts.append(block(metadata))
     for field, files in payload.items():
         if field not in SOURCE_FIELDS:
             continue
         if not isinstance(files, dict) or not all(isinstance(source, str) for source in files.values()):
-            parts.extend([f"### {field}", _block(files)])
+            parts.extend([f"### {field}", block(files)])
             continue
         parts.append(f"### {field}")
         if not files:
             parts.append("No files supplied.")
         for path, source in files.items():
-            parts.extend([f"#### {json.dumps(path, ensure_ascii=False)}", _block(source, "text")])
+            parts.extend([f"#### {json.dumps(path, ensure_ascii=False)}", block(source, "text")])
     return "\n\n".join(parts)
 
 
@@ -237,7 +237,7 @@ def stage_sections(schema_name: str, payload: dict[str, Any]) -> list[dict[str, 
             sections.append({"name": "Additional context", "purpose": "", "payload": remaining})
         return sections
     remaining = dict(payload)
-    overrides = STAGE_GROUPS.get(_stage_family(schema_name), {})
+    overrides = STAGE_GROUPS.get(stage_family(schema_name), {})
     sections = [{"name": "Task and context interpretation", "purpose": STAGE_TASKS.get(schema_name, "Complete the task defined by the system instructions."),
                  "payload": {"stage": schema_name,
                              "context_rules": [

@@ -54,13 +54,13 @@ def format_terminal_log(
         prefix += f"[{node_id}]"
     if status:
         prefix += f"[{status}]"
-    if not _should_color():
+    if not should_color():
         return "\n".join(f"{prefix} {line}" for line in (str(message).splitlines() or [""]))
 
-    prefix_color = _agent_color(agent_name, message, status)
+    prefix_color = agent_color(agent_name, message, status)
     colored_prefix = f"{prefix_color}{prefix}{ANSI_RESET}"
     return "\n".join(
-        f"{colored_prefix} {_color_message(line, status)}"
+        f"{colored_prefix} {color_message(line, status)}"
         for line in (str(message).splitlines() or [""])
     )
 
@@ -108,10 +108,10 @@ ANSI_GRAY = "\033[90m"
 
 
 def local_timestamp() -> str:
-    return datetime.now(_log_timezone()).strftime("%m-%d %H:%M:%S")
+    return datetime.now(log_timezone()).strftime("%m-%d %H:%M:%S")
 
 
-def _log_timezone() -> tzinfo:
+def log_timezone() -> tzinfo:
     configured = os.environ.get("ARC_TIMEZONE", "").strip() or os.environ.get("TZ", "").strip()
     if configured:
         try:
@@ -121,7 +121,7 @@ def _log_timezone() -> tzinfo:
     return datetime.now().astimezone().tzinfo or timezone.utc
 
 
-def _should_color() -> bool:
+def should_color() -> bool:
     if os.environ.get("NO_COLOR"):
         return False
     forced = os.environ.get("ARC_LOG_COLOR", "").strip().lower()
@@ -132,7 +132,7 @@ def _should_color() -> bool:
     return sys.stdout.isatty()
 
 
-def _agent_color(agent_name: str, message: str, status: str | None) -> str:
+def agent_color(agent_name: str, message: str, status: str | None) -> str:
     normalized = f"{agent_name} {message} {status or ''}".lower()
     if status == "error" or "failed" in normalized:
         return ANSI_RED + ANSI_BOLD
@@ -143,7 +143,7 @@ def _agent_color(agent_name: str, message: str, status: str | None) -> str:
     return ANSI_BOLD
 
 
-def _color_message(message: str, status: str | None) -> str:
+def color_message(message: str, status: str | None) -> str:
     if status == "error":
         return f"{ANSI_RED}{message}{ANSI_RESET}"
     if status == "warning":

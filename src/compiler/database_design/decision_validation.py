@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .common import _normalize_identifier
+from .common import normalize_identifier
 from .contracts import (
     FIELD_DECLARATION_SCHEMA,
     FIELD_PROPERTIES_SCHEMA,
@@ -11,10 +11,10 @@ from .contracts import (
     IDENTIFIER_PATTERN,
     RELATIONSHIP_TYPES,
 )
-from .field_validation import _field_property_errors
+from .field_validation import field_property_errors
 
 
-def _validate_decision_shape(phase: str, node_id: str, decision: Any) -> list[str]:
+def validate_decision_shape(phase: str, node_id: str, decision: Any) -> list[str]:
     if not isinstance(decision, dict):
         return ["decision must be an object"]
     errors: list[str] = []
@@ -71,7 +71,7 @@ def _validate_decision_shape(phase: str, node_id: str, decision: Any) -> list[st
                         errors.append(f"Pass 2 {operation} field properties must contain all eight storage-invariant keys")
                     errors.extend(
                         f"Pass 2 invalid field properties: {error}"
-                        for error in _field_property_errors("decision", field_item)
+                        for error in field_property_errors("decision", field_item)
                     )
     elif phase == "pass3_relationships":
         for item in decision["relationships"]:
@@ -105,7 +105,7 @@ def _validate_decision_shape(phase: str, node_id: str, decision: Any) -> list[st
                 errors.append("Pass 3 relationship evidence must be a nonempty list of requirement IDs")
     return errors
 
-def _validate_decision_context(
+def validate_decision_context(
     phase: str,
     decision: Any,
     context: dict[str, Any],
@@ -117,12 +117,12 @@ def _validate_decision_context(
     errors: list[str] = []
     if phase == "pass1_entities":
         existing = {
-            _normalize_identifier(str(item.get("key", "")))
+            normalize_identifier(str(item.get("key", "")))
             for item in context.get("existing_entities", [])
             if isinstance(item, dict)
         }
         reused = {
-            _normalize_identifier(str(value))
+            normalize_identifier(str(value))
             for value in decision.get("reuse_entities", [])
             if isinstance(value, str)
         }
@@ -134,7 +134,7 @@ def _validate_decision_context(
     if phase == "pass2_fields" and not isinstance(related_entities, list):
         return []
     related_by_key = {
-        _normalize_identifier(str(item.get("key", ""))): item
+        normalize_identifier(str(item.get("key", ""))): item
         for item in related_entities or []
         if isinstance(item, dict)
     }
@@ -145,7 +145,7 @@ def _validate_decision_context(
         if not isinstance(entities, list):
             return []
         actual = {
-            _normalize_identifier(str(item.get("entity", "")))
+            normalize_identifier(str(item.get("entity", "")))
             for item in entities
             if isinstance(item, dict)
         }
@@ -157,9 +157,9 @@ def _validate_decision_context(
         for item in entities:
             if not isinstance(item, dict):
                 continue
-            key = _normalize_identifier(str(item.get("entity", "")))
+            key = normalize_identifier(str(item.get("entity", "")))
             known_fields = {
-                _normalize_identifier(str(field_item.get("name", ""))): field_item
+                normalize_identifier(str(field_item.get("name", ""))): field_item
                 for field_item in related_by_key.get(key, {}).get("fields", [])
                 if isinstance(field_item, dict)
             }
@@ -169,7 +169,7 @@ def _validate_decision_context(
                 if not isinstance(declarations, list):
                     continue
                 names = [
-                    _normalize_identifier(str(field_item.get("name", "")))
+                    normalize_identifier(str(field_item.get("name", "")))
                     for field_item in declarations if isinstance(field_item, dict)
                 ]
                 names_by_operation[operation] = set(names)
@@ -210,9 +210,9 @@ def _validate_decision_context(
         for item in decision.get("relationships", []):
             if not isinstance(item, dict):
                 continue
-            relation_key = _normalize_identifier(str(item.get("key", "")))
-            parent = _normalize_identifier(str(item.get("parent", "")))
-            child = _normalize_identifier(str(item.get("child", "")))
+            relation_key = normalize_identifier(str(item.get("key", "")))
+            parent = normalize_identifier(str(item.get("parent", "")))
+            child = normalize_identifier(str(item.get("child", "")))
             if parent not in allowed or child not in allowed:
                 errors.append(f"Pass 3 references entities outside its supplied slice: {parent} -> {child}")
                 continue
@@ -241,5 +241,5 @@ def _validate_decision_context(
 
 
 # Keep the established import identity for callers and serialized references.
-_validate_decision_shape.__module__ = 'compiler.database_design.validation'
-_validate_decision_context.__module__ = 'compiler.database_design.validation'
+validate_decision_shape.__module__ = 'compiler.database_design.validation'
+validate_decision_context.__module__ = 'compiler.database_design.validation'

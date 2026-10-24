@@ -23,14 +23,14 @@ def init_debug_logger(project_path: str) -> Path:
     path.touch(exist_ok=True)
     return path
 
-def _print(message: str = "") -> None:
+def print_message(message: str = "") -> None:
     append_debug_log(message, workspace_root=_cli_workspace_root)
     print(message)
 
 
 def print_cli_banner() -> None:
     border = "=" * 78
-    _print(
+    print_message(
         "\n".join(
             [
                 "",
@@ -51,16 +51,16 @@ def print_cli_startup(
 ) -> None:
     requirement_name = Path(requirement_path).parent.name or "requirements"
     mode_label = "clean compile" if clear_all else "compile"
-    _print()
-    _print(f"{Fore.WHITE}Session{Style.RESET_ALL}")
-    _print(f"  {Fore.CYAN}mode      {Style.RESET_ALL}{mode_label}")
-    _print(f"  {Fore.CYAN}input     {Style.RESET_ALL}{requirement_name}")
-    _print(f"  {Fore.CYAN}output    {Style.RESET_ALL}{project_path}")
-    _print(f"  {Fore.CYAN}target    {Style.RESET_ALL}Web")
-    _print(f"  {Fore.CYAN}port      {Style.RESET_ALL}{web_port}")
-    _print(f"  {Fore.CYAN}stack     {Style.RESET_ALL}React + TypeScript + Express + SQLite")
-    _print(f"  {Fore.CYAN}debug log {Style.RESET_ALL}{Path(project_path) / '.arc/debug.log'}")
-    _print(f"{Fore.BLUE}{'-' * 78}{Style.RESET_ALL}\n")
+    print_message()
+    print_message(f"{Fore.WHITE}Session{Style.RESET_ALL}")
+    print_message(f"  {Fore.CYAN}mode      {Style.RESET_ALL}{mode_label}")
+    print_message(f"  {Fore.CYAN}input     {Style.RESET_ALL}{requirement_name}")
+    print_message(f"  {Fore.CYAN}output    {Style.RESET_ALL}{project_path}")
+    print_message(f"  {Fore.CYAN}target    {Style.RESET_ALL}Web")
+    print_message(f"  {Fore.CYAN}port      {Style.RESET_ALL}{web_port}")
+    print_message(f"  {Fore.CYAN}stack     {Style.RESET_ALL}React + TypeScript + Express + SQLite")
+    print_message(f"  {Fore.CYAN}debug log {Style.RESET_ALL}{Path(project_path) / '.arc/debug.log'}")
+    print_message(f"{Fore.BLUE}{'-' * 78}{Style.RESET_ALL}\n")
 
 
 def cli_log(
@@ -97,17 +97,17 @@ def print_compilation_summary(
                     if str(state).startswith(('FAILED', 'SKIPPED', 'BLOCKED')))
     completed = result.get('completed', result.get('ok', False))
 
-    _print(f"\n{Fore.BLUE}{border}{Style.RESET_ALL}")
+    print_message(f"\n{Fore.BLUE}{border}{Style.RESET_ALL}")
     status = 'Compilation completed' if completed else 'Compilation failed'
-    _print(f"{Fore.CYAN}{status}{Style.RESET_ALL}")
-    _print(f"{Fore.BLUE}{border}{Style.RESET_ALL}\n")
-    _print(f"{Fore.WHITE}Duration:{Style.RESET_ALL}     {duration}")
-    _print(f"{Fore.WHITE}Requirements:{Style.RESET_ALL} {len(state_map)}")
+    print_message(f"{Fore.CYAN}{status}{Style.RESET_ALL}")
+    print_message(f"{Fore.BLUE}{border}{Style.RESET_ALL}\n")
+    print_message(f"{Fore.WHITE}Duration:{Style.RESET_ALL}     {duration}")
+    print_message(f"{Fore.WHITE}Requirements:{Style.RESET_ALL} {len(state_map)}")
     skipped = ', '.join(sorted(failures)) if failures else 'None'
-    _print(f"{Fore.YELLOW}SKIPPED:{Style.RESET_ALL}      {skipped}")
-    _print(f"{Fore.WHITE}Output:{Style.RESET_ALL}       {output_dir}")
-    _print(f"{Fore.WHITE}Debug log:{Style.RESET_ALL}    {Path(output_dir) / '.arc/debug.log'}")
+    print_message(f"{Fore.YELLOW}SKIPPED:{Style.RESET_ALL}      {skipped}")
+    print_message(f"{Fore.WHITE}Output:{Style.RESET_ALL}       {output_dir}")
+    print_message(f"{Fore.WHITE}Debug log:{Style.RESET_ALL}    {Path(output_dir) / '.arc/debug.log'}")
 
     if failures or not completed or not result.get('ok'):
-        _print(f"{Fore.WHITE}Details:{Style.RESET_ALL}      .arc/workflow/report.json")
-    _print(f"{Fore.BLUE}{border}{Style.RESET_ALL}\n")
+        print_message(f"{Fore.WHITE}Details:{Style.RESET_ALL}      .arc/workflow/report.json")
+    print_message(f"{Fore.BLUE}{border}{Style.RESET_ALL}\n")

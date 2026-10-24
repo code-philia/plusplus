@@ -33,10 +33,10 @@ def pricing(model: str) -> tuple[str, float, float, float]:
 
 def record_usage(root: Path, model: str, usage: dict[str, Any]) -> None:
     with _usage_lock:
-        _record_usage(root, model, usage)
+        update_usage_state(root, model, usage)
 
 
-def _record_usage(root: Path, model: str, usage: dict[str, Any]) -> None:
+def update_usage_state(root: Path, model: str, usage: dict[str, Any]) -> None:
     if not enabled():
         return
     path = root / ".arc" / "cost_stack.json"
@@ -55,7 +55,7 @@ def _record_usage(root: Path, model: str, usage: dict[str, Any]) -> None:
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         state["last_usage"] = {"model": model, "currency": currency, "prompt_tokens": prompt,
                                 "cached_tokens": cached, "completion_tokens": completion, "cost": amount}
-        _write(path, state)
+        write(path, state)
         usage_log = root / ".arc" / "cost_usage.jsonl"
         usage_log.parent.mkdir(parents=True, exist_ok=True)
         with usage_log.open("a", encoding="utf-8") as handle:
@@ -64,12 +64,12 @@ def _record_usage(root: Path, model: str, usage: dict[str, Any]) -> None:
                                      "totals": totals}, ensure_ascii=False, separators=(",", ":")) + "\n")
         SynchronousLog('Cost', workspace_root=root).info("COST_STACK " + json.dumps(
             {"currency": currency, "cost": amount, "total": totals[currency]}, ensure_ascii=False))
-        _threshold_snapshot(root, state)
+        threshold_snapshot(root, state)
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return
 
 
-def _threshold_snapshot(root: Path, state: dict[str, Any]) -> None:
+def threshold_snapshot(root: Path, state: dict[str, Any]) -> None:
     rate = float(os.environ.get('ARC_USD_TO_CNY', '7.2'))
     if not math.isfinite(rate) or rate <= 0:
         raise ValueError('ARC_USD_TO_CNY must be a positive finite exchange rate')
@@ -86,9 +86,9 @@ def _threshold_snapshot(root: Path, state: dict[str, Any]) -> None:
         for threshold in range(previous + 1, current + 1):
             snapshot_workspace(root, f"{threshold * step:g}{currency}")
         thresholds[currency] = max(previous, current)
-    _write(root / ".arc" / "cost_stack.json", state)
+    write(root / ".arc" / "cost_stack.json", state)
 
 
-def _write(path: Path, value: dict[str, Any]) -> None:
+def write(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")

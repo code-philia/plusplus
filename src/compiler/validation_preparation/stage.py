@@ -60,7 +60,7 @@ def check_validation_readiness(root: Path, *, validation: bool = False) -> None:
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait()
-def _start_source(environment: dict[str, Any]) -> str:
+def start_source(environment: dict[str, Any]) -> str:
     return '''// Apply validation clock/timezone before the ordinary application startup.
 import { installValidationRuntime } from "./runtime.js";
 TIMEZONE
@@ -126,7 +126,7 @@ class ValidationPreparationPass:
         # Process: Generate validation startup artifacts or restore originals ==================
         try:
             (self.root / START_PATH).parent.mkdir(parents=True, exist_ok=True)
-            (self.root / START_PATH).write_text(_start_source(environment), encoding="utf-8")
+            (self.root / START_PATH).write_text(start_source(environment), encoding="utf-8")
             (self.root / RUNTIME_PATH).write_text(render_runtime_source(), encoding="utf-8")
             # Retire only a seed explicitly owned by the previous preparation stage.
             if previous.get("seed") == SEED_PATH:

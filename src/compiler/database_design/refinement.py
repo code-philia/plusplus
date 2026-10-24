@@ -94,12 +94,12 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
 
     for entity in sorted(relational["entities"], key=lambda item: item["key"]):
         table_name = entity["key"]
-        _identifier(table_name, errors)
+        validate_identifier(table_name, errors)
         columns: list[dict[str, Any]] = []
         constraints: list[dict[str, Any]] = []
         for column in sorted(entity["fields"], key=lambda item: item["name"]):
             name = column["name"]
-            _identifier(name, errors)
+            validate_identifier(name, errors)
             reference = f"{table_name}.{name}"
             resolved_type = mapped_types.get(reference)
             if resolved_type is None:
@@ -122,7 +122,7 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
                 if kind in {"min_length", "max_length", "minimum", "maximum", "enum"}:
                     op = {"min_length": "length_gte", "max_length": "length_lte",
                           "minimum": "gte", "maximum": "lte", "enum": "in"}[kind]
-                    constraints.append(_check(table_name, name, op, value, column["requirement_ids"]))
+                    constraints.append(make_check_constraint(table_name, name, op, value, column["requirement_ids"]))
                 else:
                     errors.append(f"SCHEMA_IR_UNSUPPORTED_ER_PROPERTY: {reference}.{kind}")
 
@@ -133,7 +133,7 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
             kind = constraint["type"]
             local_columns = [ref.partition(".")[2] for ref in refs]
             table_constraint = {
-                "name": _constraint_name(table_name, kind.lower(), refs),
+                "name": constraint_name(table_name, kind.lower(), refs),
                 "kind": "UNIQUE" if kind == "COMPOSITE_UNIQUE" else kind,
                 "columns": local_columns, "requirement_ids": list(constraint["requirement_ids"]),
             }
@@ -193,19 +193,19 @@ def refine_schema(er_model: ERModelIR, relational: dict[str, Any]) -> SchemaRefi
     return SchemaRefinementResult(schema, errors, warnings)
 
 
-def _identifier(name: str, errors: list[str]) -> None:
+def validate_identifier(name: str, errors: list[str]) -> None:
     if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", name):
         errors.append(f"SCHEMA_IR_IDENTIFIER_INVALID: {name!r}")
 
 
-def _constraint_name(table: str, kind: str, values: Any) -> str:
+def constraint_name(table: str, kind: str, values: Any) -> str:
     digest = hashlib.sha256(json.dumps([table, kind, values], sort_keys=True).encode()).hexdigest()[:12]
     return f"{table[:30]}_{kind[:16]}_{digest}"
 
 
-def _check(table: str, column: str, op: str, value: Any, requirements: list[str]) -> dict[str, Any]:
+def make_check_constraint(table: str, column: str, op: str, value: Any, requirements: list[str]) -> dict[str, Any]:
     return {
-        "name": _constraint_name(table, "check", [column, op, value]), "kind": "CHECK", "columns": [column],
+        "name": constraint_name(table, "check", [column, op, value]), "kind": "CHECK", "columns": [column],
         "predicate": {"column": column, "operator": op, "value": copy.deepcopy(value)},
         "requirement_ids": list(requirements),
     }
@@ -226,7 +226,7 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
         errors.append("SCHEMA_IR_DUPLICATE_TABLE")
     types = {"string", "integer", "number", "boolean", "date", "datetime", "json", "uuid"}
     for table in schema["tables"]:
-        _identifier(table["name"], errors)
+        validate_identifier(table["name"], errors)
         if set(table) - {"name", "description", "columns", "constraints", "requirement_ids", "read", "write"}:
             errors.append(f"SCHEMA_IR_UNKNOWN_TABLE_SEMANTICS: {table['name']}")
         if table["name"].startswith(("sqlite_", "arc_")):
@@ -242,7 +242,7 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
         if sum(item["kind"] == "PRIMARY_KEY" for item in table_constraints(table)) != 1:
             errors.append(f"SCHEMA_IR_PRIMARY_KEY_INVALID: {table['name']}")
         for column in columns.values():
-            _identifier(column["name"], errors)
+            validate_identifier(column["name"], errors)
             for constraint in column["constraints"]:
                 if "columns" in constraint:
                     errors.append(f"SCHEMA_IR_COLUMN_CONSTRAINT_REDUNDANT_COLUMNS: {constraint['name']}")
@@ -270,7 +270,7 @@ def validate_schema_ir(schema: SchemaIR) -> list[str]:
                     errors.append(f"SCHEMA_IR_DEFAULT_INVALID: {table['name']}.{column['name']}")
         names: set[str] = set()
         for constraint in table_constraints(table):
-            _identifier(constraint["name"], errors)
+            validate_identifier(constraint["name"], errors)
             if constraint["name"] in names:
                 errors.append(f"SCHEMA_IR_CONSTRAINT_DUPLICATE: {constraint['name']}")
             names.add(constraint["name"])

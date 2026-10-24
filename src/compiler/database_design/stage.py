@@ -18,7 +18,7 @@ from ..ir.database import ERModelIR, SchemaIR
 from model.contracts import StructuredModel
 from model.client import describe_model_error
 from utils.trace import format_payload_trace
-from .common import _format_error
+from .common import format_error
 from .contracts import (
     ENTITY_DECISION_SCHEMA,
     ENTITY_INSTRUCTIONS,
@@ -29,7 +29,7 @@ from .contracts import (
 )
 from .refinement import refine_er_model
 from .state import DatabaseSchemaState
-from .decision_normalization import _normalize_decision_context
+from .decision_normalization import normalize_decision_context
 
 
 @dataclass(slots=True)
@@ -54,8 +54,8 @@ class DatabaseSchemaPass:
         if hasattr(model, "set_usage_path"):
             model.set_usage_path(self._artifact_root / "model_usage.jsonl")
         self._log = SynchronousLog("DatabaseSchemaPass", workspace_root=self._artifact_root.parent)
-        self._attempts = _bounded_env_int("MODEL_ATTEMPT", 5, 1, 20)
-        self._trace_enabled = _enabled_env_flag("ARC_DATABASE_TRACE", default=True)
+        self._attempts = bounded_env_int("MODEL_ATTEMPT", 5, 1, 20)
+        self._trace_enabled = enabled_env_flag("ARC_DATABASE_TRACE", default=True)
 
     def compile(
         self,
@@ -83,11 +83,11 @@ class DatabaseSchemaPass:
             for node_id in requirements:
                 node = nodes.get(node_id)
                 if not isinstance(node, dict):
-                    errors.append(_format_error("ARC2101", "Requirement is missing from Requirement IR.", node_id=node_id))
+                    errors.append(format_error("ARC2101", "Requirement is missing from Requirement IR.", node_id=node_id))
                     states[node_id] = "FAILED"
                     continue
                 def validate_access(value, rid=node_id, phase_name=phase):
-                    return _validate_access_decision(state, phase_name, rid, value)
+                    return validate_access_decision(state, phase_name, rid, value)
 
                 decision = self.run_unit(
                     phase=phase,
@@ -169,7 +169,7 @@ class DatabaseSchemaPass:
         state: DatabaseSchemaState,
         effective_dependencies: dict[str, Any],
     ) -> dict[str, Any]:
-        requirement = _node_context(
+        requirement = node_context(
             node,
             nodes,
             effective_dependencies.get(node_id, node.get("dependencies", [])),
@@ -186,7 +186,7 @@ class DatabaseSchemaPass:
         self, entity_key: str, nodes: dict[str, Any], state: DatabaseSchemaState,
         effective_dependencies: dict[str, Any],
     ) -> dict[str, Any]:
-        excerpt_limit = _bounded_env_int("ARC_DATABASE_RELATIONSHIP_EXCERPT_CHARS", 500, 100, 4000)
+        excerpt_limit = bounded_env_int("ARC_DATABASE_RELATIONSHIP_EXCERPT_CHARS", 500, 100, 4000)
         associated = set(state.entities[entity_key]["requirement_ids"])
         related_ids = set(associated)
         for rid in associated:
@@ -194,7 +194,7 @@ class DatabaseSchemaPass:
         return {
             "focus_entity": state.public_entity(state.entities[entity_key]),
             "related_requirements": [
-                _node_context(nodes[rid], nodes, effective_dependencies.get(rid, nodes[rid].get("dependencies", [])))
+                node_context(nodes[rid], nodes, effective_dependencies.get(rid, nodes[rid].get("dependencies", [])))
                 for rid in sorted(related_ids) if isinstance(nodes.get(rid), dict)
             ],
             "er_graph": {
@@ -270,7 +270,7 @@ class DatabaseSchemaPass:
                 )
                 return decision
             self.trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
-        errors.append(_format_error("ARC2103", f"{phase} failed: {'; '.join(feedback)}", node_id=node_id))
+        errors.append(format_error("ARC2103", f"{phase} failed: {'; '.join(feedback)}", node_id=node_id))
         return None
 
 
@@ -295,7 +295,7 @@ class DatabaseSchemaPass:
             "output_schema": output_schema,
         }
         self.trace(
-            _context_audit(
+            context_audit(
                 phase=phase,
                 requirement_id=node_id,
                 attempt=attempt + 1,
@@ -314,7 +314,7 @@ class DatabaseSchemaPass:
     ) -> tuple[Any, list[str], bool]:
         # Rejections stay inside the retry loop; applying accepted decisions stays with the caller.
         try:
-            decision, normalization_notes = _normalize_decision_context(
+            decision, normalization_notes = normalize_decision_context(
                 phase, decision, context
             )
             if validate is not None:
@@ -338,7 +338,7 @@ class DatabaseSchemaPass:
             self._log.info(message)
 
 
-def _validate_access_decision(state: DatabaseSchemaState, phase: str, rid: str,
+def validate_access_decision(state: DatabaseSchemaState, phase: str, rid: str,
                               value: Any) -> list[str]:
     """Check metadata and references on an isolated trial before committing a pass."""
     if not isinstance(value, dict) or value.get('requirement_id') != rid:
@@ -377,7 +377,7 @@ def _validate_access_decision(state: DatabaseSchemaState, phase: str, rid: str,
     return errors
 
 
-def _node_context(
+def node_context(
     node: dict[str, Any],
     nodes: dict[str, Any],
     effective_dependencies: Any,
@@ -406,7 +406,7 @@ def _node_context(
     }
 
 
-def _context_audit(
+def context_audit(
     *,
     phase: str,
     requirement_id: str,
@@ -443,14 +443,14 @@ def _context_audit(
     )
 
 
-def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+def bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     try:
         return max(minimum, min(int(os.environ.get(name, str(default))), maximum))
     except ValueError:
         return default
 
 
-def _enabled_env_flag(name: str, *, default: bool) -> bool:
+def enabled_env_flag(name: str, *, default: bool) -> bool:
     value = os.environ.get(name)
     if value is None:
         return default

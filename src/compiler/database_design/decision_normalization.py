@@ -4,10 +4,10 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from .common import _normalize_identifier
+from .common import normalize_identifier
 
 
-def _normalize_decision_context(
+def normalize_decision_context(
     phase: str,
     decision: Any,
     context: dict[str, Any],
@@ -37,7 +37,7 @@ def _normalize_decision_context(
     grouped: dict[str, dict[str, Any]] = {}
     notes: list[str] = []
     for item in normalized["entities"]:
-        key = _normalize_identifier(item["entity"])
+        key = normalize_identifier(item["entity"])
         target = grouped.get(key)
         if target is None:
             target = {"entity": key, "new_fields": [], "update_fields": []}
@@ -50,7 +50,7 @@ def _normalize_decision_context(
                     target[operation].append(field_item)
 
     expected = [
-        _normalize_identifier(str(item.get("key", "")))
+        normalize_identifier(str(item.get("key", "")))
         for item in related_entities
         if isinstance(item, dict)
     ]
@@ -60,4 +60,4 @@ def _normalize_decision_context(
 
 
 # Keep the established import identity for callers and serialized references.
-_normalize_decision_context.__module__ = 'compiler.database_design.validation'
+normalize_decision_context.__module__ = 'compiler.database_design.validation'

@@ -9,12 +9,12 @@ from typing import Any
 
 from ..ir.database import ERModelIR
 from .common import (
-    _append_unique,
-    _compact_properties,
-    _format_error,
-    _merge_properties,
-    _normalize_identifier,
-    _relationship_id,
+    append_unique,
+    compact_properties,
+    format_error,
+    merge_properties,
+    normalize_identifier,
+    make_relationship_id,
 )
 from .contracts import FIELD_TYPES, IDENTIFIER_PATTERN, RELATIONSHIP_TYPES
 from .merging import merge_field_contributions
@@ -60,15 +60,15 @@ class DatabaseSchemaState:
 
     def apply_entities(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
         for raw_key in decision.get("reuse_entities", []):
-            key = _normalize_identifier(str(raw_key))
+            key = normalize_identifier(str(raw_key))
             if key not in self.entities:
-                errors.append(_format_error("ARC2211", f"Pass 1 reuses an unknown entity: {raw_key}.", node_id=requirement_id))
+                errors.append(format_error("ARC2211", f"Pass 1 reuses an unknown entity: {raw_key}.", node_id=requirement_id))
             else:
                 self.link_entity(requirement_id, key)
         for raw in decision.get("new_entities", []):
-            key = _normalize_identifier(str(raw.get("key", "")))
+            key = normalize_identifier(str(raw.get("key", "")))
             if not IDENTIFIER_PATTERN.fullmatch(key):
-                errors.append(_format_error("ARC2212", f"Pass 1 emitted an invalid entity key: {raw.get('key')}.", node_id=requirement_id))
+                errors.append(format_error("ARC2212", f"Pass 1 emitted an invalid entity key: {raw.get('key')}.", node_id=requirement_id))
                 continue
             if key not in self.entities:
                 self.entities[key] = {
@@ -85,7 +85,7 @@ class DatabaseSchemaState:
 
     def apply_fields(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
         for item in decision.get("entities", []):
-            key = _normalize_identifier(str(item.get("entity", "")))
+            key = normalize_identifier(str(item.get("entity", "")))
             if key not in self.entities:
                 errors.append(f'Unknown entity in field discovery: {key}')
                 continue
@@ -111,7 +111,7 @@ class DatabaseSchemaState:
                 if separator:
                     self.link_field(rid, entity, name)
                 record = self.entities[entity]['fields'][name] if separator else self.entities[entity]
-                _append_unique(record.setdefault(operation, []), rid)
+                append_unique(record.setdefault(operation, []), rid)
                 self.requirement_access[rid][operation].add(reference)
 
     def apply_field_contribution(self, key: str, raw: dict[str, Any], rid: str, errors: list[str]) -> None:
@@ -134,21 +134,21 @@ class DatabaseSchemaState:
     def record_conflict(self, scope: str, rid: str, candidate: dict[str, Any], reason: str, errors: list[str]) -> None:
         self.conflicts.append({"scope": scope, "requirement_id": rid,
                                "candidate": copy.deepcopy(candidate), "reason": reason})
-        errors.append(_format_error("ARC2228", f"Conflicting contribution {scope}: {reason}", node_id=rid))
+        errors.append(format_error("ARC2228", f"Conflicting contribution {scope}: {reason}", node_id=rid))
 
     def apply_relationships(self, requirement_id: str, decision: dict[str, Any], errors: list[str]) -> None:
         for raw in decision.get("relationships", []):
-            relationship_key = _normalize_identifier(str(raw.get("key", "")))
-            parent = _normalize_identifier(str(raw.get("parent", "")))
-            child = _normalize_identifier(str(raw.get("child", "")))
+            relationship_key = normalize_identifier(str(raw.get("key", "")))
+            parent = normalize_identifier(str(raw.get("parent", "")))
+            child = normalize_identifier(str(raw.get("child", "")))
             relationship_type = str(raw.get("type", ""))
             if parent not in self.entities or child not in self.entities:
-                errors.append(_format_error("ARC2231", f"Relationship references unknown entities: {parent} -> {child}.", node_id=requirement_id))
+                errors.append(format_error("ARC2231", f"Relationship references unknown entities: {parent} -> {child}.", node_id=requirement_id))
                 continue
             if relationship_type not in RELATIONSHIP_TYPES:
-                errors.append(_format_error("ARC2232", f"Pass 3 emitted invalid cardinality: {relationship_type}.", node_id=requirement_id))
+                errors.append(format_error("ARC2232", f"Pass 3 emitted invalid cardinality: {relationship_type}.", node_id=requirement_id))
                 continue
-            relationship_id = _relationship_id(relationship_key)
+            relationship_id = make_relationship_id(relationship_key)
             relationship = self.relationships.get(relationship_id)
             if relationship is None:
                 relationship = {
@@ -174,9 +174,9 @@ class DatabaseSchemaState:
             if raw not in proposals:
                 proposals.append(copy.deepcopy(raw))
                 proposals.sort(key=lambda value: json.dumps(value, sort_keys=True))
-            _append_unique(relationship["requirement_ids"], requirement_id)
+            append_unique(relationship["requirement_ids"], requirement_id)
             for evidence_id in raw["evidence_requirement_ids"]:
-                _append_unique(relationship["evidence_requirement_ids"], evidence_id)
+                append_unique(relationship["evidence_requirement_ids"], evidence_id)
             self.link_entity(requirement_id, parent)
             self.link_entity(requirement_id, child)
             self.requirement_relationship_links.setdefault(requirement_id, set()).add(relationship_id)
@@ -278,12 +278,12 @@ class DatabaseSchemaState:
         }
 
     def link_entity(self, requirement_id: str, key: str) -> None:
-        _append_unique(self.entities[key]["requirement_ids"], requirement_id)
+        append_unique(self.entities[key]["requirement_ids"], requirement_id)
         self.requirement_entity_links.setdefault(requirement_id, set()).add(key)
 
     def link_field(self, requirement_id: str, entity_key: str, field_name: str) -> None:
         field_item = self.entities[entity_key]["fields"][field_name]
-        _append_unique(field_item["requirement_ids"], requirement_id)
+        append_unique(field_item["requirement_ids"], requirement_id)
         self.requirement_field_links.setdefault(requirement_id, set()).add(f"{entity_key}.{field_name}")
 
     def add_field(
@@ -295,10 +295,10 @@ class DatabaseSchemaState:
         *,
         trace: bool = True,
     ) -> None:
-        name = _normalize_identifier(str(raw.get("name", "")))
+        name = normalize_identifier(str(raw.get("name", "")))
         field_type = str(raw.get("type", ""))
         if not IDENTIFIER_PATTERN.fullmatch(name) or field_type not in FIELD_TYPES or not isinstance(raw.get("nullable"), bool):
-            errors.append(_format_error("ARC2226", f"Invalid field declaration: {entity_key}.{name}.", node_id=requirement_id))
+            errors.append(format_error("ARC2226", f"Invalid field declaration: {entity_key}.{name}.", node_id=requirement_id))
             return
         existing = self.entities[entity_key]["fields"].get(name)
         if existing is not None:
@@ -321,7 +321,7 @@ class DatabaseSchemaState:
             }
             self.entities[entity_key]["fields"][name] = existing
         if requirement_id != "SYSTEM":
-            _append_unique(existing["requirement_ids"], requirement_id)
+            append_unique(existing["requirement_ids"], requirement_id)
             if trace:
                 self.requirement_field_links.setdefault(requirement_id, set()).add(f"{entity_key}.{name}")
 
@@ -383,5 +383,5 @@ class DatabaseSchemaState:
             "requirement_ids": [],
         })
         if requirement_id != "SYSTEM":
-            _append_unique(constraint["requirement_ids"], requirement_id)
+            append_unique(constraint["requirement_ids"], requirement_id)
             self.requirement_constraint_links.setdefault(requirement_id, set()).add(constraint_id)

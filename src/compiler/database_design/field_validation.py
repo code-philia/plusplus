@@ -9,7 +9,7 @@ from typing import Any
 from .contracts import FIELD_TYPES
 
 
-def _field_property_errors(entity_key: str, field_item: dict[str, Any]) -> list[str]:
+def field_property_errors(entity_key: str, field_item: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     name = str(field_item.get("name", ""))
     field_type = field_item.get("type")
@@ -116,5 +116,5 @@ def logical_literal_valid(kind: str, value: Any) -> bool:
 
 
 # Keep the established import identity for callers and serialized references.
-_field_property_errors.__module__ = 'compiler.database_design.validation'
+field_property_errors.__module__ = 'compiler.database_design.validation'
 logical_literal_valid.__module__ = 'compiler.database_design.validation'

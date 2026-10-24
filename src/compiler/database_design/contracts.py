@@ -25,7 +25,7 @@ CONSTRAINT_TYPES = {
 FIELD_ORIGINS = {"REQUIREMENT", "RELATIONSHIP", "SYSTEM"}
 
 
-def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
+def nullable(schema: dict[str, Any]) -> dict[str, Any]:
     return {"anyOf": [schema, {"type": "null"}]}
 
 
@@ -54,14 +54,14 @@ FIELD_PROPERTIES_SCHEMA: dict[str, Any] = {
         "min_length", "max_length", "enum", "minimum", "maximum", "default", "unique", "comparison",
     ],
     "properties": {
-        "min_length": _nullable({"type": "integer", "minimum": 0}),
-        "max_length": _nullable({"type": "integer", "minimum": 0}),
-        "enum": _nullable({"type": "array", "items": {"type": "string"}, "minItems": 1}),
-        "minimum": _nullable({"type": "number"}),
-        "maximum": _nullable({"type": "number"}),
-        "default": _nullable({"type": ["string", "number", "boolean"]}),
-        "unique": _nullable({"type": "boolean"}),
-        "comparison": _nullable({"enum": ["exact", "case_insensitive"]}),
+        "min_length": nullable({"type": "integer", "minimum": 0}),
+        "max_length": nullable({"type": "integer", "minimum": 0}),
+        "enum": nullable({"type": "array", "items": {"type": "string"}, "minItems": 1}),
+        "minimum": nullable({"type": "number"}),
+        "maximum": nullable({"type": "number"}),
+        "default": nullable({"type": ["string", "number", "boolean"]}),
+        "unique": nullable({"type": "boolean"}),
+        "comparison": nullable({"enum": ["exact", "case_insensitive"]}),
     },
 }
 

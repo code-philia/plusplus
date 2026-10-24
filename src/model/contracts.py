@@ -1,4 +1,4 @@
-"""Technology-independent structured model interface."""
+"""Technology-independent model protocols; implementations live in client and vision."""
 from __future__ import annotations
 
 from typing import Any, Protocol
@@ -16,7 +16,7 @@ class StructuredModel(Protocol):
         output_schema: dict[str, Any],
     ) -> dict[str, Any]:
         """Return one JSON object conforming to ``output_schema``."""
-
+        ...
 
 
 class VisualStructuredModel(Protocol):
@@ -32,5 +32,4 @@ class VisualStructuredModel(Protocol):
         output_schema: dict[str, Any],
     ) -> dict[str, Any]:
         """Return one structured decision derived from text metadata and an image."""
-
-
+        ...

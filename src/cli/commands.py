@@ -9,16 +9,21 @@ from compiler import CompilationRequest, Compiler
 from utils.encoding import configure_utf8_console
 
 
-def _ensure_dotenv_loaded() -> None:
+def ensure_dotenv_loaded() -> None:
     # Keep the script-facing import path while configuration lives outside the CLI.
     from utils.environment import ensure_dotenv_loaded
     ensure_dotenv_loaded()
 
 
-def _locate_requirement_file(input_path: str) -> str:
-    # Existing stage scripts still import this private compatibility entrypoint.
+def locate_requirement_file(input_path: str) -> str:
+    # Resolve requirement paths using the shared preprocessing helper.
     from compiler.preprocessing.paths import locate_requirement_file
     return locate_requirement_file(input_path)
+
+
+# Keep script-facing aliases until the standalone scripts adopt the public names.
+_ensure_dotenv_loaded = ensure_dotenv_loaded
+_locate_requirement_file = locate_requirement_file
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,12 +49,12 @@ def main() -> None:
             from cli.config import interactive_config_setup
             code = interactive_config_setup()
         elif args.command == 'doctor':
-            _ensure_dotenv_loaded()
+            ensure_dotenv_loaded()
             from cli.config import print_health_check
             code = print_health_check()
         else:
             from cli.output import init_debug_logger, print_cli_banner, print_cli_startup, cli_log, print_compilation_summary
-            request = CompilationRequest(requirement_path=Path(_locate_requirement_file(args.requirement_path)),
+            request = CompilationRequest(requirement_path=Path(locate_requirement_file(args.requirement_path)),
                 output_dir=Path(args.output_dir).expanduser().resolve(), web_port=args.port,
                 stop_after_lowering=args.stop_after_lowering, prepare_validation=args.prepare_validation)
             init_debug_logger(str(request.output_dir))

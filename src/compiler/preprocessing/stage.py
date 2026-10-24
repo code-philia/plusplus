@@ -33,10 +33,10 @@ class RequirementPreprocessor:
             source_bytes = source_path.read_bytes()
             payload = yaml.safe_load(source_bytes.decode("utf-8-sig")) or {}
         except UnicodeError as exc:
-            errors.append(_format_error("ARC1001", f"Requirement document must use UTF-8 encoding (Chinese is supported): {exc}", source=str(source_path)))
+            errors.append(format_error("ARC1001", f"Requirement document must use UTF-8 encoding (Chinese is supported): {exc}", source=str(source_path)))
             return PreprocessingResult({}, {}, errors)
         except (OSError, yaml.YAMLError) as exc:
-            errors.append(_format_error("ARC1001", f"Cannot parse requirement document: {exc}", source=str(source_path)))
+            errors.append(format_error("ARC1001", f"Cannot parse requirement document: {exc}", source=str(source_path)))
             return PreprocessingResult({}, {}, errors)
 
         if isinstance(payload, dict) and isinstance(payload.get("root"), dict):
@@ -44,7 +44,7 @@ class RequirementPreprocessor:
         elif isinstance(payload, dict) and "id" not in payload and isinstance(payload.get("requirement"), dict):
             payload = payload["requirement"]
         if not isinstance(payload, dict):
-            errors.append(_format_error("ARC1002", "Requirement document root must be a mapping.", source=str(source_path)))
+            errors.append(format_error("ARC1002", "Requirement document root must be a mapping.", source=str(source_path)))
             return PreprocessingResult({}, {}, errors)
 
         # Process: Normalize nodes and validate dependencies ===================================
@@ -100,7 +100,7 @@ class RequirementPreprocessor:
             "atomic_implementation_waves": atomic_waves,
         }
         if not root_id:
-            errors.append(_format_error("ARC1003", "Requirement root id is missing.", source=str(source_path)))
+            errors.append(format_error("ARC1003", "Requirement root id is missing.", source=str(source_path)))
         return PreprocessingResult(requirement_ir, dependency_graph, errors)
 
     def normalize_node(
@@ -118,27 +118,27 @@ class RequirementPreprocessor:
         source = f"{source_name}#{pointer}"
         if not node_id:
             node_id = f"<missing:{pointer}>"
-            errors.append(_format_error("ARC1101", "Requirement node id is missing.", source=source))
+            errors.append(format_error("ARC1101", "Requirement node id is missing.", source=source))
         elif node_id in nodes:
-            errors.append(_format_error("ARC1102", f"Duplicate requirement id: {node_id}", node_id=node_id, source=source))
+            errors.append(format_error("ARC1102", f"Duplicate requirement id: {node_id}", node_id=node_id, source=source))
 
         node_type = str(raw.get("type") or ("FOLDER" if raw.get("children") else "ATOMIC")).strip().upper()
         if node_type not in SUPPORTED_NODE_TYPES:
-            errors.append(_format_error("ARC1103", f"Unsupported requirement node type: {node_type}", node_id=node_id, source=source))
+            errors.append(format_error("ARC1103", f"Unsupported requirement node type: {node_type}", node_id=node_id, source=source))
             node_type = "ATOMIC"
 
         raw_dependencies = raw.get("dependencies") or []
         if not isinstance(raw_dependencies, list):
-            errors.append(_format_error("ARC1104", "dependencies must be a list.", node_id=node_id, source=source))
+            errors.append(format_error("ARC1104", "dependencies must be a list.", node_id=node_id, source=source))
             raw_dependencies = []
         dependencies = sorted({str(item).strip() for item in raw_dependencies if str(item).strip()})
 
         raw_children = raw.get("children") or []
         if not isinstance(raw_children, list):
-            errors.append(_format_error("ARC1105", "children must be a list.", node_id=node_id, source=source))
+            errors.append(format_error("ARC1105", "children must be a list.", node_id=node_id, source=source))
             raw_children = []
         if node_type == "ATOMIC" and raw_children:
-            errors.append(_format_error("ARC1106", "ATOMIC requirement cannot contain children.", node_id=node_id, source=source))
+            errors.append(format_error("ARC1106", "ATOMIC requirement cannot contain children.", node_id=node_id, source=source))
 
         description = str(raw.get("description") or "").strip()
         pages = self.normalize_pages(raw.get("pages", []), node_id, source, errors)
@@ -168,7 +168,7 @@ class RequirementPreprocessor:
         child_ids: list[str] = []
         for index, child in enumerate(raw_children):
             if not isinstance(child, dict):
-                errors.append(_format_error("ARC1107", "Requirement child must be a mapping.", node_id=node_id, source=f"{source}/{index}"))
+                errors.append(format_error("ARC1107", "Requirement child must be a mapping.", node_id=node_id, source=f"{source}/{index}"))
                 continue
             child_id = self.normalize_node(
                 child,
@@ -186,19 +186,19 @@ class RequirementPreprocessor:
     @staticmethod
     def normalize_pages(value: Any, node_id: str, source: str, errors: list[str]) -> list[dict[str, str]]:
         if not isinstance(value, list):
-            errors.append(_format_error("ARC1108", "pages must be a list.", node_id=node_id, source=source))
+            errors.append(format_error("ARC1108", "pages must be a list.", node_id=node_id, source=source))
             return []
         pages = []
         for page in value:
             if not isinstance(page, dict) or set(page) - {"name", "reference"} or not isinstance(page.get("name"), str) or not page["name"].strip():
-                errors.append(_format_error("ARC1108", "Each page needs a nonempty name and optional reference.", node_id=node_id, source=source))
+                errors.append(format_error("ARC1108", "Each page needs a nonempty name and optional reference.", node_id=node_id, source=source))
                 continue
             name = page["name"].strip()
             row = {"name": name}
             reference = page.get("reference")
             if reference is not None:
                 if not isinstance(reference, str) or not reference.strip() or PurePosixPath(reference.replace(chr(92), "/")).is_absolute() or ":" in reference:
-                    errors.append(_format_error("ARC1108", "Page reference must be a relative image path.", node_id=node_id, source=source))
+                    errors.append(format_error("ARC1108", "Page reference must be a relative image path.", node_id=node_id, source=source))
                     continue
                 row["reference"] = PurePosixPath(reference.strip().replace('\\', '/')).as_posix()
             pages.append(row)
@@ -209,17 +209,17 @@ class RequirementPreprocessor:
         if value is None:
             return []
         if not isinstance(value, list):
-            errors.append(_format_error("ARC1201", "scenarios must be a list.", node_id=node_id, source=source))
+            errors.append(format_error("ARC1201", "scenarios must be a list.", node_id=node_id, source=source))
             return []
         scenarios: list[dict[str, Any]] = []
         seen: set[str] = set()
         for index, raw in enumerate(value, start=1):
             if not isinstance(raw, dict):
-                errors.append(_format_error("ARC1202", "Scenario must be a mapping.", node_id=node_id, source=source))
+                errors.append(format_error("ARC1202", "Scenario must be a mapping.", node_id=node_id, source=source))
                 continue
             scenario_id = str(raw.get("id") or raw.get("scenario_id") or f"{node_id}:scenario:{index}").strip()
             if scenario_id in seen:
-                errors.append(_format_error("ARC1203", f"Duplicate scenario id: {scenario_id}", node_id=node_id, source=source))
+                errors.append(format_error("ARC1203", f"Duplicate scenario id: {scenario_id}", node_id=node_id, source=source))
                 continue
             seen.add(scenario_id)
             steps = raw.get("steps") if isinstance(raw.get("steps"), list) else []
@@ -242,9 +242,9 @@ class RequirementPreprocessor:
         for node_id, node in sorted(nodes.items()):
             for dependency in node["dependencies"]:
                 if dependency == node_id:
-                    errors.append(_format_error("ARC1301", "Requirement cannot depend on itself.", node_id=node_id))
+                    errors.append(format_error("ARC1301", "Requirement cannot depend on itself.", node_id=node_id))
                 elif dependency not in nodes:
-                    errors.append(_format_error("ARC1302", f"Unresolved requirement dependency: {dependency}", node_id=node_id))
+                    errors.append(format_error("ARC1302", f"Unresolved requirement dependency: {dependency}", node_id=node_id))
 
     def effective_atomic_dependencies(
         self,
@@ -331,7 +331,7 @@ class RequirementPreprocessor:
             wave = sorted(node_id for node_id in remaining if set(dependencies[node_id]) <= completed)
             if not wave:
                 cycle_nodes = sorted(remaining)
-                errors.append(_format_error("ARC1303", f"Requirement dependency cycle detected: {', '.join(cycle_nodes)}"))
+                errors.append(format_error("ARC1303", f"Requirement dependency cycle detected: {', '.join(cycle_nodes)}"))
                 break
             waves.append(wave)
             completed.update(wave)
@@ -339,6 +339,6 @@ class RequirementPreprocessor:
         return waves
 
 
-def _format_error(code: str, message: str, *, node_id: str | None = None, source: str | None = None) -> str:
+def format_error(code: str, message: str, *, node_id: str | None = None, source: str | None = None) -> str:
     context = ", ".join(value for value in (node_id, source) if value)
     return f"{code}: {message}" + (f" ({context})" if context else "")

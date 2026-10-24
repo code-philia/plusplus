@@ -16,11 +16,11 @@ from utils.logging import SynchronousLog
 _active_log: ContextVar[tuple[Path, dict[str, Any]] | None] = ContextVar("design_model_log", default=None)
 
 
-def _now() -> str:
+def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _save(path: Path, record: dict[str, Any]) -> None:
+def save(path: Path, record: dict[str, Any]) -> None:
     """Keep each actual request and its raw reply together in one text log."""
     try:
         attempts = record["attempts"]
@@ -84,11 +84,11 @@ def log_design_call(method: Callable[..., Any]) -> Callable[..., Any]:
         name = re.sub(r"[^A-Za-z0-9_-]", "_", schema_name)
         path = Path(usage_path).parent / "model_logs" / f"{timestamp}_{name}_{call_id}.log"
         record = {
-            "call_id": call_id, "started_at": _now(), "status": "RUNNING",
+            "call_id": call_id, "started_at": now(), "status": "RUNNING",
             "operation": method.__name__, "schema_name": schema_name,
             "model": self.model, "attempts": [],
         }
-        _save(path, record)
+        save(path, record)
         SynchronousLog('Model', workspace_root=Path(usage_path).parent.parent).info(
             f"MODEL_LOG schema_name={schema_name} call_id={call_id} path={path}")
         token = _active_log.set((path, record))
@@ -101,9 +101,9 @@ def log_design_call(method: Callable[..., Any]) -> Callable[..., Any]:
             record.update(status="FAILED", error={"type": type(exc).__name__, "message": str(exc)})
             raise
         finally:
-            record.update(finished_at=_now(), duration_ms=int((time.monotonic() - started) * 1000),
+            record.update(finished_at=now(), duration_ms=int((time.monotonic() - started) * 1000),
                           output_mode=getattr(self, "structured_output_mode", None))
-            _save(path, record)
+            save(path, record)
             _active_log.reset(token)
     return wrapped
 
@@ -114,9 +114,9 @@ def logged_completion(client: Any, **request: Any) -> Any:
     if active is None:
         return client.chat.completions.create(**request)
     path, record = active
-    attempt: dict[str, Any] = {"started_at": _now(), "status": "RUNNING", "request": request}
+    attempt: dict[str, Any] = {"started_at": now(), "status": "RUNNING", "request": request}
     record["attempts"].append(attempt)
-    _save(path, record)
+    save(path, record)
     started = time.monotonic()
     try:
         response = client.chat.completions.create(**request)
@@ -131,5 +131,5 @@ def logged_completion(client: Any, **request: Any) -> Any:
         attempt.update(status="FAILED", error={"type": type(exc).__name__, "message": str(exc)})
         raise
     finally:
-        attempt.update(finished_at=_now(), duration_ms=int((time.monotonic() - started) * 1000))
-        _save(path, record)
+        attempt.update(finished_at=now(), duration_ms=int((time.monotonic() - started) * 1000))
+        save(path, record)

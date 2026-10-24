@@ -12,10 +12,10 @@ _archive_lock = RLock()
 
 def snapshot_workspace(root: Path, trigger: str) -> None:
     with _archive_lock:
-        _snapshot_workspace(root, trigger)
+        write_workspace_archive(root, trigger)
 
 
-def _snapshot_workspace(root: Path, trigger: str) -> None:
+def write_workspace_archive(root: Path, trigger: str) -> None:
     parent = root.parent
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(trigger)).strip("._") or "checkpoint"
     # Keep trace archives beside, not inside, the generated workspace. This

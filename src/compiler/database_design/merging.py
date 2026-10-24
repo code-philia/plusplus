@@ -4,13 +4,13 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from .common import _compact_properties
+from .common import compact_properties
 
 
 def merge_field_contributions(entity: str, contributions: dict[str, dict[str, Any]]) -> dict[str, Any]:
     rows = [contributions[rid] for rid in sorted(contributions)]
     props: dict[str, Any] = {}
-    declarations = [_compact_properties(row['properties']) for row in rows]
+    declarations = [compact_properties(row['properties']) for row in rows]
     for key in ('min_length', 'minimum', 'max_length', 'maximum'):
         values = [row[key] for row in declarations if key in row]
         if values:

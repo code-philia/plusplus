@@ -90,7 +90,7 @@ def terminate_tcp_listeners(
     """
 
     normalized_port = max(1, min(65535, int(port)))
-    pids, lookup_errors = _tcp_listener_pids(normalized_port)
+    pids, lookup_errors = tcp_listener_pids(normalized_port)
     pids = sorted({pid for pid in pids if pid > 0 and pid != os.getpid()})
     if lookup_errors:
         return [], lookup_errors
@@ -116,7 +116,7 @@ def terminate_tcp_listeners(
             except (OSError, subprocess.TimeoutExpired) as exc:
                 errors.append(f"PID {pid}: {exc}")
                 continue
-            if completed.returncode != 0 and _pid_exists(pid):
+            if completed.returncode != 0 and pid_exists(pid):
                 detail = (completed.stderr or completed.stdout).strip()
                 errors.append(f"PID {pid}: {detail or 'taskkill failed'}")
         else:
@@ -129,14 +129,14 @@ def terminate_tcp_listeners(
 
     deadline = time.monotonic() + max(0.1, float(wait_seconds))
     while time.monotonic() < deadline:
-        remaining, _ = _tcp_listener_pids(normalized_port)
+        remaining, _ = tcp_listener_pids(normalized_port)
         remaining = [pid for pid in remaining if pid > 0 and pid != os.getpid()]
         if not remaining:
             return pids, errors
         time.sleep(0.1)
 
     if os.name != "nt":
-        remaining, _ = _tcp_listener_pids(normalized_port)
+        remaining, _ = tcp_listener_pids(normalized_port)
         for pid in remaining:
             if pid <= 0 or pid == os.getpid():
                 continue
@@ -148,7 +148,7 @@ def terminate_tcp_listeners(
                 errors.append(f"PID {pid}: {exc}")
         time.sleep(0.1)
 
-    remaining, final_lookup_errors = _tcp_listener_pids(normalized_port)
+    remaining, final_lookup_errors = tcp_listener_pids(normalized_port)
     errors.extend(final_lookup_errors)
     remaining = [pid for pid in remaining if pid > 0 and pid != os.getpid()]
     if remaining:
@@ -158,13 +158,13 @@ def terminate_tcp_listeners(
     return pids, list(dict.fromkeys(errors))
 
 
-def _tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
+def tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
     if os.name == "nt":
-        return _windows_tcp_listener_pids(port)
-    return _posix_tcp_listener_pids(port)
+        return windows_tcp_listener_pids(port)
+    return posix_tcp_listener_pids(port)
 
 
-def _windows_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
+def windows_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
     powershell = shutil.which("powershell.exe") or shutil.which("powershell")
     if powershell is not None:
         command = (
@@ -184,7 +184,7 @@ def _windows_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return [], [f"cannot inspect TCP port {port}: {exc}"]
         if completed.returncode == 0:
-            return _integer_lines(completed.stdout), []
+            return integer_lines(completed.stdout), []
 
     netstat = shutil.which("netstat")
     if netstat is None:
@@ -205,7 +205,7 @@ def _windows_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
         fields = line.split()
         if len(fields) < 5 or fields[0].upper() != "TCP":
             continue
-        if _endpoint_port(fields[1]) != port or fields[-2].upper() != "LISTENING":
+        if endpoint_port(fields[1]) != port or fields[-2].upper() != "LISTENING":
             continue
         try:
             pids.append(int(fields[-1]))
@@ -214,7 +214,7 @@ def _windows_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
     return pids, []
 
 
-def _posix_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
+def posix_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
     lsof = shutil.which("lsof")
     if lsof is not None:
         try:
@@ -229,7 +229,7 @@ def _posix_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return [], [f"cannot inspect TCP port {port}: {exc}"]
         if completed.returncode in {0, 1}:
-            return _integer_lines(completed.stdout), []
+            return integer_lines(completed.stdout), []
 
     # Linux iproute2 provides ss even on many systems without lsof. Unlike
     # fuser, it can select listeners rather than every socket using the port.
@@ -252,14 +252,14 @@ def _posix_tcp_listener_pids(port: int) -> tuple[list[int], list[str]]:
                 return [], [f"cannot identify all listeners on TCP port {port}: ss did not expose process IDs; check permissions"]
             return sorted({int(pid) for pid in re.findall(r"\bpid=(\d+)", completed.stdout)}), []
 
-    if not _tcp_port_accepts_connections(port):
+    if not tcp_port_accepts_connections(port):
         return [], []
     return [], [
         f"cannot identify the process listening on TCP port {port}; install lsof or ss (iproute2)"
     ]
 
 
-def _integer_lines(value: str) -> list[int]:
+def integer_lines(value: str) -> list[int]:
     result: list[int] = []
     for token in str(value or "").split():
         try:
@@ -269,14 +269,14 @@ def _integer_lines(value: str) -> list[int]:
     return result
 
 
-def _endpoint_port(endpoint: str) -> int | None:
+def endpoint_port(endpoint: str) -> int | None:
     try:
         return int(str(endpoint).rsplit(":", 1)[-1])
     except ValueError:
         return None
 
 
-def _pid_exists(pid: int) -> bool:
+def pid_exists(pid: int) -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
@@ -304,7 +304,7 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
-def _tcp_port_accepts_connections(port: int) -> bool:
+def tcp_port_accepts_connections(port: int) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=0.2):
             return True

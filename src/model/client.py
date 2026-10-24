@@ -40,7 +40,7 @@ def completion_request_kwargs(
     }
     if response_format is not None:
         request["response_format"] = response_format
-    if _thinking_disabled():
+    if thinking_disabled():
         request["extra_body"] = {"thinking": {"type": "disabled"}}
     elif is_deepseek_model(model):
         request["reasoning_effort"] = "low"
@@ -50,7 +50,7 @@ def completion_request_kwargs(
     return request
 
 
-def _thinking_disabled() -> bool:
+def thinking_disabled() -> bool:
     """Whether model reasoning/thinking should be disabled for this run."""
 
     return os.environ.get("ARC_DISABLE_THINKING", "0").strip().lower() in {
@@ -123,8 +123,8 @@ class Model:
             api_key=os.environ.get("OPENAI_API_KEY", ""),
             base_url=os.environ.get("OPENAI_BASE_URL", "").strip()
             or "https://api.openai.com/v1",
-            timeout_seconds=_positive_env_float("ARC_MODEL_TIMEOUT_SECONDS", 120.0),
-            transport_retries=_nonnegative_env_int("ARC_MODEL_TRANSPORT_RETRIES", 3),
+            timeout_seconds=positive_env_float("ARC_MODEL_TIMEOUT_SECONDS", 120.0),
+            transport_retries=nonnegative_env_int("ARC_MODEL_TRANSPORT_RETRIES", 3),
         )
 
     @log_design_call
@@ -209,7 +209,7 @@ class Model:
         if content is None:
             raise ValueError("Structured model response is empty.")
         text = str(content)
-        parsed = _parse_json_object(text)
+        parsed = parse_json_object(text)
         if not isinstance(parsed, dict):
             raise ValueError("Structured model response must be a JSON object.")
         return parsed
@@ -233,7 +233,7 @@ def record_model_usage(
     usage = getattr(response, "usage", None)
     if usage is None:
         return
-    summary = _jsonable(usage)
+    summary = jsonable(usage)
     if isinstance(summary, dict):
         SynchronousLog('Model', workspace_root=path.parent.parent).info("MODEL_USAGE " + json.dumps({"schema_name": schema_name,
               "operation": operation, "prompt_tokens": summary.get("prompt_tokens"),
@@ -241,26 +241,26 @@ def record_model_usage(
               "total_tokens": summary.get("total_tokens")}, ensure_ascii=False))
 
 
-def _jsonable(value: Any) -> Any:
+def jsonable(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
+        return {str(key): jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
+        return [jsonable(item) for item in value]
     for method in ("model_dump", "dict"):
         converter = getattr(value, method, None)
         if callable(converter):
             try:
-                return _jsonable(converter())
+                return jsonable(converter())
             except Exception:
                 pass
     if hasattr(value, "__dict__"):
-        return _jsonable(vars(value))
+        return jsonable(vars(value))
     return str(value)
 
 
-def _parse_json_object(text: str) -> Any:
+def parse_json_object(text: str) -> Any:
     """Parse provider JSON while accepting lossless Markdown wrapping.
 
     Compatible endpoints occasionally ignore the structured-output contract and
@@ -298,7 +298,7 @@ def response_format_unavailable(error: BaseException) -> bool:
     return "response_format" in detail and unavailable
 
 
-def _positive_env_float(name: str, default: float) -> float:
+def positive_env_float(name: str, default: float) -> float:
     try:
         value = float(os.environ.get(name, str(default)))
     except ValueError:
@@ -306,7 +306,7 @@ def _positive_env_float(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
-def _nonnegative_env_int(name: str, default: int) -> int:
+def nonnegative_env_int(name: str, default: int) -> int:
     try:
         return max(0, int(os.environ.get(name, str(default))))
     except ValueError:
