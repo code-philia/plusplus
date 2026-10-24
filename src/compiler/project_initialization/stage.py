@@ -18,6 +18,7 @@ class ProjectInitializer:
         self.log = SynchronousLog('ProjectInitializer', workspace_root=self.root)
 
     def initialize(self, *, install_dependencies=True):
+        # Stage: Project initialization - prepare workspace sources ============================
         if not 1 <= self.port <= 65535:
             raise ValueError('Port must be between 1 and 65535')
         root_package = {
@@ -79,6 +80,7 @@ class ProjectInitializer:
                 'export default defineConfig({ plugins: [react(), tailwindcss()], server: { proxy: '
                 + json.dumps({'/api': f'http://127.0.0.1:{self.port}'}) + ' } });\n',
         }
+        # Process: Create missing files without replacing user sources =========================
         created = []
         for relative, content in {**sources, **text_sources}.items():
             target = self.root / relative
@@ -91,6 +93,7 @@ class ProjectInitializer:
                 target.write_text(content, encoding='utf-8')
             created.append(relative)
         # Hoisted workspace packages are shared by all compilation/test runners.
+        # Process: Install workspace dependencies and record initialization ====================
         commands = ([['npm', 'install', '--no-audit', '--no-fund'],
                      ['npm', 'exec', '--', 'playwright', 'install', 'chromium']]
                     if install_dependencies else [])

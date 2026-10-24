@@ -26,6 +26,7 @@ class RequirementPreprocessor:
     """Parse, normalize, validate, and schedule an ARC requirement document."""
 
     def compile(self, requirement_path: Path) -> PreprocessingResult:
+        # Stage: Preprocessing - parse the requirement document ================================
         source_path = requirement_path.expanduser().resolve()
         errors: list[str] = []
         try:
@@ -46,9 +47,10 @@ class RequirementPreprocessor:
             errors.append(_format_error("ARC1002", "Requirement document root must be a mapping.", source=str(source_path)))
             return PreprocessingResult({}, {}, errors)
 
+        # Process: Normalize nodes and validate dependencies ===================================
         nodes: dict[str, dict[str, Any]] = {}
         node_order: list[str] = []
-        root_id = self._normalize_node(
+        root_id = self.normalize_node(
             payload,
             parent_id=None,
             pointer="/",
@@ -57,22 +59,24 @@ class RequirementPreprocessor:
             node_order=node_order,
             errors=errors,
         )
-        self._validate_dependencies(nodes, errors)
+        self.validate_dependencies(nodes, errors)
 
+        # Process: Compute dependency graphs and scheduling waves ==============================
         atomic_ids = sorted(node_id for node_id, node in nodes.items() if node["type"] == "ATOMIC")
         folder_ids = sorted(node_id for node_id, node in nodes.items() if node["type"] == "FOLDER")
-        effective_dependencies = self._effective_atomic_dependencies(nodes, atomic_ids, errors)
+        effective_dependencies = self.effective_atomic_dependencies(nodes, atomic_ids, errors)
         requirement_ids = sorted(nodes)
-        requirement_dependencies = self._effective_requirement_dependencies(nodes)
-        waves = self._topological_waves(requirement_ids, requirement_dependencies, errors)
+        requirement_dependencies = self.effective_requirement_dependencies(nodes)
+        waves = self.topological_waves(requirement_ids, requirement_dependencies, errors)
         atomic_wave_errors: list[str] = []
-        atomic_waves = self._topological_waves(
+        atomic_waves = self.topological_waves(
             atomic_ids,
             effective_dependencies,
             atomic_wave_errors,
         )
         errors.extend(error for error in atomic_wave_errors if error not in errors)
 
+        # Process: Assemble requirement IR and dependency artifacts ============================
         requirement_ir = {
             "source": {
                 "document": source_path.name,
@@ -99,7 +103,7 @@ class RequirementPreprocessor:
             errors.append(_format_error("ARC1003", "Requirement root id is missing.", source=str(source_path)))
         return PreprocessingResult(requirement_ir, dependency_graph, errors)
 
-    def _normalize_node(
+    def normalize_node(
         self,
         raw: dict[str, Any],
         *,
@@ -137,9 +141,9 @@ class RequirementPreprocessor:
             errors.append(_format_error("ARC1106", "ATOMIC requirement cannot contain children.", node_id=node_id, source=source))
 
         description = str(raw.get("description") or "").strip()
-        pages = self._normalize_pages(raw.get("pages", []), node_id, source, errors)
+        pages = self.normalize_pages(raw.get("pages", []), node_id, source, errors)
         visual_references = sorted({page["reference"] for page in pages if page.get("reference")})
-        scenarios = self._normalize_scenarios(raw.get("scenarios"), node_id, source, errors)
+        scenarios = self.normalize_scenarios(raw.get("scenarios"), node_id, source, errors)
 
         node = {
             "id": node_id,
@@ -166,7 +170,7 @@ class RequirementPreprocessor:
             if not isinstance(child, dict):
                 errors.append(_format_error("ARC1107", "Requirement child must be a mapping.", node_id=node_id, source=f"{source}/{index}"))
                 continue
-            child_id = self._normalize_node(
+            child_id = self.normalize_node(
                 child,
                 parent_id=node_id,
                 pointer=f"{pointer.rstrip('/')}/children/{index}",
@@ -180,7 +184,7 @@ class RequirementPreprocessor:
         return node_id
 
     @staticmethod
-    def _normalize_pages(value: Any, node_id: str, source: str, errors: list[str]) -> list[dict[str, str]]:
+    def normalize_pages(value: Any, node_id: str, source: str, errors: list[str]) -> list[dict[str, str]]:
         if not isinstance(value, list):
             errors.append(_format_error("ARC1108", "pages must be a list.", node_id=node_id, source=source))
             return []
@@ -201,7 +205,7 @@ class RequirementPreprocessor:
         return pages
 
     @staticmethod
-    def _normalize_scenarios(value: Any, node_id: str, source: str, errors: list[str]) -> list[dict[str, Any]]:
+    def normalize_scenarios(value: Any, node_id: str, source: str, errors: list[str]) -> list[dict[str, Any]]:
         if value is None:
             return []
         if not isinstance(value, list):
@@ -234,7 +238,7 @@ class RequirementPreprocessor:
         return scenarios
 
     @staticmethod
-    def _validate_dependencies(nodes: dict[str, dict[str, Any]], errors: list[str]) -> None:
+    def validate_dependencies(nodes: dict[str, dict[str, Any]], errors: list[str]) -> None:
         for node_id, node in sorted(nodes.items()):
             for dependency in node["dependencies"]:
                 if dependency == node_id:
@@ -242,7 +246,7 @@ class RequirementPreprocessor:
                 elif dependency not in nodes:
                     errors.append(_format_error("ARC1302", f"Unresolved requirement dependency: {dependency}", node_id=node_id))
 
-    def _effective_atomic_dependencies(
+    def effective_atomic_dependencies(
         self,
         nodes: dict[str, dict[str, Any]],
         atomic_ids: list[str],
@@ -287,7 +291,7 @@ class RequirementPreprocessor:
         return graph
 
     @staticmethod
-    def _effective_requirement_dependencies(
+    def effective_requirement_dependencies(
         nodes: dict[str, dict[str, Any]],
     ) -> dict[str, list[str]]:
         """Build one bottom-up DAG containing both folder and atomic nodes.
@@ -315,7 +319,7 @@ class RequirementPreprocessor:
         return graph
 
     @staticmethod
-    def _topological_waves(
+    def topological_waves(
         requirement_ids: list[str],
         dependencies: dict[str, list[str]],
         errors: list[str],

@@ -55,6 +55,7 @@ class FrontendDesignPass:
             model.set_usage_path(self.artifact_root / 'model_usage.jsonl')
 
     def compile(self, requirements, database, backend):
+        # Stage: Frontend design - validate input contracts ====================================
         if database.get('ir_kind') != 'er_model' or database.get('status') != 'RESOLVED':
             raise ValueError('Frontend design requires a RESOLVED er_model.json')
         if backend.get('ir_kind') != 'backend_design':
@@ -68,15 +69,17 @@ class FrontendDesignPass:
         page_states, states, warnings = [], {}, []
         children = children_by_id(requirements)
         order = [rid for rid in postorder(requirements) if not children[rid]]
+        # Process: Design each leaf on transactional UI and page copies ========================
         for rid in order:
             self.log.info('Leaf design: RUNNING', node_id=rid)
             trial, trial_pages = copy.deepcopy(ir), copy.deepcopy(page_states)
             try:
-                requirement = self._requirement(requirements['nodes'][rid], requirements['nodes'])
+                requirement = self.requirement(requirements['nodes'][rid], requirements['nodes'])
                 if not requirement.get('pages'):
                     states[rid] = 'NO_FRONTEND'
                     self.log.info('No frontend page; skipping leaf.', node_id=rid)
                     continue
+                # Process: Collect visual evidence for the current leaf ========================
                 evidence = {}
                 for page in requirement['pages']:
                     reference = page.get('reference')
@@ -84,7 +87,7 @@ class FrontendDesignPass:
                         try:
                             if reference in self.visual_failures:
                                 raise ValueError(self.visual_failures[reference])
-                            record = self._analyze(page['name'], reference, rid)
+                            record = self.analyze(page['name'], reference, rid)
                             evidence[reference] = record
                             page['analysis'] = record['analysis']
                         except Exception as exc:
@@ -94,9 +97,10 @@ class FrontendDesignPass:
                             warnings.append(f'{rid}: visual analysis unavailable for {reference}; using requirement evidence')
                     else:
                         known = next((row for row in trial_pages if row['name'] == page['name']), None)
-                        page['analysis'] = self._page_analysis(known)
+                        page['analysis'] = self.page_analysis(known)
                 missing_page = any(not any(row['name'] == page['name'] for row in page_states)
                                    for page in requirement['pages'])
+                # Process: Design or extend page UI trees ======================================
                 data_access = database_context(database, rid)
                 for page in requirement['pages']:
                     state = next((row for row in trial_pages if row['name'] == page['name']), None)
@@ -110,7 +114,7 @@ class FrontendDesignPass:
                         state = {'name': page['name'], 'ui_id': key, 'references': []}
                         trial_pages.append(state)
                     if not reference:
-                        page['analysis'] = self._page_analysis(state)
+                        page['analysis'] = self.page_analysis(state)
                     parsed = not reference or not record or any(row['reference'] == reference and row['sha256'] == record['sha256']
                                                   for row in state['references'])
                     mode = 'new' if new_page else 'bind' if parsed else 'extend'
@@ -124,14 +128,15 @@ class FrontendDesignPass:
                     if mode == 'extend' and state['references']:
                         baseline = state['references'][0]
                         payload['baseline_page_states'] = {'name': state['name'], 'reference': baseline['reference'],
-                                                           'analysis': self._page_analysis(state)}
-                    trial = self._design('ui', rid, trial, payload, backend)
+                                                           'analysis': self.page_analysis(state)}
+                    trial = self.design('ui', rid, trial, payload, backend)
                     if record:
                         old = next((index for index, row in enumerate(state['references']) if row['reference'] == reference), None)
                         if old is None:
                             state['references'].append({key: record[key] for key in ('reference', 'sha256')})
                         else:
                             state['references'][old] = {key: record[key] for key in ('reference', 'sha256')}
+                # Process: Design page data bindings and API contracts =========================
                 names = {page['name'] for page in requirement['pages']}
                 pages, loaded = region(trial, names)
                 apis = related_apis(backend, requirement, database)
@@ -147,8 +152,8 @@ class FrontendDesignPass:
                            'api_index': module_index([row for row in backend['modules'] if row['kind'] == 'API']),
                            'existing_data': state_context(trial, loaded),
                            'type_name_index': [row['name'] for row in trial['types']]}
-                payload['existing_types'] = self._types(trial, apis, payload['existing_data'])
-                trial = self._design('data', rid, trial, payload, backend)
+                payload['existing_types'] = self.types(trial, apis, payload['existing_data'])
+                trial = self.design('data', rid, trial, payload, backend)
                 payload['selected_ui_tree'], loaded = region(trial, names)
                 current_nodes, _ = ui_index(trial['ui'])
                 payload['event_ui_candidates'] = [
@@ -159,10 +164,11 @@ class FrontendDesignPass:
                 payload['reuse_handlers'], payload['existing_events'] = handler_context(
                     trial, loaded, payload['existing_data'], apis, requirement)
                 payload['handler_name_index'] = [row['name'] for row in trial['handlers']]
-                payload['existing_types'] = self._types(trial, apis, payload['existing_data'], payload['reuse_handlers'])
+                payload['existing_types'] = self.types(trial, apis, payload['existing_data'], payload['reuse_handlers'])
                 payload['type_name_index'] = [row['name'] for row in trial['types']]
-                trial = self._design('interaction', rid, trial, payload, backend)
-                self._save(trial, trial_pages)
+                # Process: Design interactions and commit the validated leaf ===================
+                trial = self.design('interaction', rid, trial, payload, backend)
+                self.save(trial, trial_pages)
                 ir, page_states = trial, trial_pages
                 states[rid] = 'DESIGNED'
                 self.log.info('Leaf design: COMPLETED', node_id=rid)
@@ -170,7 +176,8 @@ class FrontendDesignPass:
                 states[rid] = 'SKIPPED'
                 warnings.append(f'{rid}: rolled back frontend leaf design: {exc}')
                 self.log.warning(warnings[-1], node_id=rid)
-        self._save(ir, page_states)
+        # Process: Publish frontend IR, page evidence, and the design report ===================
+        self.save(ir, page_states)
         write_json_atomic(self.root / 'report.json', {
             'status': 'GENERATED_WITH_WARNINGS' if warnings else 'GENERATED',
             'node_states': states, 'leaf_order': order, 'warnings': warnings, 'errors': [],
@@ -178,7 +185,7 @@ class FrontendDesignPass:
         return FrontendDesignResult(ir, page_states, states, warnings=warnings)
 
     @staticmethod
-    def _requirement(node, nodes):
+    def requirement(node, nodes):
         result = {key: copy.deepcopy(node[key]) for key in ('id', 'name', 'description', 'scenarios', 'pages') if key in node}
         for page in result.get('pages', []):
             if page.get('reference'):
@@ -192,7 +199,7 @@ class FrontendDesignPass:
         result['ancestor_constraints'] = list(reversed(ancestors))
         return result
 
-    def _types(self, ir, apis, data, handlers=()):
+    def types(self, ir, apis, data, handlers=()):
         roots = [row['schema'] for row in data]
         roots.extend(row[key] for row in handlers for key in ('input', 'output'))
         roots.extend(row['schema'] for row in ir['types'] if row['name'] not in self.backend_type_names)
@@ -200,13 +207,13 @@ class FrontendDesignPass:
         wanted.update(row['name'] for row in ir['types'] if row['name'] not in self.backend_type_names)
         return [copy.deepcopy(row) for row in ir['types'] if row['name'] in wanted]
 
-    def _design(self, phase, rid, base, payload, backend):
+    def design(self, phase, rid, base, payload, backend):
         apply = {'ui': apply_ui, 'data': apply_data, 'interaction': apply_interaction}[phase]
         def accept(output):
             if phase == 'interaction':
                 fresh = expand_api_context(backend, payload, output)
                 if fresh:
-                    payload['existing_types'] = self._types(base, payload['api_contracts'],
+                    payload['existing_types'] = self.types(base, payload['api_contracts'],
                                                           payload['existing_data'], payload['reuse_handlers'])
                     raise ValueError(f'Loaded existing APIs {fresh} from api_index into api_contracts with their types. '
                                      'Review them before reporting a missing capability or returning the corrected delta.')
@@ -215,9 +222,9 @@ class FrontendDesignPass:
             if errors:
                 raise ValueError('; '.join(errors))
             return candidate
-        return self._invoke(phase, rid, payload, accept)
+        return self.invoke(phase, rid, payload, accept)
 
-    def _invoke(self, phase, rid, payload, accept, image_data_url=None):
+    def invoke(self, phase, rid, payload, accept, image_data_url=None):
         feedback, previous = [], None
         for attempt in range(1, self.attempts + 1):
             logger = self.visual_log if phase == 'visual' else self.log
@@ -248,7 +255,7 @@ class FrontendDesignPass:
             logger.warning(f'{phase} validation rejected: ' + '; '.join(feedback), node_id=rid)
         raise ValueError(f'{phase}: exhausted {self.attempts} attempts: ' + '; '.join(feedback))
 
-    def _analyze(self, name, reference, rid):
+    def analyze(self, name, reference, rid):
         digest, image = image_evidence(reference, self.reference_root)
         cached = self.visual_cache.get(reference)
         if (isinstance(cached, dict) and cached.get('sha256') == digest
@@ -262,7 +269,7 @@ class FrontendDesignPass:
                 if not output[field] or any(not item.strip() for item in output[field]):
                     raise ValueError(f'Visual analysis must include nonempty {field}')
             return output
-        details = self._invoke('visual', rid, {'current_task': {'page': {'name': name, 'reference': reference}}}, accept, image)
+        details = self.invoke('visual', rid, {'current_task': {'page': {'name': name, 'reference': reference}}}, accept, image)
         analysis = '\n\n'.join(field + ':\n' + '\n'.join('- ' + item for item in details[field])
                                for field in VISUAL_FIELDS)
         record = {'reference': reference, 'sha256': digest, 'analysis_version': VISUAL_ANALYSIS_VERSION,
@@ -272,10 +279,10 @@ class FrontendDesignPass:
         self.visual_log.info(f'Analysis completed: {name} ({reference})', node_id=rid)
         return copy.deepcopy(record)
 
-    def _save(self, ir, page_states):
+    def save(self, ir, page_states):
         write_json_atomic(self.root / 'frontend_ir.json', ir)
         write_json_atomic(self.root / 'page_states.json', page_states)
 
-    def _page_analysis(self, state):
+    def page_analysis(self, state):
         references = state.get('references', []) if state else []
         return self.visual_cache.get(references[0]['reference'], {}).get('analysis') if references else None

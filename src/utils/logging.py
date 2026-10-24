@@ -87,15 +87,15 @@ class SynchronousLog:
         self._workspace_root = str(workspace_root) if workspace_root is not None else None
 
     def info(self, message: str, *, node_id: str | None = None) -> None:
-        self._write(message, status=None, node_id=node_id)
+        self.write(message, status=None, node_id=node_id)
 
     def warning(self, message: str, *, node_id: str | None = None) -> None:
-        self._write(message, status='warning', node_id=node_id)
+        self.write(message, status='warning', node_id=node_id)
 
     def error(self, message: str, *, node_id: str | None = None) -> None:
-        self._write(message, status='error', node_id=node_id)
+        self.write(message, status='error', node_id=node_id)
 
-    def _write(self, message: str, *, status: str | None, node_id: str | None) -> None:
+    def write(self, message: str, *, status: str | None, node_id: str | None) -> None:
         write_terminal_log(self._agent_name, message, status=status, node_id=node_id,
                            workspace_root=self._workspace_root)
 

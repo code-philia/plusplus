@@ -21,15 +21,16 @@ class Compiler:
         self.log_cb = log_cb
         self.model = model
 
-    async def _log(self, message, status=None):
+    async def log(self, message, status=None):
         if self.log_cb:
             result = self.log_cb('Compiler', message, status, None)
             if inspect.isawaitable(result):
                 await result
         else:
-            self.logger._write(message, status=status, node_id=None)
+            self.logger.write(message, status=status, node_id=None)
 
     async def compile(self, request: CompilationRequest) -> CompilationResult:
+        # Stage: Preprocessing - validate requirements and workspace ===========================
         if request.resume or request.start_from != 'zero':
             raise ValueError('Checkpoint resume is not supported by the current IR; use the individual stage scripts.')
         if not 1 <= request.web_port <= 65535:
@@ -56,21 +57,22 @@ class Compiler:
         artifacts['workflow'] = str(summary)
         run = CompilationRunReport(summary, run_id, states, artifacts)
 
+        # Process: Record stage progress and recoverable failures ==============================
         async def begin(name):
             record = run.begin(name)
-            await self._log(name + ': RUNNING')
+            await self.log(name + ': RUNNING')
             return record
 
         async def finish(record, path=None, warnings=()):
             run.complete(record, path, warnings)
-            await self._log(record['stage'] + ': COMPLETED')
+            await self.log(record['stage'] + ': COMPLETED')
             for warning in warnings:
-                await self._log(warning, 'warning')
+                await self.log(warning, 'warning')
 
         async def stage_failed(record, exc):
             message = f'{record["stage"]}: {exc}'
             run.fail(record, message)
-            await self._log(message + '; continuing subsequent stages.', 'warning')
+            await self.log(message + '; continuing subsequent stages.', 'warning')
 
         async def run_guarded_stage(record, action, fallback=None):
             # Keep actions lazy so setup failures belong to the explicit stage record.
@@ -107,6 +109,7 @@ class Compiler:
 
             from utils.environment import ensure_dotenv_loaded
             ensure_dotenv_loaded()
+            # Stage: Project initialization ====================================================
             initialization_report = await begin('project_initialization')
 
             def initialize_project():
@@ -117,6 +120,7 @@ class Compiler:
             if initialized:
                 await finish(initialization_report, root / 'project/report.json')
 
+            # Stage: Visual analysis - launch alongside database design ========================
             model = self.model if self.model is not None else Model.from_env()
             frontend_designer = FrontendDesignPass(
                 model, root, reference_root=Path(request.requirement_path).resolve().parent)
@@ -131,7 +135,7 @@ class Compiler:
                         if reference and reference not in seen:
                             seen.add(reference)
                             try:
-                                frontend_designer._analyze(page['name'], reference, rid)
+                                frontend_designer.analyze(page['name'], reference, rid)
                             except Exception as exc:
                                 frontend_designer.visual_failures[reference] = str(exc)
                                 frontend_designer.visual_log.warning(f'Skipping {reference}: {exc}', node_id=rid)
@@ -140,8 +144,9 @@ class Compiler:
             # One writer owns the visual cache; duplicate paths are analyzed once.
             visual_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='arc-visual')
             visual_future = visual_executor.submit(analyze_images)
-            await self._log('Visual analysis is running in the background alongside database design.')
+            await self.log('Visual analysis is running in the background alongside database design.')
 
+            # Stage: Database design ===========================================================
             database_report = await begin('database_design')
             from .database_design.state import DatabaseSchemaState
             from .database_design.refinement import refine_er_model
@@ -177,6 +182,7 @@ class Compiler:
             from .lowering.recovery import isolate_design, bind_recovery, minimal_lowering
             recovery_reasons = {name: {} for name in ('database', 'backend', 'frontend')}
 
+            # Process: Lower a design with repair and isolation fallbacks ======================
             async def lower_design(name, lowerer, design):
                 lowering_report = await begin(name + '_lowering')
                 plan = None
@@ -196,7 +202,7 @@ class Compiler:
                 try:
                     plan = render_lowering()
                 except Exception as exc:
-                    await self._log(f'{name}: isolating unlowerable design: {exc}', 'warning')
+                    await self.log(f'{name}: isolating unlowerable design: {exc}', 'warning')
                     try:
                         plan, effective_design = isolate_design(name, lowerer, requirements, effective_design, output)
                         recovery_reasons[name].update(plan.pop('recovery_reasons', {}))
@@ -210,7 +216,7 @@ class Compiler:
                             model, output, name + '_lowering', check_lowering, result,
                             contracts=effective_design)
                     except Exception as exc:
-                        await self._log(f'{name}: lowering repair unavailable; using recovery scaffolding: {exc}', 'warning')
+                        await self.log(f'{name}: lowering repair unavailable; using recovery scaffolding: {exc}', 'warning')
                 if not result['ok']:
                     # The populated source plan still cannot compile. Replace only
                     # stage-owned scaffolding, preserving user-modified files.
@@ -232,10 +238,12 @@ class Compiler:
                     write_json_atomic(root / 'design' / name / filename, effective_design)
                 return plan, effective_design, lowering_report
 
+            # Stage: Database lowering =========================================================
             database_plan, database.schema, database_lowering_report = await lower_design(
                 'database', DatabaseLoweringPass(), database.schema)
             # Backend design reads the visual cache, so wait at this boundary.
-            await self._log('Waiting for visual evidence before backend design.')
+            # Process: Join visual analysis before backend design ==============================
+            await self.log('Waiting for visual evidence before backend design.')
             try:
                 visual_future.result()
             except Exception as exc:
@@ -244,7 +252,8 @@ class Compiler:
             run.complete(visual_report, root / 'visual_cache.json',
                 status='COMPLETED_WITH_WARNINGS' if frontend_designer.visual_failures else 'COMPLETED',
                 warnings=[f'{path}: {message}' for path, message in frontend_designer.visual_failures.items()])
-            await self._log('visual_analysis: COMPLETED')
+            await self.log('visual_analysis: COMPLETED')
+            # Stage: Backend design ============================================================
             backend_report = await begin('backend_design')
 
             def design_backend():
@@ -256,10 +265,12 @@ class Compiler:
                     errors=['Backend design unavailable'], warnings=[]))
             if backend_report['status'] == 'RUNNING':
                 await complete_design(backend_report, backend, root / 'design/backend/backend_ir.json')
+            # Stage: Backend lowering ==========================================================
             backend_plan, backend.ir, backend_lowering_report = await lower_design(
                 'backend', BackendLoweringPass(), backend.ir)
             write_json_atomic(root / 'design/backend/backend_ir.json', backend.ir)
 
+            # Stage: Frontend design ===========================================================
             frontend_report = await begin('frontend_design')
             from .frontend_design.delta import make_ui
 
@@ -274,12 +285,14 @@ class Compiler:
                     errors=['Frontend design unavailable'], warnings=[]))
             if frontend_report['status'] == 'RUNNING':
                 await complete_design(frontend_report, frontend, root / 'design/frontend/frontend_ir.json')
+            # Stage: Frontend lowering =========================================================
             frontend_plan, frontend.ir, frontend_lowering_report = await lower_design(
                 'frontend', FrontendLoweringPass(), frontend.ir)
             write_json_atomic(root / 'design/frontend/frontend_ir.json', frontend.ir)
 
             # FileContext derives requirement/file associations from the lowering
             # plans directly; no second binding registry is persisted.
+            # Process: Bind recovery work to lowered requirement files =========================
             states.update({rid: 'LOWERED' for rid in leaves})
 
             backend_recovery = dict(recovery_reasons['backend'])
@@ -309,7 +322,8 @@ class Compiler:
             if recovered:
                 message = 'Recovery files bound; continuing implementation for: ' + ', '.join(sorted(recovered))
                 run.add_warning(frontend_lowering_report, message)
-                await self._log(message, 'warning')
+                await self.log(message, 'warning')
+            # Stage: Requirement implementation and acceptance =================================
             if not request.stop_after_lowering:
                 implementation_report = await begin('implementation')
                 try:
@@ -326,8 +340,9 @@ class Compiler:
                 except Exception as exc:
                     message = 'implementation: ' + str(exc)
                     run.fail(implementation_report, message, root / 'implementation/report.json')
-                    await self._log(message + '; continuing to build repair.', 'warning')
+                    await self.log(message + '; continuing to build repair.', 'warning')
 
+            # Stage: Production build and repair ===============================================
             build_report = await begin('build')
 
             def check_build():
@@ -347,7 +362,8 @@ class Compiler:
             else:
                 message = 'build: repair budget exhausted: ' + str(build)
                 run.fail(build_report, message)
-                await self._log(message, 'warning')
+                await self.log(message, 'warning')
+            # Stage: Optional validation preparation ===========================================
             if request.prepare_validation and not request.stop_after_lowering and build['ok']:
                 validation_report = await begin('validation_preparation')
                 def prepare_validation():
@@ -361,6 +377,7 @@ class Compiler:
                     await finish(validation_report, root / 'validation_preparation/report.json')
             elif request.prepare_validation and not build['ok']:
                 run.skip('validation_preparation', ['Build unavailable; validation artifacts cannot be prepared.'])
+            # Process: Finalize the compilation result =========================================
             # Completion records execution progress, not just requirement success.
             if run.errors:
                 final_status = 'COMPLETED_WITH_ERRORS'
@@ -376,9 +393,10 @@ class Compiler:
             if not run.failed_nodes:
                 run.failed_nodes.extend(rid for rid in leaves if states[rid] not in {'IMPLEMENTED', 'ALREADY_PASSED'})
             run.save('FAILED')
-            await self._log('FAILED: ' + run.errors[-1], 'error')
+            await self.log('FAILED: ' + run.errors[-1], 'error')
             return CompilationResult(ok=False, root_id=requirements['root_id'], states=states,
                 failed_nodes=run.failed_nodes, artifacts=artifacts, run_id=run_id)
+        # Process: Settle background analysis and release run resources ========================
         finally:
             try:
                 if visual_executor is not None:

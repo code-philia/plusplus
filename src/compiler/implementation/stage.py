@@ -65,17 +65,18 @@ class NodeTDDOrchestrator:
         database_plan: dict[str, Any], *, skip_requirements: Iterable[str] = (),
     ) -> TDDResult:
         try:
-            return self._compile(requirements, database, backend, frontend, backend_plan, frontend_plan,
+            return self.compile_requirements(requirements, database, backend, frontend, backend_plan, frontend_plan,
                                  database_plan, skip_requirements=skip_requirements)
         finally:
             if hasattr(self.runner, 'close'):
                 self.runner.close()
 
-    def _compile(
+    def compile_requirements(
         self, requirements: dict[str, Any], database: ERModelIR, backend: BackendIR,
         frontend: FrontendIR, backend_plan: dict[str, Any], frontend_plan: dict[str, Any],
         database_plan: dict[str, Any], *, skip_requirements: Iterable[str] = (),
     ) -> TDDResult:
+        # Stage: Implementation - prepare context and verify the environment ===================
         self.context = FileContext(self.root, requirements, database, backend, frontend,
                                    backend_plan, frontend_plan, database_plan)
         required_shared = {'backend/src/db/seed.ts', 'backend/src/db/initialize.ts', 'backend/src/db/client.ts'}
@@ -88,9 +89,9 @@ class NodeTDDOrchestrator:
         needs_browser = bool(frontend['ui']['children']) or any(
             'frontend' in layers for layers in self.context.recovery.values())
         environment = self.runner.check_environment(browser=needs_browser)
-        self._gate('BASELINE', 'environment', environment)
+        self.gate('BASELINE', 'environment', environment)
         if not passed(environment):
-            return self._report({rid: 'BLOCKED_ENVIRONMENT' for rid in order},
+            return self.report({rid: 'BLOCKED_ENVIRONMENT' for rid in order},
                                 ['Test environment unavailable before TDD: ' + str(environment)], [])
         # Freeze runner-owned support/config as read-only discoverable records.
         for path in self.runner.support.glob('*'):
@@ -98,18 +99,20 @@ class NodeTDDOrchestrator:
             self.context.catalog[relative] = {'file_path': relative, 'symbol_ids': ['SYSTEM.TEST.' + path.name],
                 'reqs': [], 'shared': True, 'summaries': [path.name + ': fixed TDD runner support'],
                 'kind': 'configuration', 'contracts': []}
+        # Process: Check baseline compilation before scheduling leaves =========================
         baseline = self.runner.compile()
         if not passed(baseline):
-            self._gate('BASELINE', 'compilation', baseline)
+            self.gate('BASELINE', 'compilation', baseline)
             self.log.warning('Baseline compilation needs repair; continuing with requirement recovery files.')
         baseline_needs_repair = not passed(baseline)
-        scheduled = self._implementation_order(requirements, order)
+        scheduled = self.implementation_order(requirements, order)
         states = {}
         errors = []
         warnings = []
         completed_tests = []
         self.test_manifest = {}
         skipped = set(skip_requirements)
+        # Process: Implement leaf requirements in dependency order =============================
         for rid in scheduled:
             if rid in skipped:
                 states[rid] = 'SKIPPED_DESIGN_FAILED'
@@ -132,15 +135,16 @@ class NodeTDDOrchestrator:
                     def check_baseline():
                         return self.runner.compile()
 
-                    self._model_patch('repair', rid, session, [], baseline, snapshots,
+                    self.model_patch('repair', rid, session, [], baseline, snapshots,
                                       accept=check_baseline)
                     baseline_needs_repair = False
                     repaired_baseline = True
-                targets = self._targets(rid, backend, frontend, recovery=self.context.recovery.get(rid, {}))
+                # Process: Generate and compile requirement acceptance tests ===================
+                targets = self.targets(rid, backend, frontend, recovery=self.context.recovery.get(rid, {}))
 
                 # These gates read the current targets and completed tests when invoked.
                 def check_generated_tests():
-                    return self._test_generation_gate(targets)
+                    return self.test_generation_gate(targets)
 
                 def check_implementation():
                     return self.runner.compile() + self.runner.check_tests(completed_tests + targets)
@@ -150,29 +154,30 @@ class NodeTDDOrchestrator:
                     self.context.catalog[path] = {'file_path': path, 'symbol_ids': ['TEST.' + path],
                         'reqs': [rid], 'shared': False, 'summaries': [rid + ' requirement-based acceptance tests'],
                         'kind': 'acceptance_test', 'contracts': []}
-                self._model_patch('test_generation', rid, session, targets, evidence, snapshots,
+                self.model_patch('test_generation', rid, session, targets, evidence, snapshots,
                                   accept=check_generated_tests)
                 self.log.info('Acceptance tests compiled; implementing initial version before execution. Test corrections are permitted during repair.', node_id=rid)
                 direct = self.context.direct_files(rid)
+                # Process: Implement requirement layers before runtime acceptance ==============
                 for layer in ('backend', 'frontend'):
                     if not any(path.startswith(layer + '/') for path in direct):
                         continue
-                    self._model_patch(layer + '_implementation', rid, session, targets, [], snapshots,
+                    self.model_patch(layer + '_implementation', rid, session, targets, [], snapshots,
                                       accept=check_implementation)
                 # Execute only this requirement; historical test sources remain
                 # covered by the compilation gates above and during repair.
-                evidence = self._run_tests(targets, rid, 'initial_implementation')
-                self._gate(rid, 'initial_implementation', evidence)
+                evidence = self.run_tests(targets, rid, 'initial_implementation')
+                self.gate(rid, 'initial_implementation', evidence)
                 success = passed(evidence)
                 for iteration in range(1, self.iterations + 1):
                     if success:
                         break
                     if any(row.get('failure_kind') == 'infrastructure' for row in evidence if row['status'] != 'PASSED'):
                         raise EnvironmentBlocked('Test executor unavailable after retries; preserving accepted source: ' + str(evidence))
-                    self._model_patch('repair', rid, session, targets, evidence, snapshots,
+                    self.model_patch('repair', rid, session, targets, evidence, snapshots,
                                       accept=check_implementation)
-                    evidence = self._run_tests(targets, rid, f'repair_{iteration}')
-                    self._gate(rid, f'repair_{iteration}', evidence)
+                    evidence = self.run_tests(targets, rid, f'repair_{iteration}')
+                    self.gate(rid, f'repair_{iteration}', evidence)
                     if passed(evidence):
                         success = True
                         break
@@ -183,19 +188,19 @@ class NodeTDDOrchestrator:
                 states[rid] = 'IMPLEMENTED'
                 self.log.info('Leaf TDD: COMPLETED', node_id=rid)
                 completed_tests.extend(targets)
-                self._report(states, errors, warnings)
+                self.report(states, errors, warnings)
             except EnvironmentBlocked as exc:
                 states[rid] = 'BLOCKED_ENVIRONMENT'
                 for remaining in scheduled:
                     states.setdefault(remaining, 'BLOCKED_ENVIRONMENT')
                 errors.append(f'{rid}: {exc}')
                 self.log.error(errors[-1], node_id=rid)
-                return self._report(states, errors, warnings)
+                return self.report(states, errors, warnings)
             except Exception as exc:
                 # Runtime acceptance failure does not discard compilation-safe
                 # progress. Individual invalid proposals are still reverted by
-                # _model_patch before reaching this requirement boundary.
-                retained_tests, keep_source = self._check_retained_source(rid, targets, completed_tests, warnings)
+                # model_patch before reaching this requirement boundary.
+                retained_tests, keep_source = self.check_retained_source(rid, targets, completed_tests, warnings)
                 if keep_source:
                     states[rid] = 'FAILED_RETAINED'
                     # Include retained tests in subsequent compilation gates;
@@ -212,16 +217,17 @@ class NodeTDDOrchestrator:
                     states[rid] = 'FAILED_ROLLED_BACK'
                 errors.append(f'{rid}: {exc}')
                 self.log.error(errors[-1], node_id=rid)
-            self._report(states, errors, warnings)
+            self.report(states, errors, warnings)
+        # Process: Check final compilation and collected test sources ==========================
         final = self.runner.compile()
         if completed_tests:
             final += self.runner.check_tests(list(dict.fromkeys(completed_tests)))
-        self._gate('FINAL', 'compilation', final)
+        self.gate('FINAL', 'compilation', final)
         if not passed(final):
             errors.append('Final compilation failed')
-        return self._report(states, errors, warnings)
+        return self.report(states, errors, warnings)
 
-    def _implementation_order(self, requirements, order):
+    def implementation_order(self, requirements, order):
         # Process leaf dependencies before dependents; parents remain organizational.
         pending = set(order)
         scheduled = []
@@ -234,7 +240,7 @@ class NodeTDDOrchestrator:
                 raise ValueError('Leaf implementation dependency cycle at ' + rid)
             active.add(rid)
             for dependency in requirements['nodes'][rid].get('dependencies', []):
-                dependencies = [key for key in order if key == dependency or self._descends(key, dependency, requirements)]
+                dependencies = [key for key in order if key == dependency or self.descends(key, dependency, requirements)]
                 for key in dependencies:
                     if key != rid:
                         visit(key)
@@ -246,7 +252,7 @@ class NodeTDDOrchestrator:
             visit(rid)
         return scheduled
 
-    def _check_retained_source(self, rid, targets, completed_tests, warnings):
+    def check_retained_source(self, rid, targets, completed_tests, warnings):
         # Acceptance can fail while the last accepted source remains compilation-safe.
         retained_tests = [path for path in targets if (self.root / path).is_file()]
         try:
@@ -254,7 +260,7 @@ class NodeTDDOrchestrator:
             test_sources = list(dict.fromkeys(completed_tests + retained_tests))
             if test_sources:
                 compilation += self.runner.check_tests(test_sources)
-            self._gate(rid, 'failure_compilation', compilation)
+            self.gate(rid, 'failure_compilation', compilation)
             keep_source = passed(compilation)
         except Exception as compilation_exc:
             keep_source = False
@@ -262,7 +268,7 @@ class NodeTDDOrchestrator:
         return retained_tests, keep_source
 
     @staticmethod
-    def _descends(rid, parent, requirements):
+    def descends(rid, parent, requirements):
         current = requirements['nodes'][rid].get('parent_id')
         seen = set()
         while current in requirements['nodes'] and current not in seen:
@@ -272,19 +278,19 @@ class NodeTDDOrchestrator:
             current = requirements['nodes'][current].get('parent_id')
         return False
 
-    def _run_tests(self, targets, rid, phase, *, red=False):
+    def run_tests(self, targets, rid, phase, *, red=False):
         """Retry infrastructure without asking the model to rewrite valid tests."""
         attempts = budget('ARC_TDD_RUN_ATTEMPTS', 2)
         for attempt in range(1, attempts + 1):
             results = self.runner.run(targets, port=self.port, red=red)
-            self._gate(rid, f'{phase}_run_{attempt}', results)
+            self.gate(rid, f'{phase}_run_{attempt}', results)
             if not any(row.get('failure_kind') == 'infrastructure' for row in results if row['status'] != 'PASSED'):
                 return results
             self.log.warning(f'{phase}: infrastructure failure, executor retry {attempt}/{attempts}; keeping tests unchanged', node_id=rid)
         return results
 
     @staticmethod
-    def _targets(rid, backend, frontend, *, recovery=None):
+    def targets(rid, backend, frontend, *, recovery=None):
         stem = slug(rid) + '-' + token(rid)
         kinds = {row['kind'] for row in backend['modules'] if rid in row['reqs']}
         targets = []
@@ -299,11 +305,11 @@ class NodeTDDOrchestrator:
             raise ValueError(f'No appropriate acceptance layer for {rid}')
         return targets
 
-    def _test_generation_gate(self, targets):
-        self._validate_test_sources(targets)
+    def test_generation_gate(self, targets):
+        self.validate_test_sources(targets)
         return self.runner.check_tests(targets)
 
-    def _validate_test_sources(self, targets):
+    def validate_test_sources(self, targets):
         for path in targets:
             content = read_source(self.root, path)
             if not content.strip() or not re.search(r'\bexpect\s*\(', content):
@@ -320,12 +326,12 @@ class NodeTDDOrchestrator:
                 raise ValueError(f'{path}: assert the requirement\'s implemented behavior, not Not implemented errors or placeholder HTTP 501')
 
     @staticmethod
-    def _behavior_failure(results):
+    def behavior_failure(results):
         # Compiler failures cannot become RED just because their log mentions an assertion.
         failures = [row for row in results if row['status'] != 'PASSED']
         return bool(failures) and all(row.get('test_evidence', {}).get('behavior_failure', False) for row in failures)
 
-    def _model_patch(self, phase, rid, session, targets, evidence, snapshots, accept):
+    def model_patch(self, phase, rid, session, targets, evidence, snapshots, accept):
         feedback = []
         rejected_files = []
         requests = 0
@@ -378,7 +384,7 @@ class NodeTDDOrchestrator:
                     changed_tests = [path for path in patch_snapshot
                                      if self.context.catalog.get(path, {}).get('kind') == 'acceptance_test']
                     if changed_tests:
-                        self._validate_test_sources(changed_tests)
+                        self.validate_test_sources(changed_tests)
                     gate = accept()
                     if not passed(gate):
                         if any(row.get('failure_kind') == 'infrastructure' for row in gate
@@ -411,7 +417,7 @@ class NodeTDDOrchestrator:
                     break
         raise ValueError(phase + ': exhausted correction attempts: ' + '; '.join(feedback))
 
-    def _gate(self, rid, phase, results):
+    def gate(self, rid, phase, results):
         self.log.info(f'{phase}: ' + ('PASSED' if passed(results) else 'FAILED'), node_id=rid)
         self.test_status[rid] = {'phase': phase, 'results': [
             {key: row[key] for key in ('status', 'failure_kind', 'exit_code', 'error', 'test_files') if key in row}
@@ -422,7 +428,7 @@ class NodeTDDOrchestrator:
                if 'test_evidence' in row else {}) for row in results]}
         write_json_atomic(self.artifact / 'test_status.json', self.test_status)
 
-    def _report(self, states, errors, warnings):
+    def report(self, states, errors, warnings):
         errors = [message[:1500] for message in errors]
         write_json_atomic(self.artifact / 'report.json', {'status': 'FAILED' if errors else 'IMPLEMENTED_WITH_WARNINGS' if warnings else 'IMPLEMENTED',
             'node_states': states, 'errors': errors, 'warnings': warnings, 'model_calls': self.sequence})

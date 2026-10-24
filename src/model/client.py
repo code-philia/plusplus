@@ -161,7 +161,7 @@ class Model:
                         },
                     )
                 )
-                self._record_usage(response, schema_name=schema_name, operation="generate_json")
+                self.record_usage(response, schema_name=schema_name, operation="generate_json")
             except Exception as exc:
                 if not response_format_unavailable(exc):
                     raise
@@ -188,7 +188,7 @@ class Model:
                         response_format={"type": "json_object"},
                     )
                 )
-                self._record_usage(response, schema_name=schema_name, operation="generate_json")
+                self.record_usage(response, schema_name=schema_name, operation="generate_json")
             except Exception as exc:
                 if not response_format_unavailable(exc):
                     raise
@@ -204,7 +204,7 @@ class Model:
                     messages=fallback_messages,
                 )
             )
-            self._record_usage(response, schema_name=schema_name, operation="generate_json")
+            self.record_usage(response, schema_name=schema_name, operation="generate_json")
         content = response.choices[0].message.content
         if content is None:
             raise ValueError("Structured model response is empty.")
@@ -214,7 +214,7 @@ class Model:
             raise ValueError("Structured model response must be a JSON object.")
         return parsed
 
-    def _record_usage(self, response: Any, *, schema_name: str, operation: str) -> None:
+    def record_usage(self, response: Any, *, schema_name: str, operation: str) -> None:
         record_model_usage(self._usage_path, response, schema_name=schema_name,
                            operation=operation, model=self.model)
 

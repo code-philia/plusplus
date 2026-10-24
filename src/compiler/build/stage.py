@@ -28,6 +28,7 @@ class ProjectBuilder:
         self.environment = dict(os.environ if environment is None else environment)
 
     def build(self) -> ProjectBuildResult:
+        # Stage: Build - validate the workspace and command environment ========================
         package_path = self.output_root / "package.json"
         if not package_path.is_file():
             return ProjectBuildResult(
@@ -47,6 +48,7 @@ class ProjectBuilder:
                 ],
             )
 
+        # Process: Run the production build and classify its result ============================
         command = [executable, "run", "build"]
         try:
             completed = run_command(
@@ -63,7 +65,7 @@ class ProjectBuilder:
                 ],
             )
         except subprocess.TimeoutExpired as exc:
-            detail = self._command_output(exc.stdout, exc.stderr)
+            detail = self.command_output(exc.stdout, exc.stderr)
             message = "ARC3502 PROJECT_BUILD_TIMEOUT: npm run build exceeded 900 seconds."
             if detail:
                 message = f"{message}\n{detail}"
@@ -75,7 +77,7 @@ class ProjectBuilder:
             )
 
         if completed.returncode != 0:
-            detail = self._command_output(completed.stdout, completed.stderr)
+            detail = self.command_output(completed.stdout, completed.stderr)
             message = (
                 "ARC3503 PROJECT_BUILD_FAILED: "
                 f"npm run build exited with {completed.returncode}."
@@ -87,7 +89,7 @@ class ProjectBuilder:
         return ProjectBuildResult(ok=True)
 
     @staticmethod
-    def _command_output(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
+    def command_output(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
         def normalize(value: str | bytes | None) -> str:
             if isinstance(value, bytes):
                 return value.decode("utf-8", errors="replace")

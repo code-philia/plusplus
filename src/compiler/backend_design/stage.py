@@ -45,20 +45,23 @@ class BackendDesignPass:
             model.set_usage_path(self.artifact_root / 'model_usage.jsonl')
 
     def compile(self, requirements, database):
+        # Stage: Backend design - validate input contracts =====================================
         if database.get('ir_kind') != 'er_model' or database.get('status') != 'RESOLVED':
             raise ValueError('Backend design requires a RESOLVED er_model.json')
         ir = {'ir_kind': 'backend_design', 'types': [], 'modules': []}
         children = children_by_id(requirements)
         order = [rid for rid in postorder(requirements) if not children[rid]]
         states, warnings = {}, []
+        # Process: Design each leaf on a transactional copy ====================================
         for rid in order:
             self.log.info('Leaf design: RUNNING', node_id=rid)
             trial = copy.deepcopy(ir)
             selected = []
             try:
                 node = requirements['nodes'][rid]
-                requirement = self._requirement(node, requirements['nodes'])
+                requirement = self.requirement(node, requirements['nodes'])
                 data = database_context(database, rid)
+                # Process: Design API, function, then database access contracts ================
                 for kind in ('API', 'FUNC', 'DB'):
                     if kind != 'API' and not selected:
                         break
@@ -91,7 +94,8 @@ class BackendDesignPass:
                     if kind == 'DB':
                         payload['upstream_api_contracts'] = [row for row in trial['modules']
                                                            if row['id'] in ancestor_ids and row['kind'] == 'API']
-                    trial, selected = self._decision(kind, rid, trial, selected, payload, database)
+                    trial, selected = self.decision(kind, rid, trial, selected, payload, database)
+                # Process: Validate the complete leaf before committing its design =============
                 errors = validate_ir(trial, database)
                 if errors:
                     raise ValueError('; '.join(errors))
@@ -103,6 +107,7 @@ class BackendDesignPass:
                 states[rid] = 'SKIPPED'
                 warnings.append(f'{rid}: rolled back leaf design after failed attempts: {exc}')
                 self.log.warning(warnings[-1], node_id=rid)
+        # Process: Publish backend IR and the design report ====================================
         result = BackendDesignResult(ir, states, warnings=warnings)
         write_json_atomic(self.root / 'backend_ir.json', ir)
         write_json_atomic(self.root / 'report.json', {'status': 'GENERATED_WITH_WARNINGS' if warnings else 'GENERATED',
@@ -110,7 +115,7 @@ class BackendDesignPass:
             'model_attempt': self.attempts, 'model_calls': self.sequence})
         return result
 
-    def _requirement(self, node, nodes):
+    def requirement(self, node, nodes):
         result = {key: copy.deepcopy(node[key]) for key in ('id', 'name', 'description', 'scenarios', 'pages') if key in node}
         # Visual stage stores analysis separately; attach only this leaf's reference evidence.
         cache_path = self.artifact_root / 'visual_cache.json'
@@ -129,7 +134,7 @@ class BackendDesignPass:
         result['ancestor_constraints'] = list(reversed(ancestors))
         return result
 
-    def _decision(self, kind, rid, base, upstream, payload, database):
+    def decision(self, kind, rid, base, upstream, payload, database):
         feedback, previous = [], None
         for attempt in range(self.attempts):
             self.log.info(f'{kind} design attempt {attempt + 1}/{self.attempts}', node_id=rid)
@@ -149,7 +154,7 @@ class BackendDesignPass:
                                     'conflict_contracts. Review them and return a corrected design using the same output format.',
                                     *conflicts]
                     else:
-                        candidate, selected = self._materialize(base, kind, rid, upstream, output, payload)
+                        candidate, selected = self.materialize(base, kind, rid, upstream, output, payload)
                         feedback = validate_ir(candidate, database)
                     if not feedback:
                         return candidate, selected
@@ -159,7 +164,7 @@ class BackendDesignPass:
         raise ValueError(f'{kind}: ' + '; '.join(feedback))
 
     @staticmethod
-    def _materialize(base, kind, rid, upstream, output, payload):
+    def materialize(base, kind, rid, upstream, output, payload):
         output = copy.deepcopy(output)
         for definition in output['new_types']:
             definition['schema'] = normalize_contract(definition['schema'])

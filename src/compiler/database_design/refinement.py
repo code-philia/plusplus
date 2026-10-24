@@ -48,11 +48,11 @@ def refine_er_model(
             "fields": {column["name"]: copy.deepcopy(column) for column in entity["fields"]},
         }
         for rid in entity["requirement_ids"]:
-            state._link_entity(rid, entity["key"])
+            state.link_entity(rid, entity["key"])
         for column in entity["fields"]:
             for rid in column["requirement_ids"]:
                 if column["origin"] == "REQUIREMENT":
-                    state._link_field(rid, entity["key"], column["name"])
+                    state.link_field(rid, entity["key"], column["name"])
     for relationship in er_model["relationships"]:
         for rid in relationship["requirement_ids"]:
             state.apply_relationships(rid, {"relationships": [relationship]}, errors)

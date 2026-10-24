@@ -101,6 +101,7 @@ class ValidationPreparationPass:
         self.root = root.expanduser().resolve()
 
     def generate(self, requirement_ir: dict[str, Any]) -> dict[str, str]:
+        # Stage: Validation preparation - validate startup prerequisites =======================
         if not isinstance(requirement_ir.get("environment", {}), dict):
             raise ValueError("ROOT.environment must be an object")
         environment = normalize_environment(requirement_ir.get("environment", {}))
@@ -119,8 +120,10 @@ class ValidationPreparationPass:
             raise ValueError("Validation startup requires backend/dist/server.js")
         paths = (START_PATH, RUNTIME_PATH, SEED_PATH, "backend/package.json", "frontend/index.html",
                  MARKER, ".arc/validation/environment.json")
+        # Process: Snapshot startup files for transactional preparation ========================
         originals = {path: (self.root / path).read_bytes() if (self.root / path).is_file() else None
                      for path in paths}
+        # Process: Generate validation startup artifacts or restore originals ==================
         try:
             (self.root / START_PATH).parent.mkdir(parents=True, exist_ok=True)
             (self.root / START_PATH).write_text(_start_source(environment), encoding="utf-8")

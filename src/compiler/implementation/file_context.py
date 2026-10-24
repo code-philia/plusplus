@@ -163,7 +163,7 @@ class FileContext:
             return path.startswith(('frontend/', 'shared/', 'tests/e2e/')) or path == 'tests/tdd/playwright.config.ts'
         return True
 
-    def _failed_test_context(self, evidence):
+    def failed_test_context(self, evidence):
         # Include failing regression tests even when owned by an earlier requirement.
         # Only known test files may be selected from untrusted runner output.
         failing_tests = set()
@@ -189,7 +189,7 @@ class FileContext:
         return failing_tests, regression_owners
 
     @staticmethod
-    def _is_editable_file(path, record, phase, test_targets):
+    def is_editable_file(path, record, phase, test_targets):
         is_test = path in test_targets or bool(record and record['kind'] == 'acceptance_test')
         if phase == 'test_generation':
             writable = path in test_targets
@@ -202,7 +202,7 @@ class FileContext:
             writable = False
         return writable
 
-    def _ancestor_constraints(self, parent):
+    def ancestor_constraints(self, parent):
         constraints = []
         seen = set()
         while parent in self.requirements['nodes'] and parent not in seen:
@@ -228,7 +228,7 @@ class FileContext:
             if recovered_backend:
                 source_paths.update(recovered_backend['file_paths'])
                 source_paths.add('backend/src/app.ts')
-        failing_tests, regression_owners = self._failed_test_context(evidence)
+        failing_tests, regression_owners = self.failed_test_context(evidence)
         editable = {}
         readonly = {}
         records = {}
@@ -236,7 +236,7 @@ class FileContext:
         writable_paths = set()
         for path in sorted(source_paths | visible_tests):
             row = self.catalog.get(path)
-            writable = self._is_editable_file(path, row, phase, test_targets)
+            writable = self.is_editable_file(path, row, phase, test_targets)
             text = read_source(self.root, path)
             records[path] = {'content': text, 'exists': (self.root / path).is_file()}
             if writable:
@@ -272,7 +272,7 @@ class FileContext:
             if not reference and page_references:
                 reference = page_references[0]['reference']
             page['analysis'] = visual_cache.get(reference, {}).get('analysis')
-        requirement['ancestor_constraints'] = self._ancestor_constraints(requirement.get('parent_id'))
+        requirement['ancestor_constraints'] = self.ancestor_constraints(requirement.get('parent_id'))
         contracts = [copy.deepcopy(contract) for path in sorted(source_paths) if path in self.catalog
                      for contract in self.catalog[path]['contracts'] if rid in contract.get('reqs', []) or path in session.active]
         if phase == 'frontend_implementation':

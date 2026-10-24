@@ -53,14 +53,17 @@ def create_statement(table):
 
 class DatabaseLoweringPass:
     def compile(self, schema, output_dir, *, dry_run=False):
+        # Stage: Database lowering - validate the resolved schema ==============================
         if schema.get('ir_kind') != 'database_schema' or schema.get('status') != 'RESOLVED':
             raise ValueError('Database lowering requires a RESOLVED SchemaIR')
+        # Process: Emit SQL runtime sources and preserve the existing seed =====================
         files = runtime_sources([create_statement(table) for table in schema['tables']])
         # The seed is cumulative implementation code, not a fresh placeholder on every lowering.
         from pathlib import Path
         seed = Path(output_dir) / SEED_PATH
         if seed.is_file():
             files[SEED_PATH] = seed.read_text(encoding='utf-8')
+        # Process: Assemble the lowering plan and publish owned files ==========================
         plan = {'ir_kind': 'database_lowering', 'dialect': 'sqlite',
                 'tables': [{'name': table['name'], 'reqs': table['requirement_ids'],
                             'file_path': 'backend/src/db/initialize.ts',

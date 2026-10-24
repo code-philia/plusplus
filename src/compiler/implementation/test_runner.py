@@ -144,21 +144,24 @@ export default defineConfig({
 
     def run(self, files, *, port=33100, red=False):
         with tempfile.TemporaryDirectory(prefix='arc-test-run-') as directory:
-            return self._run(files, port=port, red=red, artifact=Path(directory))
+            return self.run_tests_in_artifact(files, port=port, red=red, artifact=Path(directory))
 
-    def _run(self, files, *, port, red, artifact):
+    def run_tests_in_artifact(self, files, *, port, red, artifact):
         self.prepare()
         results = []
+        # Process: Partition acceptance tests into unit and browser runs =======================
         unit = [path for path in files if not path.startswith('tests/e2e/')]
         browser = [path for path in files if path.startswith('tests/e2e/')]
+        # Process: Run unit tests and read their structured report =============================
         if unit:
             report = artifact / ('vitest-' + uuid.uuid4().hex + '.json')
             result = self.execute(['node', self.tool('vitest', 'vitest.mjs'), 'run', '--config',
                 'tests/tdd/vitest.config.ts', '--reporter=json', '--outputFile=' + str(report), *unit],
                 environment={'DATABASE_URL': ':memory:', 'NODE_ENV': 'test'})
-            self._test_report(result, report, 'vitest', len(unit))
+            self.test_report(result, report, 'vitest', len(unit))
             result['test_files'] = unit
             results.append(result)
+        # Process: Build the application before browser acceptance =============================
         if browser:
             for command in (['node', self.tool('typescript', 'bin/tsc'), '-p', 'backend/tsconfig.json'],
                             ['node', self.tool('vite', 'bin/vite.js'), 'build']):
@@ -168,16 +171,17 @@ export default defineConfig({
                     return results
             db_path = str(artifact / ('run-' + uuid.uuid4().hex + '.db'))
             report = artifact / ('playwright-' + uuid.uuid4().hex + '.json')
-            result = self._browser_run(browser, port, db_path, report, red)
+            result = self.browser_run(browser, port, db_path, report, red)
             result['test_files'] = browser
             results.append(result)
         return results
 
-    def _browser_run(self, browser, port, db_path, report, red):
+    def browser_run(self, browser, port, db_path, report, red):
+        # Process: Own application startup, browser execution, and cleanup =====================
         # Own the server directly: Playwright webServer may start a detached process group.
         # Never kill a preexisting listener belonging to another compilation/application.
         try:
-            selected_port = self._select_browser_port(port)
+            selected_port = self.select_browser_port(port)
         except OSError as exc:
             return {'status': 'FAILED', 'failure_kind': 'infrastructure', 'error': str(exc)}
         environment = {'DATABASE_URL': db_path, 'PLAYWRIGHT_JSON_OUTPUT_FILE': str(report),
@@ -192,7 +196,7 @@ export default defineConfig({
                 server = subprocess.Popen(['node', 'backend/dist/server.js'], cwd=self.root,
                     env=utf8_environment({**os.environ, **environment}), stdout=output, stderr=subprocess.STDOUT,
                     **process_group_kwargs())
-                ready = self._wait_for_application(server, selected_port)
+                ready = self.wait_for_application(server, selected_port)
                 argv = ['node', self.tool('@playwright/test', 'cli.js'), 'test', '--config',
                         'tests/tdd/playwright.config.ts', '--reporter=json']
                 # RED needs an observed failure, not six sequential locator timeouts.
@@ -201,7 +205,7 @@ export default defineConfig({
                 limit = max(90, int(os.environ.get('ARC_TDD_BROWSER_TIMEOUT_SECONDS', '600')))
                 argv.append('--global-timeout=' + str(limit * 1000))
                 result = self.execute(argv + browser, environment=environment, timeout=limit + 30)
-                self._test_report(result, report, 'playwright', len(browser))
+                self.test_report(result, report, 'playwright', len(browser))
                 result['server_port'] = selected_port
                 if result['status'] != 'PASSED':
                     result['application_output'] = server_log.read_text(encoding='utf-8', errors='replace')[-18000:]
@@ -222,7 +226,7 @@ export default defineConfig({
                     server.wait(timeout=5)
 
     @staticmethod
-    def _select_browser_port(port):
+    def select_browser_port(port):
         # Release the probe socket before Node starts; never stop an existing listener.
         with socket.socket() as reservation:
             try:
@@ -233,7 +237,7 @@ export default defineConfig({
         return selected_port
 
     @staticmethod
-    def _wait_for_application(server, selected_port):
+    def wait_for_application(server, selected_port):
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if server.poll() is not None:
@@ -248,7 +252,7 @@ export default defineConfig({
         else:
             raise ValueError('Test application startup timed out')
 
-    def _test_report(self, result, path, runner, expected_files):
+    def test_report(self, result, path, runner, expected_files):
         read_test_report(self.root, result, path, runner, expected_files)
 
 
