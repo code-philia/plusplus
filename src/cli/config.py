@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from colorama import Fore, Style
+from utils.environment import environment_file
 
 def check_config() -> dict[str, Any]:
     """
@@ -66,9 +67,9 @@ def check_config() -> dict[str, Any]:
         warnings.append(f"ARC_STRUCTURED_OUTPUT_RETRY_COUNT must be an integer, got: {retry_count}")
 
     # Check .env file presence
-    env_file = Path(".env")
+    env_file = environment_file()
     if not env_file.exists():
-        warnings.append("No .env file found in current directory (copy .env_example to .env)")
+        warnings.append(f"No .env file found at {env_file} (copy .env_example to .env)")
     else:
         info.append(f"Configuration loaded from {env_file.resolve()}")
 

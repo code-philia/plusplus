@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-arc = "main:main"
+arc = "cli.commands:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -24,10 +24,13 @@ class FrontendLoweringPolicy(LoweringPolicy):
 
 
 class FrontendLoweringStage(Stage[FrontendLoweringOutput]):
-    def __init__(self, inputs: FrontendLoweringInput, model, budgets, *, runner=None):
+    def __init__(self, inputs: FrontendLoweringInput, model, budgets, *, runner=None,
+                 component_depth=2, min_nodes=4):
         super().__init__('frontend_lowering', runner=runner)
         self.inputs, self.model, self.budgets = inputs, model, budgets
+        self.component_depth, self.min_nodes = component_depth, min_nodes
 
     async def _execute(self):
-        policy = FrontendLoweringPolicy(self.inputs, FrontendLoweringPass())
+        policy = FrontendLoweringPolicy(self.inputs,
+            FrontendLoweringPass(component_depth=self.component_depth, min_nodes=self.min_nodes))
         return LoweringWorkflow(self.inputs, policy, self.model, self.budgets).run(FrontendLoweringOutput)

@@ -1,5 +1,6 @@
 """Hash-checked, transactional whole-file edits, including creation of assigned test files."""
 import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from .tools import IndeterminateToolCall
@@ -26,6 +27,8 @@ def source_path(root, relative):
     path = (root / relative).resolve()
     if not path.is_relative_to(root) or any(part.casefold() == '.arc' for part in path.relative_to(root).parts[:1]):
         raise ValueError(f'Out-of-workspace source: {relative}')
+    if path != Path(os.path.abspath(root / relative)):
+        raise ValueError(f'Linked source paths are not allowed: {relative}')
     return path
 
 

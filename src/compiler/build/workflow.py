@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from agent.tools import IndeterminateToolCall
 
 from compiler.stage_repair import repair_gate
 from compiler.stages import Stage, StageResult, StageStatus
@@ -33,6 +34,8 @@ class BuildStage(Stage[BuildOutput]):
             try:
                 evidence = repair_gate(self.model, self.output_root, 'build', self.check, evidence,
                                        budgets=self.budgets)
+            except IndeterminateToolCall:
+                raise
             except Exception as exc:
                 errors.append(str(exc))
         if not evidence['ok']:

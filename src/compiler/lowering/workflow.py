@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from agent.tools import IndeterminateToolCall
 
 from compiler.preprocessing.queries import leaf_ids
 from compiler.stages import StageResult, StageStatus
@@ -81,6 +82,8 @@ class LoweringWorkflow:
             try:
                 evidence = repair_gate(self.model, output, name + '_lowering', self.check, evidence,
                                        contracts=effective, budgets=self.budgets)
+            except IndeterminateToolCall:
+                raise
             except Exception as exc:
                 self.log.warning(f'{name}: lowering repair unavailable; using recovery scaffolding: {exc}')
         if not evidence['ok']:

@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from agent.tools import IndeterminateToolCall
 
 from compiler.database_design.stage import DatabasePassResult
 from compiler.backend_design.stage import BackendDesignResult
@@ -119,6 +120,8 @@ class ImplementationStage(Stage[ImplementationOutput]):
             if not result.ok or failed:
                 raise ValueError('; '.join(result.errors) or 'Requirements not implemented: ' + ', '.join(failed))
             warnings = tuple(result.warnings)
+        except IndeterminateToolCall:
+            raise
         except Exception as exc:
             return StageResult(StageStatus.DEGRADED, ImplementationOutput(states, failed),
                                errors=(str(exc),), artifact=path)

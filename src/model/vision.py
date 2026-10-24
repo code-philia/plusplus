@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
-from dotenv import load_dotenv
+from utils.environment import ensure_dotenv_loaded
 from openai import OpenAI
 from .logging import log_design_call, logged_completion
 from .client import completion_request_kwargs, record_model_usage, response_format_unavailable
@@ -56,8 +56,7 @@ class VisualModel:
 
     @classmethod
     def from_env(cls) -> "VisualModel":
-        env_file = os.environ.get("ARC_ENV_FILE", "").strip()
-        load_dotenv(env_file or ".env", override=False, encoding="utf-8-sig")
+        ensure_dotenv_loaded()
         return cls(
             model=os.environ.get("VISUAL_MODEL", "").strip()
             or os.environ.get("MODEL", "").strip(),

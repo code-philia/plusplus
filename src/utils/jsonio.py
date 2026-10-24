@@ -21,6 +21,13 @@ def write_json_atomic(path: Path, payload: Any) -> None:
     tmp_path.replace(path)
 
 
+def read_json_object(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding='utf-8-sig'))
+    if not isinstance(payload, dict):
+        raise ValueError(f'Expected a JSON object: {path}')
+    return payload
+
+
 def read_json(path: Path, default: Any = None) -> Any:
     """Read JSON while preserving the caller's expected fallback shape."""
 

@@ -7,21 +7,10 @@ import time
 from pathlib import Path
 from compiler import CompilationRequest, Compiler
 from utils.encoding import configure_utf8_console
+from utils.environment import ensure_dotenv_loaded
+from compiler.preprocessing.paths import locate_requirement_file
 
 
-def ensure_dotenv_loaded() -> None:
-    # Keep the script-facing import path while configuration lives outside the CLI.
-    from utils.environment import ensure_dotenv_loaded
-    ensure_dotenv_loaded()
-
-
-def locate_requirement_file(input_path: str) -> str:
-    # Resolve requirement paths using the shared preprocessing helper.
-    from compiler.preprocessing.paths import locate_requirement_file
-    return locate_requirement_file(input_path)
-
-
-# Keep script-facing aliases until the standalone scripts adopt the public names.
 _ensure_dotenv_loaded = ensure_dotenv_loaded
 _locate_requirement_file = locate_requirement_file
 

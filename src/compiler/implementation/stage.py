@@ -19,7 +19,7 @@ from .file_context import FileContext
 from .working_context import WorkingContext
 from agent.files import read_source, restore
 from agent.runtime import AgentRuntime, RuntimeBudgets, RuntimeStatus
-from agent.tools import JsonActionAdapter
+from agent.tools import IndeterminateToolCall, JsonActionAdapter
 from .agent_policy import ImplementationAgentPolicy
 from .test_runner import TestRunner, passed
 
@@ -184,6 +184,8 @@ class NodeTDDOrchestrator:
                 self.log.info('Leaf TDD: COMPLETED', node_id=rid)
                 completed_tests.extend(targets)
                 self.report(states, errors, warnings)
+            except IndeterminateToolCall:
+                raise
             except EnvironmentBlocked as exc:
                 states[rid] = 'BLOCKED_ENVIRONMENT'
                 for remaining in scheduled:
