@@ -29,7 +29,7 @@ from .contracts import (
 )
 from .refinement import refine_er_model
 from .state import DatabaseSchemaState
-from .validation import _normalize_decision_context
+from .decision_normalization import _normalize_decision_context
 
 
 @dataclass(slots=True)

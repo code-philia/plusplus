@@ -16,7 +16,7 @@ from typing import Any
 
 from ..ir.database import ERModelIR, SchemaIR, table_constraints
 from .state import DatabaseSchemaState
-from .validation import logical_literal_valid
+from .field_validation import logical_literal_valid
 
 
 @dataclass(slots=True)

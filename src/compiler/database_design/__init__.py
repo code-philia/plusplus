@@ -14,7 +14,7 @@ from .queries import database_traceability, schema_for_requirement
 from .refinement import SchemaRefinementResult, refine_er_model, refine_schema, validate_schema_ir
 from .stage import DatabasePassResult, DatabaseSchemaPass
 from .state import DatabaseSchemaState
-from .validation import validate_database_schema
+from .schema_validation import validate_database_schema
 
 __all__ = [
     "ENTITY_DECISION_SCHEMA",
