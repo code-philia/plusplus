@@ -15,10 +15,9 @@ from utils.jsonio import read_json, write_json_atomic
 from utils.logging import SynchronousLog
 from .context import (region, related_apis, state_context, handler_context, tree_summary,
                       select_types, expand_api_context)
-from .contracts import PROMPTS, SCHEMAS, VISUAL_FIELDS, VISUAL_ANALYSIS_VERSION
+from .contracts import PROMPTS, SCHEMAS
 from .delta import apply_ui, apply_data, apply_interaction, make_ui
 from .validation import ui_index, validate_ir
-from .visual import image_evidence
 
 
 @dataclass
@@ -35,7 +34,8 @@ class FrontendDesignResult:
 
 
 class FrontendDesignPass:
-    def __init__(self, model, artifact_root: Path, *, visual_model=None, reference_root: Path | None = None):
+    def __init__(self, model, artifact_root: Path, *, visual_model=None, reference_root: Path | None = None,
+                 visual_result=None):
         self.model = model
         self.visual_model = visual_model
         self.artifact_root = Path(artifact_root)
@@ -44,13 +44,15 @@ class FrontendDesignPass:
         self.visual_log = SynchronousLog('VisualAnalysis', workspace_root=self.artifact_root.parent)
         self.reference_root = reference_root
         self.cache_path = self.artifact_root / 'visual_cache.json'
-        self.visual_cache = read_json(self.cache_path, {})
-        self.visual_failures = {}
+        self.visual_result = visual_result
+        self.visual_cache = copy.deepcopy(visual_result.cache) if visual_result else read_json(self.cache_path, {})
+        self.visual_failures = dict(visual_result.failures) if visual_result else {}
+        self._visual_analyzer = None
         try:
             self.attempts = max(1, int(os.getenv('MODEL_ATTEMPT', '5')))
         except ValueError:
             self.attempts = 5
-        self.sequence = 0
+        self.sequence = visual_result.model_calls if visual_result else 0
         if hasattr(model, 'set_usage_path'):
             model.set_usage_path(self.artifact_root / 'model_usage.jsonl')
 
@@ -220,6 +222,13 @@ class FrontendDesignPass:
         return self.invoke(phase, rid, payload, accept)
 
     def invoke(self, phase, rid, payload, accept, image_data_url=None):
+        if phase == 'visual':
+            analyzer = self.legacy_visual()
+            before = analyzer.sequence
+            try:
+                return analyzer.invoke(rid, payload, accept, image_data_url)
+            finally:
+                self.sequence += analyzer.sequence - before
         feedback, previous = [], None
         for attempt in range(1, self.attempts + 1):
             logger = self.visual_log if phase == 'visual' else self.log
@@ -231,15 +240,7 @@ class FrontendDesignPass:
             try:
                 kwargs = {'schema_name': 'frontend_design_' + phase, 'instructions': PROMPTS[phase],
                           'input_payload': request, 'output_schema': SCHEMAS[phase]}
-                if phase == 'visual':
-                    if self.visual_model is None:
-                        from model.vision import VisualModel
-                        self.visual_model = VisualModel.from_env()
-                    if hasattr(self.visual_model, 'set_usage_path'):
-                        self.visual_model.set_usage_path(self.artifact_root / 'model_usage.jsonl')
-                    output = self.visual_model.generate_visual_json(**kwargs, image_data_url=image_data_url)
-                else:
-                    output = self.model.generate_json(**kwargs)
+                output = self.model.generate_json(**kwargs)
                 previous = output
                 feedback = shape_errors(output, SCHEMAS[phase])
                 if not feedback:
@@ -251,28 +252,26 @@ class FrontendDesignPass:
         raise ValueError(f'{phase}: exhausted {self.attempts} attempts: ' + '; '.join(feedback))
 
     def analyze(self, name, reference, rid):
-        digest, image = image_evidence(reference, self.reference_root)
-        cached = self.visual_cache.get(reference)
-        if (isinstance(cached, dict) and cached.get('sha256') == digest
-                and cached.get('analysis_version') == VISUAL_ANALYSIS_VERSION
-                and isinstance(cached.get('analysis'), str) and cached['analysis'].strip()):
-            self.visual_log.info(f'Cache hit: {name} ({reference})', node_id=rid)
-            return copy.deepcopy(cached)
-        self.visual_log.info(f'Analyzing: {name} ({reference})', node_id=rid)
-        def accept(output):
-            for field in VISUAL_FIELDS:
-                if not output[field] or any(not item.strip() for item in output[field]):
-                    raise ValueError(f'Visual analysis must include nonempty {field}')
-            return output
-        details = self.invoke('visual', rid, {'current_task': {'page': {'name': name, 'reference': reference}}}, accept, image)
-        analysis = '\n\n'.join(field + ':\n' + '\n'.join('- ' + item for item in details[field])
-                               for field in VISUAL_FIELDS)
-        record = {'reference': reference, 'sha256': digest, 'analysis_version': VISUAL_ANALYSIS_VERSION,
-                  'analysis': analysis}
-        self.visual_cache[reference] = record
-        write_json_atomic(self.cache_path, self.visual_cache)
-        self.visual_log.info(f'Analysis completed: {name} ({reference})', node_id=rid)
-        return copy.deepcopy(record)
+        if self.visual_result is not None:
+            normalized = reference.replace('\\', '/')
+            if normalized in self.visual_failures:
+                raise ValueError(self.visual_failures[normalized])
+            if normalized not in self.visual_cache:
+                raise ValueError(f'Visual evidence unavailable: {reference}')
+            return copy.deepcopy(self.visual_cache[normalized])
+        analyzer = self.legacy_visual()
+        before = analyzer.sequence
+        try:
+            return analyzer.analyze(name, reference, rid)
+        finally:
+            self.sequence += analyzer.sequence - before
+
+    def legacy_visual(self):
+        if self._visual_analyzer is None:
+            from compiler.visual_analysis import VisualAnalyzer
+            self._visual_analyzer = VisualAnalyzer(self.artifact_root, self.reference_root, self.visual_model)
+            self._visual_analyzer.cache = self.visual_cache
+        return self._visual_analyzer
 
     def save(self, ir, page_states):
         write_json_atomic(self.root / 'frontend_ir.json', ir)

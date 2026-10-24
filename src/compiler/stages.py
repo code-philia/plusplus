@@ -8,6 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+from threading import Event
 from typing import Generic, TypeVar
 
 
@@ -28,6 +30,14 @@ class StageResult(Generic[Payload]):
     status: StageStatus
     value: Payload | None = None
     diagnostics: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    artifact: Path | None = None
+
+    def require_value(self) -> Payload:
+        if self.value is None:
+            raise RuntimeError(f'Stage has no usable payload: {self.status.value}')
+        return self.value
 
     def __post_init__(self) -> None:
         if self.status not in {
@@ -49,8 +59,9 @@ class StageRecord:
 
 
 class StageRunner:
-    def __init__(self, records: list[StageRecord] | None = None) -> None:
+    def __init__(self, records: list[StageRecord] | None = None, *, observer=None) -> None:
         self.records = records if records is not None else []
+        self.observer = observer
 
     async def run(self, stage: Stage[Payload]) -> StageResult[Payload]:
         if stage._started:
@@ -59,29 +70,43 @@ class StageRunner:
         record = StageRecord(stage.name)
         self.records.append(record)
         started = time.monotonic()
+        result = None
+        failure = None
         try:
+            if self.observer is not None:
+                await self.observer.started(stage, record)
             result = await stage._execute()
             if not isinstance(result, StageResult):
+                result = None
                 raise TypeError('Stage execution must return StageResult')
             record.status = result.status
-            record.diagnostics = result.diagnostics
+            record.diagnostics = result.diagnostics + result.errors + result.warnings
             return result
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            failure = exc
             record.status = StageStatus.CANCELLED
             raise
         except BaseException as exc:
+            failure = exc
             record.status = StageStatus.FAILED
             record.diagnostics = (str(exc),)
             raise
         finally:
             record.duration_ms = int((time.monotonic() - started) * 1000)
+            if self.observer is not None:
+                await self.observer.finished(stage, record, result, failure)
 
 
 class Stage(ABC, Generic[Payload]):
-    def __init__(self, name: str, *, runner: StageRunner | None = None) -> None:
+    warnings_status = 'COMPLETED'
+
+    def __init__(self, name: str, *, runner: StageRunner | None = None,
+                 reported: bool = True, warning_target: str | None = None) -> None:
         self.name = name
         self._runner = runner if runner is not None else StageRunner()
         self._started = False
+        self.reported = reported
+        self.warning_target = warning_target
 
     async def run(self) -> StageResult[Payload]:
         return await self._runner.run(self)
@@ -93,11 +118,20 @@ class Stage(ABC, Generic[Payload]):
 class BackgroundStage(Stage[Payload]):
     """Own one synchronous worker; cancellation waits for in-flight work to settle."""
 
+    def __init__(self, name: str, *, runner: StageRunner | None = None) -> None:
+        super().__init__(name, runner=runner)
+        self.cancel_requested = Event()
+        self.ready = asyncio.Event()
+
     async def _execute(self) -> StageResult[Payload]:
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='arc-stage')
         future = asyncio.get_running_loop().run_in_executor(executor, copy_context().run, self._work)
+        self.ready.set()
         try:
             return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            self.cancel_requested.set()
+            raise
         finally:
             try:
                 while not future.done():

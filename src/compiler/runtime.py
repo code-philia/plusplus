@@ -39,6 +39,17 @@ class CompilerDependencies:
         [CompilationRequest, CompilationState, CompilerDependencies], CompilationPipeline
     ] | None = None
 
+    def load_budgets(self) -> ExecutionBudgets:
+        from utils.environment import ensure_dotenv_loaded
+        ensure_dotenv_loaded()
+        return ExecutionBudgets.from_environment()
+
+    def model_client(self):
+        if self.model is not None:
+            return self.model
+        from model.client import Model
+        return Model.from_env()
+
 
 class WorkspaceLeases:
     def __init__(self) -> None:

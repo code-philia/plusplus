@@ -12,10 +12,11 @@ from model.client import describe_model_error
 from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
 from .contracts import PROMPTS, SCHEMAS
-from .context import database_context, retrieve, module_index, expand_module_context
+from .context import database_context, expand_module_context
 from compiler.ir.shape_validation import shape_errors
 from compiler.ir.type_contracts import parse_contract, normalize_contract
 from .validation import validate_ir
+from .tasks import APIDesignTask, FunctionDesignTask, DatabaseAccessDesignTask, BackendTaskInput
 
 
 @dataclass
@@ -31,9 +32,10 @@ class BackendDesignResult:
 
 
 class BackendDesignPass:
-    def __init__(self, model, artifact_root: Path):
+    def __init__(self, model, artifact_root: Path, *, visual_result=None):
         self.model = model
         self.artifact_root = Path(artifact_root)
+        self.visual_cache = visual_result.cache if visual_result is not None else None
         self.root = self.artifact_root / 'design/backend'
         self.log = SynchronousLog('BackendDesignPass', workspace_root=self.artifact_root.parent)
         try:
@@ -61,39 +63,12 @@ class BackendDesignPass:
                 requirement = self.requirement(node, requirements['nodes'])
                 data = database_context(database, rid)
                 # Process: Design API, function, then database access contracts ================
-                for kind in ('API', 'FUNC', 'DB'):
-                    if kind != 'API' and not selected:
+                for task_type in (APIDesignTask, FunctionDesignTask, DatabaseAccessDesignTask):
+                    if task_type is not APIDesignTask and not selected:
                         break
-                    selected_upstream = [row for row in trial['modules'] if row['id'] in selected]
-                    candidates = retrieve(trial, kind, requirement, data, database.get('access', {}))
-                    # Existing lower contracts are immutable reference targets, not new designs.
-                    reference_ids = {row['id'] for row in candidates + selected_upstream}
-                    by_id = {row['id']: row for row in trial['modules']}
-                    pending = list(reference_ids)
-                    while pending:
-                        for target in by_id[pending.pop()]['callees']:
-                            if target not in reference_ids:
-                                reference_ids.add(target)
-                                pending.append(target)
-                    references = [row for row in trial['modules'] if row['id'] in reference_ids and row['kind'] in
-                                  ({'FUNC', 'DB'} if kind == 'FUNC' else {'DB'} if kind == 'DB' else set())]
-                    # DB design needs enclosing transport contracts as well as direct FUNC callers.
-                    ancestor_ids = set(selected)
-                    pending = list(ancestor_ids)
-                    while pending:
-                        for caller in by_id[pending.pop()]['callers']:
-                            if caller not in ancestor_ids:
-                                ancestor_ids.add(caller)
-                                pending.append(caller)
-                    payload = {'current_task': {'requirement': requirement, 'data': data},
-                               'upstream_modules': selected_upstream, 'reuse_candidates': candidates,
-                               'existing_types': trial['types'],
-                               'reference_catalog': references,
-                               'module_index': module_index(trial['modules'])}
-                    if kind == 'DB':
-                        payload['upstream_api_contracts'] = [row for row in trial['modules']
-                                                           if row['id'] in ancestor_ids and row['kind'] == 'API']
-                    trial, selected = self.decision(kind, rid, trial, selected, payload, database)
+                    task = task_type(BackendTaskInput(rid, trial, selected, requirement, data, database), self.decision)
+                    outcome = task.run()
+                    trial, selected = outcome.candidate, outcome.selected
                 # Process: Validate the complete leaf before committing its design =============
                 errors = validate_ir(trial, database)
                 if errors:
@@ -118,7 +93,9 @@ class BackendDesignPass:
         result = {key: copy.deepcopy(node[key]) for key in ('id', 'name', 'description', 'scenarios', 'pages') if key in node}
         # Visual stage stores analysis separately; attach only this leaf's reference evidence.
         cache_path = self.artifact_root / 'visual_cache.json'
-        cache = json.loads(cache_path.read_text(encoding='utf-8-sig')) if cache_path.is_file() else {}
+        cache = self.visual_cache
+        if cache is None:
+            cache = json.loads(cache_path.read_text(encoding='utf-8-sig')) if cache_path.is_file() else {}
         for page in result.get('pages', []):
             reference = page.get('reference')
             normalized = str(reference or '').replace('\\', '/')

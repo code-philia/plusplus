@@ -24,7 +24,7 @@ class PreprocessingOutput:
 
 class PreprocessingStage(Stage[PreprocessingOutput]):
     def __init__(self, request: CompilationRequest, *, runner: StageRunner | None = None) -> None:
-        super().__init__('preprocessing', runner=runner)
+        super().__init__('preprocessing', runner=runner, reported=False)
         self.request = request
 
     async def _execute(self) -> StageResult[PreprocessingOutput]:
@@ -60,13 +60,20 @@ class InitializationOutput:
 
 
 class ProjectInitializationStage(Stage[InitializationOutput]):
-    def __init__(self, inputs: InitializationInput, *, runner: StageRunner | None = None) -> None:
+    def __init__(self, inputs: InitializationInput, *, runner: StageRunner | None = None,
+                 continue_on_error: bool = False) -> None:
         super().__init__('project_initialization', runner=runner)
         self.inputs = inputs
+        self.continue_on_error = continue_on_error
 
     async def _execute(self) -> StageResult[InitializationOutput]:
         from .project_initialization import ProjectInitializer
-        initializer = ProjectInitializer(self.inputs.output_root, web_port=self.inputs.web_port)
-        report = initializer.initialize(install_dependencies=self.inputs.install_dependencies)
-        return StageResult(StageStatus.SUCCEEDED, InitializationOutput(
-            report, self.inputs.output_root / '.arc/project/report.json'))
+        try:
+            initializer = ProjectInitializer(self.inputs.output_root, web_port=self.inputs.web_port)
+            report = initializer.initialize(install_dependencies=self.inputs.install_dependencies)
+        except Exception as exc:
+            if not self.continue_on_error:
+                raise
+            return StageResult(StageStatus.FAILED, errors=(str(exc),))
+        path = self.inputs.output_root / '.arc/project/report.json'
+        return StageResult(StageStatus.SUCCEEDED, InitializationOutput(report, path), artifact=path)

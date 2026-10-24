@@ -59,8 +59,8 @@ class Compiler:
             with workspace_leases.claim(output), run_scope(self.state.run_id):
                 factory = self.dependencies.pipeline_factory
                 if factory is None:
-                    from .pipeline import _BusinessPipeline
-                    pipeline = _BusinessPipeline(request, self.state, self.dependencies)
+                    from .pipeline import CompilerPipeline
+                    pipeline = CompilerPipeline(request, self.state, self.dependencies)
                 else:
                     pipeline = factory(request, self.state, self.dependencies)
                 result = await pipeline.run()
