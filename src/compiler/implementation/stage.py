@@ -1,5 +1,6 @@
 """Leaf TDD loop with direct editable scope and requirement-grounded test repair."""
 from __future__ import annotations
+
 import copy
 import os
 import re
@@ -7,11 +8,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from compiler.context.model_calls import invoke_model
+from .presentation import implementation_metadata
 from compiler.budgets import positive_limit as budget
 from compiler.ir.backend import BackendIR
 from compiler.ir.database import ERModelIR
 from compiler.ir.frontend import FrontendIR
-from compiler.ir.shape_validation import shape_errors
+from model.schema_validation import shape_errors
 from compiler.preprocessing.queries import ancestor_ids, leaf_ids
 from compiler.lowering.planning import slug, token
 from model.client import describe_model_error
@@ -336,7 +340,7 @@ class NodeTDDOrchestrator:
                 patch_snapshot = {}
                 output = None
                 try:
-                    output = self.model.generate_json(schema_name='tdd_' + phase, instructions=PROMPTS[phase],
+                    output = invoke_model(self.model, implementation_metadata(phase), schema_name='tdd_' + phase, instructions=PROMPTS[phase],
                                                        input_payload=payload, output_schema=SCHEMA)
                     # A known transport metadata echo carries no application semantics.
                     # The raw response remains in model_logs; other fields remain errors.

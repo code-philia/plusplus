@@ -1,5 +1,6 @@
 """Atomic, leaf-only API -> FUNC -> DB design with validated repair attempts."""
 from __future__ import annotations
+
 import copy
 import json
 import os
@@ -7,13 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .presentation import backend_metadata
+
 from compiler.preprocessing.queries import ancestor_ids, leaf_ids
-from model.client import describe_model_error
 from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
 from .contracts import PROMPTS, SCHEMAS
 from .context import database_context, expand_module_context
-from compiler.ir.shape_validation import shape_errors
+from model.structured_task import TaskRejected
+from compiler.context.structured import DesignDecision
 from compiler.ir.type_contracts import parse_contract, normalize_contract
 from .validation import validate_ir
 from .tasks import APIDesignTask, FunctionDesignTask, DatabaseAccessDesignTask, BackendTaskInput
@@ -107,33 +110,26 @@ class BackendDesignPass:
         return result
 
     def decision(self, kind, rid, base, upstream, payload, database):
-        feedback, previous = [], None
-        for attempt in range(self.attempts):
-            self.log.info(f'{kind} design attempt {attempt + 1}/{self.attempts}', node_id=rid)
-            request = copy.deepcopy(payload)
-            if feedback:
-                request['validation_feedback'], request['previous_output'] = feedback, previous
-            self.sequence += 1
-            try:
-                output = self.model.generate_json(schema_name='backend_' + kind.lower(), instructions=PROMPTS[kind],
-                                                 input_payload=request, output_schema=SCHEMAS[kind])
-                previous = output
-                feedback = shape_errors(output, SCHEMAS[kind])
-                if not feedback:
-                    added, conflicts = expand_module_context(base, kind, payload, output)
-                    if added:
-                        feedback = [f'Loaded exact existing contracts {added} into reuse_candidates/reference_catalog/'
-                                    'conflict_contracts. Review them and return a corrected design using the same output format.',
-                                    *conflicts]
-                    else:
-                        candidate, selected = self.materialize(base, kind, rid, upstream, output, payload)
-                        feedback = validate_ir(candidate, database)
-                    if not feedback:
-                        return candidate, selected
-            except Exception as exc:
-                feedback = [describe_model_error(exc)]
-            self.log.warning(f'{kind} validation rejected: ' + '; '.join(feedback), node_id=rid)
-        raise ValueError(f'{kind}: ' + '; '.join(feedback))
+        def accept(output):
+            added, conflicts = expand_module_context(base, kind, payload, output)
+            if added:
+                raise TaskRejected([
+                    f'Loaded exact existing contracts {added} into reuse_candidates/reference_catalog/'
+                    'conflict_contracts. Review them and return a corrected design using the same output format.',
+                    *conflicts])
+            candidate, selected = self.materialize(base, kind, rid, upstream, output, payload)
+            errors = validate_ir(candidate, database)
+            if errors:
+                raise TaskRejected(errors)
+            return candidate, selected
+
+        return DesignDecision(attempts=self.attempts, schema=SCHEMAS[kind], model=self.model,
+            metadata=backend_metadata(kind), instructions=PROMPTS[kind], payload=payload,
+            accept=accept, logger=self.log, requirement_id=rid, label=kind,
+            on_attempt=self.count_call, failure_prefix=f'{kind}: ').run()
+
+    def count_call(self):
+        self.sequence += 1
 
     @staticmethod
     def materialize(base, kind, rid, upstream, output, payload):

@@ -7,17 +7,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from compiler.backend_design.context import database_context, module_index
-from compiler.ir.shape_validation import shape_errors
+from .presentation import frontend_metadata
+
+from compiler.context.structured import DesignDecision
 from compiler.preprocessing.queries import ancestor_ids, leaf_ids
-from model.client import describe_model_error
 from utils.jsonio import read_json, write_json_atomic
 from utils.logging import SynchronousLog
-from .context import (region, related_apis, state_context, handler_context, tree_summary,
-                      select_types, expand_api_context)
+from .context import select_types, expand_api_context
+from .tasks import FrontendTaskInput, UIDesignTask, DataDesignTask, InteractionDesignTask
 from .contracts import PROMPTS, SCHEMAS
 from .delta import apply_ui, apply_data, apply_interaction, make_ui
-from .validation import ui_index, validate_ir
+from .validation import validate_ir
 
 
 @dataclass
@@ -99,76 +99,14 @@ class FrontendDesignPass:
                     else:
                         known = next((row for row in trial_pages if row['name'] == page['name']), None)
                         page['analysis'] = self.page_analysis(known)
-                missing_page = any(not any(row['name'] == page['name'] for row in page_states)
-                                   for page in requirement['pages'])
-                # Process: Design or extend page UI trees ======================================
-                data_access = database_context(database, rid)
-                for page in requirement['pages']:
-                    state = next((row for row in trial_pages if row['name'] == page['name']), None)
-                    new_page = state is None
-                    reference = page.get('reference')
-                    record = evidence.get(reference)
-                    if new_page:
-                        nodes, _ = ui_index(trial['ui'])
-                        key = f'UI_{len(nodes):06d}'
-                        trial['ui']['children'].append(make_ui(key, page['name'], 'page', f'Page: {page["name"]}.'))
-                        state = {'name': page['name'], 'ui_id': key, 'references': []}
-                        trial_pages.append(state)
-                    if not reference:
-                        page['analysis'] = self.page_analysis(state)
-                    parsed = not reference or not record or any(row['reference'] == reference and row['sha256'] == record['sha256']
-                                                  for row in state['references'])
-                    mode = 'new' if new_page else 'bind' if parsed else 'extend'
-                    subtree = next(row for row in trial['ui']['children'] if row['id'] == state['ui_id'])
-                    payload = {'current_task': {'requirement': requirement, 'data_access': data_access},
-                               'current_page': {'name': page['name'], 'reference': reference, 'ui_id': state['ui_id']},
-                               'page_mode': mode, 'selected_ui_tree': copy.deepcopy(subtree),
-                               'loaded_ui_ids': list(ui_index(subtree)[0])}
-                    if missing_page:
-                        payload['ui_tree_summary'] = tree_summary(trial['ui'])
-                    if mode == 'extend' and state['references']:
-                        baseline = state['references'][0]
-                        payload['baseline_page_states'] = {'name': state['name'], 'reference': baseline['reference'],
-                                                           'analysis': self.page_analysis(state)}
-                    trial = self.design('ui', rid, trial, payload, backend)
-                    if record:
-                        old = next((index for index, row in enumerate(state['references']) if row['reference'] == reference), None)
-                        if old is None:
-                            state['references'].append({key: record[key] for key in ('reference', 'sha256')})
-                        else:
-                            state['references'][old] = {key: record[key] for key in ('reference', 'sha256')}
-                # Process: Design page data bindings and API contracts =========================
-                names = {page['name'] for page in requirement['pages']}
-                pages, loaded = region(trial, names)
-                apis = related_apis(backend, requirement, database)
-                # Existing UI events need their exact direct API contracts available for reuse.
-                handler_ids = {row['handler'] for row in trial['events'] if row['ui'] in loaded}
-                api_ids = {key for row in trial['handlers'] if row['id'] in handler_ids for key in row['apis']}
-                known_api_ids = {row['id'] for row in apis}
-                apis.extend(copy.deepcopy(row) for row in backend['modules']
-                            if row['kind'] == 'API' and row['id'] in api_ids - known_api_ids)
-                payload = {'current_task': {'requirement': requirement, 'data_access': data_access},
-                           'selected_ui_tree': pages, 'app': {key: trial['ui'][key] for key in ('id', 'name', 'kind')},
-                           'loaded_ui_ids': sorted(loaded), 'api_contracts': apis,
-                           'api_index': module_index([row for row in backend['modules'] if row['kind'] == 'API']),
-                           'existing_data': state_context(trial, loaded),
-                           'type_name_index': [row['name'] for row in trial['types']]}
-                payload['existing_types'] = self.types(trial, apis, payload['existing_data'])
-                trial = self.design('data', rid, trial, payload, backend)
-                payload['selected_ui_tree'], loaded = region(trial, names)
-                current_nodes, _ = ui_index(trial['ui'])
-                payload['event_ui_candidates'] = [
-                    {'id': key, 'name': current_nodes[key]['name'], 'kind': current_nodes[key]['kind'],
-                     'description': current_nodes[key]['description']}
-                    for key in sorted(loaded)]
-                payload['existing_data'] = state_context(trial, loaded)
-                payload['reuse_handlers'], payload['existing_events'] = handler_context(
-                    trial, loaded, payload['existing_data'], apis, requirement)
-                payload['handler_name_index'] = [row['name'] for row in trial['handlers']]
-                payload['existing_types'] = self.types(trial, apis, payload['existing_data'], payload['reuse_handlers'])
-                payload['type_name_index'] = [row['name'] for row in trial['types']]
-                # Process: Design interactions and commit the validated leaf ===================
-                trial = self.design('interaction', rid, trial, payload, backend)
+                inputs = FrontendTaskInput(rid, requirement, trial, trial_pages, database, backend, evidence)
+                ui = UIDesignTask(self.design, self.page_analysis).run(inputs)
+                requirement = ui.requirement
+                inputs = FrontendTaskInput(rid, requirement, ui.candidate, ui.page_states, database, backend)
+                data = DataDesignTask(self.design, self.types).run(inputs)
+                inputs = FrontendTaskInput(rid, requirement, data.candidate, data.page_states, database, backend)
+                interaction = InteractionDesignTask(self.design, self.types).run(inputs, data.context)
+                trial, trial_pages = interaction.candidate, interaction.page_states
                 self.save(trial, trial_pages)
                 ir, page_states = trial, trial_pages
                 states[rid] = 'DESIGNED'
@@ -229,27 +167,14 @@ class FrontendDesignPass:
                 return analyzer.invoke(rid, payload, accept, image_data_url)
             finally:
                 self.sequence += analyzer.sequence - before
-        feedback, previous = [], None
-        for attempt in range(1, self.attempts + 1):
-            logger = self.visual_log if phase == 'visual' else self.log
-            logger.info(f'{phase} design attempt {attempt}/{self.attempts}', node_id=rid)
-            request = copy.deepcopy(payload)
-            if feedback:
-                request['validation_feedback'], request['previous_output'] = feedback, previous
-            self.sequence += 1
-            try:
-                kwargs = {'schema_name': 'frontend_design_' + phase, 'instructions': PROMPTS[phase],
-                          'input_payload': request, 'output_schema': SCHEMAS[phase]}
-                output = self.model.generate_json(**kwargs)
-                previous = output
-                feedback = shape_errors(output, SCHEMAS[phase])
-                if not feedback:
-                    result = accept(output)
-                    return result
-            except Exception as exc:
-                feedback = [describe_model_error(exc)]
-            logger.warning(f'{phase} validation rejected: ' + '; '.join(feedback), node_id=rid)
-        raise ValueError(f'{phase}: exhausted {self.attempts} attempts: ' + '; '.join(feedback))
+        return DesignDecision(attempts=self.attempts, schema=SCHEMAS[phase], model=self.model,
+            metadata=frontend_metadata(phase), instructions=PROMPTS[phase], payload=payload,
+            accept=accept, logger=self.log, requirement_id=rid, label=phase,
+            on_attempt=self.count_call,
+            failure_prefix=f'{phase}: exhausted {self.attempts} attempts: ').run()
+
+    def count_call(self):
+        self.sequence += 1
 
     def analyze(self, name, reference, rid):
         if self.visual_result is not None:

@@ -2,7 +2,10 @@
 import os
 from pathlib import Path
 
-from compiler.ir.shape_validation import shape_errors
+from compiler.context.model_calls import invoke_model
+from compiler.repair_presentation import repair_metadata
+
+from model.schema_validation import shape_errors
 from compiler.implementation.contracts import SCHEMA
 from compiler.implementation.patcher import apply_edits, read_source, restore, source_versions
 from utils.jsonio import write_json_atomic
@@ -61,7 +64,7 @@ def repair_gate(model, output, stage, check, evidence, *, contracts=None, budget
                 snapshots = {}
                 reply = None
                 try:
-                    reply = model.generate_json(schema_name='stage_repair', instructions=INSTRUCTIONS,
+                    reply = invoke_model(model, repair_metadata(), schema_name='stage_repair', instructions=INSTRUCTIONS,
                                                 input_payload=payload, output_schema=SCHEMA)
                     errors = shape_errors(reply, SCHEMA)
                     if errors:

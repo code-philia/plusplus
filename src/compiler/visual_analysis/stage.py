@@ -8,13 +8,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from compiler.context.model_calls import invoke_model
+from compiler.frontend_design.presentation import FRONTEND
+from model.call_context import CallMetadata
+
 from compiler.frontend_design.contracts import PROMPTS, SCHEMAS, VISUAL_FIELDS, VISUAL_ANALYSIS_VERSION
 from compiler.frontend_design.visual import image_evidence
-from compiler.ir.shape_validation import shape_errors
+from compiler.context.structured import DesignDecision
 from compiler.preprocessing.queries import leaf_ids
 from compiler.budgets import positive_limit
 from compiler.stages import BackgroundStage, StageResult, StageStatus
-from model.client import describe_model_error
 from utils.jsonio import read_json, write_json_atomic
 from utils.logging import SynchronousLog
 
@@ -31,32 +34,26 @@ class VisualAnalyzer:
         self.cancel_requested = cancel_requested
 
     def invoke(self, rid, payload, accept, image):
-        feedback, previous = [], None
-        for attempt in range(1, self.attempts + 1):
+        def before_attempt():
             if self.cancel_requested is not None and self.cancel_requested.is_set():
                 raise asyncio.CancelledError
-            self.log.info(f'visual design attempt {attempt}/{self.attempts}', node_id=rid)
-            request = copy.deepcopy(payload)
-            if feedback:
-                request['validation_feedback'], request['previous_output'] = feedback, previous
             self.sequence += 1
-            try:
-                if self.model is None:
-                    from model.vision import VisualModel
-                    self.model = VisualModel.from_env()
-                if hasattr(self.model, 'set_usage_path'):
-                    self.model.set_usage_path(self.root / 'model_usage.jsonl')
-                output = self.model.generate_visual_json(schema_name='frontend_design_visual',
-                    instructions=PROMPTS['visual'], input_payload=request, output_schema=SCHEMAS['visual'],
-                    image_data_url=image)
-                previous = output
-                feedback = shape_errors(output, SCHEMAS['visual'])
-                if not feedback:
-                    return accept(output)
-            except Exception as exc:
-                feedback = [describe_model_error(exc)]
-            self.log.warning('visual validation rejected: ' + '; '.join(feedback), node_id=rid)
-        raise ValueError(f'visual: exhausted {self.attempts} attempts: ' + '; '.join(feedback))
+
+        def invoke(request):
+            if self.model is None:
+                from model.vision import VisualModel
+                self.model = VisualModel.from_env()
+            if hasattr(self.model, 'set_usage_path'):
+                self.model.set_usage_path(self.root / 'model_usage.jsonl')
+            return invoke_model(self.model, CallMetadata('frontend_design_visual', FRONTEND, log_scope='visual_analysis'), method='generate_visual_json',
+                schema_name='frontend_design_visual', instructions=PROMPTS['visual'], input_payload=request,
+                output_schema=SCHEMAS['visual'], image_data_url=image)
+
+        return DesignDecision(attempts=self.attempts, schema=SCHEMAS['visual'], model=self.model,
+            metadata=CallMetadata('frontend_design_visual', FRONTEND, log_scope='visual_analysis'), instructions=PROMPTS['visual'], payload=payload,
+            accept=accept, logger=self.log, requirement_id=rid, label='visual',
+            on_attempt=before_attempt, failure_prefix=f'visual: exhausted {self.attempts} attempts: ',
+            invoke=invoke).run()
 
     def analyze(self, name, reference, rid):
         digest, image = image_evidence(reference, self.reference_root)

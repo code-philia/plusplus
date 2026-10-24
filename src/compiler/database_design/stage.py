@@ -16,7 +16,6 @@ from compiler.preprocessing.queries import leaf_ids
 
 from ..ir.database import ERModelIR, SchemaIR
 from model.contracts import StructuredModel
-from model.client import describe_model_error
 from utils.trace import format_payload_trace
 from .common import format_error
 from .contracts import (
@@ -24,12 +23,11 @@ from .contracts import (
     ENTITY_INSTRUCTIONS,
     FIELD_DECISION_SCHEMA,
     FIELD_INSTRUCTIONS,
-    RELATIONSHIP_DECISION_SCHEMA,
-    RELATIONSHIP_INSTRUCTIONS,
 )
-from .refinement import refine_er_model
 from .state import DatabaseSchemaState
-from .decision_normalization import normalize_decision_context
+from .decisions import DatabaseDecisionInput, DatabaseDecisionTask
+from .tasks import (DatabaseTaskInput, RequirementDiscoveryTask, RelationshipDiscoveryTask,
+                    DatabaseRefinementTask)
 
 
 @dataclass(slots=True)
@@ -72,92 +70,22 @@ class DatabaseSchemaPass:
         state = DatabaseSchemaState()
         for node_id in requirements:
             state.ensure_requirement(node_id)
-        # Passes 1-2: Discover entities, then contribute fields per requirement ================
-        passes: list[tuple[str, str, dict[str, Any], str, Callable[..., None]]] = [
-            ("pass1_entities", "arc_database_entities", ENTITY_DECISION_SCHEMA, ENTITY_INSTRUCTIONS, state.apply_entities),
-            ("pass2_fields", "arc_database_fields", FIELD_DECISION_SCHEMA, FIELD_INSTRUCTIONS, state.apply_fields),
+        passes = [
+            ('pass1_entities', 'arc_database_entities', ENTITY_DECISION_SCHEMA, ENTITY_INSTRUCTIONS, 'apply_entities'),
+            ('pass2_fields', 'arc_database_fields', FIELD_DECISION_SCHEMA, FIELD_INSTRUCTIONS, 'apply_fields'),
         ]
-        for phase, schema_name, output_schema, instructions, apply_decision in passes:
-            self.trace(f"PASS_START phase={phase} requirements={len(requirements)}")
-            for node_id in requirements:
-                node = nodes.get(node_id)
-                if not isinstance(node, dict):
-                    errors.append(format_error("ARC2101", "Requirement is missing from Requirement IR.", node_id=node_id))
-                    states[node_id] = "FAILED"
-                    continue
-                def validate_access(value, rid=node_id, phase_name=phase):
-                    return validate_access_decision(state, phase_name, rid, value)
-
-                decision = self.run_unit(
-                    phase=phase,
-                    schema_name=schema_name,
-                    output_schema=output_schema,
-                    instructions=instructions,
-                    node_id=node_id,
-                    context=self.context_for(
-                        phase, node_id, node, nodes, state, effective_dependencies
-                    ),
-                    errors=errors,
-                    warnings=state.warnings,
-                    validate=validate_access,
-                )
-                if decision is None:
-                    states[node_id] = "FAILED"
-                    continue
-                before = len(errors)
-                apply_decision(node_id, decision, errors)
-                if len(errors) != before:
-                    states[node_id] = "FAILED"
-                    continue
-                states[node_id] = {
-                    "pass1_entities": "ENTITIES_DISCOVERED",
-                    "pass2_fields": "FIELDS_DISCOVERED",
-                }[phase]
-                self.trace(
-                    f"DECISION_APPLIED phase={phase} requirement={node_id} "
-                    f"state={states[node_id]}"
-                )
-            self.trace(f"PASS_COMPLETED phase={phase} requirements={len(requirements)}")
-            # Design diagnostics are accumulated across all three passes. Do
-            # not stop after an invalid entity/field/relationship decision;
-            # later passes may still recover usable schema information and the
-            # controller will continue with the partial result.
-
-        # Pass 3: Design relationships per ER entity ===========================================
-        # Pass 3 is scheduled by ER entities, never by requirement nodes.
-        # Entity discovery follows requirement postorder; retain that order here.
-        entity_keys = list(state.entities)
-        self.trace(f"PASS_START phase=pass3_relationships entities={len(entity_keys)}")
-        for entity_key in entity_keys:
-            decision = self.run_unit(
-                phase="pass3_relationships", schema_name="arc_database_relationships",
-                output_schema=RELATIONSHIP_DECISION_SCHEMA, instructions=RELATIONSHIP_INSTRUCTIONS,
-                node_id=entity_key,
-                context=self.relationship_context(entity_key, nodes, state, effective_dependencies),
-                errors=errors, warnings=state.warnings,
-            )
-            if decision is None:
-                continue
-            # Attribute relationship ownership to its real requirement evidence.
-            for relationship in decision["relationships"]:
-                for requirement_id in sorted(set(relationship["evidence_requirement_ids"])):
-                    state.apply_relationships(requirement_id, {"relationships": [relationship]}, errors)
-            self.trace(f"DECISION_APPLIED phase=pass3_relationships entity={entity_key}")
-        self.trace(f"PASS_COMPLETED phase=pass3_relationships entities={len(entity_keys)}")
-
-        # Physical relationship mapping follows completion of the ER passes.
-        # Process: Refine ER decisions into the physical database schema =======================
-        er_model = state.to_er_model()
-        er_model["status"] = "RESOLVED" if not errors else "PROPOSED"
-        refined = refine_er_model(er_model, requirement_ids=set(requirements))
-        errors.extend(refined.errors)
-        state.warnings.extend(refined.warnings)
-        schema = refined.schema
-        if errors:
-            schema["status"] = "PROPOSED"
-            er_model["status"] = "PROPOSED"
-        states.update({node_id: "SCHEMA_ANALYZED" if not errors else "FAILED" for node_id in requirements})
-        return DatabasePassResult(schema, states, er_model, errors, state.warnings)
+        for phase, schema_name, schema, instructions, apply_method in passes:
+            task = RequirementDiscoveryTask(phase=phase, schema_name=schema_name, schema=schema,
+                instructions=instructions, apply_method=apply_method, context=self.context_for,
+                decide=self.run_unit, validate=validate_access_decision, trace=self.trace)
+            output = task.run(DatabaseTaskInput(requirements, nodes, state, effective_dependencies, states, errors))
+            state, states, errors = output.state, output.node_states, output.errors
+        output = RelationshipDiscoveryTask(self.relationship_context, self.run_unit, self.trace).run(
+            DatabaseTaskInput(requirements, nodes, state, effective_dependencies, states, errors))
+        refined = DatabaseRefinementTask().run(DatabaseTaskInput(requirements, nodes, output.state,
+            effective_dependencies, output.node_states, output.errors))
+        return DatabasePassResult(refined.schema, refined.node_states, refined.er_model,
+                                  refined.errors, refined.warnings)
 
     def context_for(
         self,
@@ -229,49 +157,9 @@ class DatabaseSchemaPass:
         warnings: list[str],
         validate: Callable[[dict[str, Any]], list[str]] | None = None,
     ) -> dict[str, Any] | None:
-        feedback: list[str] = []
-        for attempt in range(self._attempts):
-            payload, started_at = self.prepare_decision_request(
-                phase=phase, schema_name=schema_name, output_schema=output_schema,
-                instructions=instructions, node_id=node_id, context=context, feedback=feedback,
-                attempt=attempt,
-            )
-            try:
-                decision = self._model.generate_json(
-                    schema_name=schema_name,
-                    instructions=instructions,
-                    input_payload=payload,
-                    output_schema=output_schema,
-                )
-            except Exception as exc:
-                duration_ms = round((time.monotonic() - started_at) * 1000)
-                feedback = [f"Model call failed: {describe_model_error(exc)}"]
-                self.trace(
-                    f"MODEL_ERROR phase={phase} requirement={node_id} "
-                    f"attempt={attempt + 1} duration_ms={duration_ms} error={feedback[0]}"
-                )
-            else:
-                duration_ms = round((time.monotonic() - started_at) * 1000)
-                self.trace(
-                    f"MODEL_OUTPUT phase={phase} requirement={node_id} "
-                    f"attempt={attempt + 1} duration_ms={duration_ms}\n"
-                    + format_payload_trace(decision)
-                )
-                decision, feedback, accepted = self.process_decision_response(
-                    phase=phase, node_id=node_id, decision=decision, context=context,
-                    feedback=feedback, validate=validate,
-                )
-                if not accepted:
-                    continue
-                self.trace(
-                    f"MODEL_ACCEPTED phase={phase} requirement={node_id} "
-                    f"attempt={attempt + 1} duration_ms={duration_ms}"
-                )
-                return decision
-            self.trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
-        errors.append(format_error("ARC2103", f"{phase} failed: {'; '.join(feedback)}", node_id=node_id))
-        return None
-
+        inputs = DatabaseDecisionInput(phase, schema_name, output_schema, instructions, node_id, context)
+        return DatabaseDecisionTask(inputs, model=self._model, attempts=self._attempts,
+            prepare=self.prepare_decision_request, trace=self.trace, errors=errors, validate=validate).run()
 
     def prepare_decision_request(
         self, *, phase: str, schema_name: str, output_schema: dict[str, Any],
@@ -306,31 +194,6 @@ class DatabaseSchemaPass:
             + format_payload_trace(request_payload)
         )
         return payload, started_at
-
-    def process_decision_response(
-        self, *, phase: str, node_id: str, decision: Any, context: dict[str, Any],
-        feedback: list[str], validate: Callable[[dict[str, Any]], list[str]] | None,
-    ) -> tuple[Any, list[str], bool]:
-        # Rejections stay inside the retry loop; applying accepted decisions stays with the caller.
-        try:
-            decision, normalization_notes = normalize_decision_context(
-                phase, decision, context
-            )
-            if validate is not None:
-                feedback = validate(decision)
-                if feedback:
-                    self.trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={'; '.join(feedback)}")
-                    return decision, feedback, False
-        except Exception as exc:
-            feedback = [f'Invalid design response: {describe_model_error(exc)}']
-            self.trace(f"MODEL_REJECTED phase={phase} requirement={node_id} errors={feedback[0]}")
-            return decision, feedback, False
-        for note in normalization_notes:
-            self.trace(
-                f"MODEL_NORMALIZED phase={phase} requirement={node_id} "
-                f"action={note}"
-            )
-        return decision, feedback, True
 
     def trace(self, message: str) -> None:
         if self._trace_enabled:

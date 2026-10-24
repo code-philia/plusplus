@@ -5,7 +5,7 @@ from typing import Any, Protocol
 
 
 class StructuredModel(Protocol):
-    """Small interface used by semantic compiler passes."""
+    """Provider protocol; callers supply optional metadata through model.call_context.call_scope."""
 
     def generate_json(
         self,

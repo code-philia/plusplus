@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .prompt_context import render_section, stage_sections
+from .prompt_context import render_section, context_sections
+from .call_context import current_call
 
 CONTEXT_SEGMENTS_KEY = "context_segments"
 
@@ -67,8 +68,9 @@ def user_messages(input_payload: dict[str, Any], *, schema_name: str | None = No
     markdown_context = input_payload.get("context_markdown")
     if set(input_payload) == {"context_markdown"} and isinstance(markdown_context, str):
         return [{"role": "user", "content": markdown_context}]
-    if schema_name:
+    metadata = current_call()
+    if metadata is not None:
         return [{"role": "user", "content": render_section(section["name"], section["purpose"], section["payload"])}
-                for section in stage_sections(schema_name, input_payload)]
+                for section in context_sections(metadata, input_payload)]
     user_input = json.dumps(input_payload, ensure_ascii=False, separators=(",", ":"))
     return [{"role": "user", "content": user_input}]

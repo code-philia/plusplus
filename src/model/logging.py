@@ -12,6 +12,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 from utils.logging import SynchronousLog
+from .call_context import current_call
 
 _active_log: ContextVar[tuple[Path, dict[str, Any]] | None] = ContextVar("design_model_log", default=None)
 
@@ -34,7 +35,8 @@ def save(path: Path, record: dict[str, Any]) -> None:
             prefix = f"[{attempt.get('started_at', record['started_at'])}] [{record['schema_name']}]"
             with attempt_path.open("w", encoding="utf-8", newline="") as handle:
                 handle.write(f"{prefix} MODEL_CALL model={record['model']} attempt={number} "
-                             f"status={attempt.get('status', record['status'])}\n")
+                             f"status={attempt.get('status', record['status'])} "
+                             f"operation={record['operation']} scope={record.get('log_scope') or ''}\n")
                 if "request" in attempt:
                     handle.write(f"{prefix} MODEL_INPUT\n")
                     for message in attempt["request"].get("messages", []):
@@ -76,8 +78,8 @@ def log_design_call(method: Callable[..., Any]) -> Callable[..., Any]:
     def wrapped(self: Any, **kwargs: Any) -> Any:
         schema_name = kwargs.get("schema_name", "")
         usage_path = getattr(self, "_usage_path", None)
-        is_design = schema_name.startswith(("arc_database_", "arc_backend_", "backend_", "frontend_", "tdd_", "stage_repair")) or schema_name == "arc_visual_reference_analysis"
-        if usage_path is None or not is_design:
+        metadata = current_call()
+        if usage_path is None or metadata is None or not metadata.log_enabled:
             return method(self, **kwargs)
         call_id = uuid.uuid4().hex
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -85,7 +87,7 @@ def log_design_call(method: Callable[..., Any]) -> Callable[..., Any]:
         path = Path(usage_path).parent / "model_logs" / f"{timestamp}_{name}_{call_id}.log"
         record = {
             "call_id": call_id, "started_at": now(), "status": "RUNNING",
-            "operation": method.__name__, "schema_name": schema_name,
+            "operation": metadata.operation, "log_scope": metadata.log_scope, "schema_name": schema_name,
             "model": self.model, "attempts": [],
         }
         save(path, record)
