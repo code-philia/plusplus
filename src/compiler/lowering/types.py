@@ -1,7 +1,7 @@
 """Render validated JSON Schema to TypeScript; all named definitions are exported."""
 import json
 import re
-from compiler.backend_design.validation import parse_contract
+from compiler.ir.type_contracts import parse_contract
 
 
 def ts_type(schema, namespace=""):

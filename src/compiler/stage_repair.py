@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-from compiler.backend_design.validation import shape_errors
+from compiler.ir.shape_validation import shape_errors
 from compiler.implementation.contracts import SCHEMA
 from compiler.implementation.patcher import apply_edits, read_source, restore, source_versions
 from utils.jsonio import write_json_atomic

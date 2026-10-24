@@ -49,7 +49,9 @@ class Compiler:
         write_json_atomic(root / 'preprocessing/requirement_ir.json', requirements)
         write_json_atomic(root / 'preprocessing/dependency_graph.json', parsed.dependency_graph)
         artifacts = {'requirements': str(root / 'preprocessing/requirement_ir.json')}
-        reports, failed, errors = [], [], []
+        reports = []
+        failed = []
+        errors = []
         run_id = uuid.uuid4().hex
         set_run_id(run_id)
         summary = root / 'workflow/report.json'
@@ -83,7 +85,8 @@ class Compiler:
             save('RUNNING')
             await self._log(message + '; continuing subsequent stages.', 'warning')
 
-        async def guarded(action, fallback=None):
+        async def run_guarded_stage(action, fallback=None):
+            # Keep actions lazy so setup failures belong to the active stage.
             try:
                 return action()
             except Exception as exc:
@@ -118,14 +121,22 @@ class Compiler:
             from cli.commands import _ensure_dotenv_loaded
             _ensure_dotenv_loaded()
             await begin('project_initialization')
-            initialized = await guarded(lambda: (ProjectInitializer(output, web_port=request.web_port).initialize(), True)[1])
+
+            def initialize_project():
+                ProjectInitializer(output, web_port=request.web_port).initialize()
+                return True
+
+            initialized = await run_guarded_stage(initialize_project)
             if initialized:
                 await finish(root / 'project/report.json')
 
             model = self.model if self.model is not None else Model.from_env()
-            visual = FrontendDesignPass(model, root, reference_root=Path(request.requirement_path).resolve().parent)
+            frontend_designer = FrontendDesignPass(
+                model, root, reference_root=Path(request.requirement_path).resolve().parent)
             await begin('visual_analysis')
+            # Retain this report: later stages change which report is last.
             visual_report = reports[-1]
+
             def analyze_images():
                 seen = set()
                 for rid in leaves:
@@ -134,10 +145,11 @@ class Compiler:
                         if reference and reference not in seen:
                             seen.add(reference)
                             try:
-                                visual._analyze(page['name'], reference, rid)
+                                frontend_designer._analyze(page['name'], reference, rid)
                             except Exception as exc:
-                                visual.visual_failures[reference] = str(exc)
-                                visual.visual_log.warning(f'Skipping {reference}: {exc}', node_id=rid)
+                                frontend_designer.visual_failures[reference] = str(exc)
+                                frontend_designer.visual_log.warning(f'Skipping {reference}: {exc}', node_id=rid)
+
             # Separate thread: synchronous database design must not block image analysis.
             # One writer owns the visual cache; duplicate paths are analyzed once.
             visual_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='arc-visual')
@@ -147,17 +159,29 @@ class Compiler:
             await begin('database_design')
             from .database_design.state import DatabaseSchemaState
             from .database_design.refinement import refine_er_model
-            empty_er = DatabaseSchemaState().to_er_model()
-            database = await guarded(
-                lambda: DatabaseSchemaPass(model, root).compile(requirements, parsed.dependency_graph),
-                SimpleNamespace(schema=refine_er_model(empty_er, requirement_ids=set(leaves)).schema,
-                    er_model=empty_er, node_states={rid: 'FAILED' for rid in leaves},
+            empty_er_model = DatabaseSchemaState().to_er_model()
+
+            def design_database():
+                return DatabaseSchemaPass(model, root).compile(requirements, parsed.dependency_graph)
+
+            # Prepare the fallback before entering the guarded design action.
+            database = await run_guarded_stage(
+                design_database,
+                SimpleNamespace(schema=refine_er_model(empty_er_model, requirement_ids=set(leaves)).schema,
+                    er_model=empty_er_model, node_states={rid: 'FAILED' for rid in leaves},
                     ok=False, errors=['Database design unavailable'], warnings=[]))
-            await guarded(lambda: (
-                write_json_atomic(root / 'design/database/schema.json', database.schema),
-                write_json_atomic(root / 'design/database/er_model.json', database.er_model),
-                write_json_atomic(root / 'design/database/report.json', {'status': database.schema['status'],
-                    'node_states': database.node_states, 'errors': database.errors, 'warnings': database.warnings})))
+
+            def write_database_artifacts():
+                write_json_atomic(root / 'design/database/schema.json', database.schema)
+                write_json_atomic(root / 'design/database/er_model.json', database.er_model)
+                write_json_atomic(root / 'design/database/report.json', {
+                    'status': database.schema['status'],
+                    'node_states': database.node_states,
+                    'errors': database.errors,
+                    'warnings': database.warnings,
+                })
+
+            await run_guarded_stage(write_database_artifacts)
             if reports[-1]['status'] == 'RUNNING':
                 if database.schema['status'] != 'RESOLVED' and database.ok:
                     await stage_failed('Database design did not resolve its schema')
@@ -167,40 +191,46 @@ class Compiler:
             from .lowering.recovery import isolate_design, bind_recovery, minimal_lowering
             recovery_reasons = {name: {} for name in ('database', 'backend', 'frontend')}
 
-            async def lower(name, lowerer, *args):
+            async def lower_design(name, lowerer, design):
                 await begin(name + '_lowering')
-                plan, effective = None, args[-1]
-                def render():
-                    render_args = (effective,) if name == 'database' else (requirements, effective)
-                    return lowerer.compile(*render_args, output)
-                def check():
+                plan = None
+                effective_design = design
+
+                def render_lowering():
+                    if name == 'database':
+                        return lowerer.compile(effective_design, output)
+                    return lowerer.compile(requirements, effective_design, output)
+
+                def check_lowering():
                     try:
                         compilation = check_compilation(output, name)
                         return {'ok': compilation['status'] == 'COMPILED', 'compilation': compilation}
                     except Exception as exc:
                         return {'ok': False, 'errors': [str(exc)]}
                 try:
-                    plan = render()
+                    plan = render_lowering()
                 except Exception as exc:
                     await self._log(f'{name}: isolating unlowerable design: {exc}', 'warning')
                     try:
-                        plan, effective = isolate_design(name, lowerer, requirements, effective, output)
+                        plan, effective_design = isolate_design(name, lowerer, requirements, effective_design, output)
                         recovery_reasons[name].update(plan.pop('recovery_reasons', {}))
                     except Exception as isolation_error:
                         recovery_reasons[name].update({rid: str(isolation_error)[:1000] for rid in leaves})
-                        plan, effective = minimal_lowering(name, lowerer, requirements, output)
-                result = check()
+                        plan, effective_design = minimal_lowering(name, lowerer, requirements, output)
+                result = check_lowering()
                 if not result['ok']:
                     try:
-                        result = repair_gate(model, output, name + '_lowering', check, result, contracts=effective)
+                        result = repair_gate(
+                            model, output, name + '_lowering', check_lowering, result,
+                            contracts=effective_design)
                     except Exception as exc:
                         await self._log(f'{name}: lowering repair unavailable; using recovery scaffolding: {exc}', 'warning')
                 if not result['ok']:
                     # The populated source plan still cannot compile. Replace only
                     # stage-owned scaffolding, preserving user-modified files.
                     recovery_reasons[name].update({rid: str(result)[:1000] for rid in leaves})
-                    plan, effective = minimal_lowering(name, lowerer, requirements, output)
-                    result = check()
+                    plan, effective_design = minimal_lowering(name, lowerer, requirements, output)
+                    result = check_lowering()
                 if result['ok']:
                     manifest_path = root / 'lowering' / name / 'manifest.json'
                     manifest = read_json(manifest_path, {})
@@ -213,34 +243,44 @@ class Compiler:
                     await stage_failed(name + ': minimal framework still needs repair: ' + str(result))
                 if recovery_reasons[name]:
                     filename = 'schema.json' if name == 'database' else name + '_ir.json'
-                    write_json_atomic(root / 'design' / name / filename, effective)
-                return plan, effective
+                    write_json_atomic(root / 'design' / name / filename, effective_design)
+                return plan, effective_design
 
-            database_plan, database.schema = await lower('database', DatabaseLoweringPass(), database.schema)
+            database_plan, database.schema = await lower_design('database', DatabaseLoweringPass(), database.schema)
+            # Backend design reads the visual cache, so wait at this boundary.
             await self._log('Waiting for visual evidence before backend design.')
             try:
                 visual_future.result()
             except Exception as exc:
-                visual.visual_failures['background_analysis'] = str(exc)
-                visual.visual_log.warning('Background visual analysis skipped: ' + str(exc))
-            visual_report.update(status='COMPLETED_WITH_WARNINGS' if visual.visual_failures else 'COMPLETED',
-                                 warnings=[f'{path}: {message}' for path, message in visual.visual_failures.items()])
+                frontend_designer.visual_failures['background_analysis'] = str(exc)
+                frontend_designer.visual_log.warning('Background visual analysis skipped: ' + str(exc))
+            visual_report.update(
+                status='COMPLETED_WITH_WARNINGS' if frontend_designer.visual_failures else 'COMPLETED',
+                warnings=[f'{path}: {message}' for path, message in frontend_designer.visual_failures.items()])
             artifacts['visual_analysis'] = str(root / 'visual_cache.json')
             save('RUNNING')
             await self._log('visual_analysis: COMPLETED')
             await begin('backend_design')
-            backend = await guarded(lambda: BackendDesignPass(model, root).compile(requirements, database.er_model),
+
+            def design_backend():
+                return BackendDesignPass(model, root).compile(requirements, database.er_model)
+
+            backend = await run_guarded_stage(design_backend,
                 SimpleNamespace(ir={'ir_kind': 'backend_design', 'types': [], 'modules': []},
                     node_states={rid: 'SKIPPED' for rid in leaves}, ok=False,
                     errors=['Backend design unavailable'], warnings=[]))
             if reports[-1]['status'] == 'RUNNING':
                 await complete_design(backend, root / 'design/backend/backend_ir.json')
-            backend_plan, backend.ir = await lower('backend', BackendLoweringPass(), requirements, backend.ir)
+            backend_plan, backend.ir = await lower_design('backend', BackendLoweringPass(), backend.ir)
             write_json_atomic(root / 'design/backend/backend_ir.json', backend.ir)
 
             await begin('frontend_design')
             from .frontend_design.delta import make_ui
-            frontend = await guarded(lambda: visual.compile(requirements, database.er_model, backend.ir),
+
+            def design_frontend():
+                return frontend_designer.compile(requirements, database.er_model, backend.ir)
+
+            frontend = await run_guarded_stage(design_frontend,
                 SimpleNamespace(ir={'ir_kind': 'frontend_design',
                     'ui': make_ui('UI_APP', 'Application', 'app', 'Application root.'),
                     'types': [], 'data': [], 'events': [], 'handlers': []},
@@ -248,7 +288,7 @@ class Compiler:
                     errors=['Frontend design unavailable'], warnings=[]))
             if reports[-1]['status'] == 'RUNNING':
                 await complete_design(frontend, root / 'design/frontend/frontend_ir.json')
-            frontend_plan, frontend.ir = await lower('frontend', FrontendLoweringPass(), requirements, frontend.ir)
+            frontend_plan, frontend.ir = await lower_design('frontend', FrontendLoweringPass(), frontend.ir)
             write_json_atomic(root / 'design/frontend/frontend_ir.json', frontend.ir)
 
             # FileContext derives requirement/file associations from the lowering
@@ -306,15 +346,19 @@ class Compiler:
                     await self._log(message + '; continuing to build repair.', 'warning')
 
             await begin('build')
-            def build_check():
+
+            def check_build():
                 try:
                     result = ProjectBuilder(output).build()
                     return {'ok': result.ok, 'errors': result.errors}
                 except Exception as exc:
                     return {'ok': False, 'errors': [str(exc)]}
-            build = build_check()
+            build = check_build()
             if not build['ok']:
-                build = await guarded(lambda: repair_gate(model, output, 'build', build_check, build), build)
+                def repair_build():
+                    return repair_gate(model, output, 'build', check_build, build)
+
+                build = await run_guarded_stage(repair_build, build)
             if build['ok']:
                 await finish(output / 'frontend/dist/index.html')
             else:
@@ -331,13 +375,20 @@ class Compiler:
                     write_json_atomic(root / 'validation_preparation/report.json',
                                       {'status': 'PREPARED', 'artifacts': validation, 'port': request.web_port})
                     return True
-                prepared = await guarded(prepare_validation)
+                prepared = await run_guarded_stage(prepare_validation)
                 if prepared:
                     await finish(root / 'validation_preparation/report.json')
             elif request.prepare_validation and not build['ok']:
                 reports.append({'stage': 'validation_preparation', 'status': 'SKIPPED',
                                 'warnings': ['Build unavailable; validation artifacts cannot be prepared.']})
-            save('COMPLETED_WITH_ERRORS' if errors else 'LOWERED' if request.stop_after_lowering else 'COMPLETED')
+            # Completion records execution progress, not just requirement success.
+            if errors:
+                final_status = 'COMPLETED_WITH_ERRORS'
+            elif request.stop_after_lowering:
+                final_status = 'LOWERED'
+            else:
+                final_status = 'COMPLETED'
+            save(final_status)
             return CompilationResult(ok=not errors, root_id=requirements['root_id'], states=states,
                 failed_nodes=failed, artifacts=artifacts, run_id=run_id, completed=True)
         except Exception as exc:

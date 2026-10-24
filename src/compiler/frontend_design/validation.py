@@ -1,7 +1,7 @@
 """Tree, scope, reference and typed-state checks used inside every repair loop."""
 import json
 import re
-from compiler.backend_design.validation import parse_contract
+from compiler.ir.type_contracts import parse_contract
 from .contracts import KINDS, TRIGGERS
 
 

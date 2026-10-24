@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from compiler.backend_design.context import database_context, module_index
-from compiler.backend_design.validation import shape_errors
+from compiler.ir.shape_validation import shape_errors
 from compiler.preprocessing.traversal import children_by_id, postorder
 from model.client import describe_model_error
 from utils.jsonio import read_json, write_json_atomic

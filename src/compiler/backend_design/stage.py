@@ -13,7 +13,9 @@ from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
 from .contracts import PROMPTS, SCHEMAS
 from .context import database_context, retrieve, module_index, expand_module_context
-from .validation import shape_errors, validate_ir, parse_contract, normalize_contract
+from compiler.ir.shape_validation import shape_errors
+from compiler.ir.type_contracts import parse_contract, normalize_contract
+from .validation import validate_ir
 
 
 @dataclass

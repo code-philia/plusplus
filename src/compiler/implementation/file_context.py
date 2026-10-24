@@ -151,19 +151,7 @@ class FileContext:
             return path.startswith(('frontend/', 'shared/', 'tests/e2e/')) or path == 'tests/tdd/playwright.config.ts'
         return True
 
-    def build(self, rid, phase, session, test_targets, evidence):
-        direct = self.direct_files(rid)
-        source_paths = (direct | session.active) - session.released
-        if phase == 'backend_implementation':
-            source_paths = {path for path in source_paths
-                            if path.startswith('backend/') or path.startswith('shared/')}
-        elif phase == 'frontend_implementation':
-            source_paths = {path for path in source_paths
-                            if path.startswith('frontend/') or path.startswith('shared/')}
-            recovered_backend = self.recovery.get(rid, {}).get('backend')
-            if recovered_backend:
-                source_paths.update(recovered_backend['file_paths'])
-                source_paths.add('backend/src/app.ts')
+    def _failed_test_context(self, evidence):
         # Include failing regression tests even when owned by an earlier requirement.
         # Only known test files may be selected from untrusted runner output.
         failing_tests = set()
@@ -186,29 +174,67 @@ class FileContext:
                 if record and record['kind'] == 'acceptance_test':
                     failing_tests.add(relative)
                     regression_owners.update(record['reqs'])
-        editable, readonly, records = {}, {}, {}
+        return failing_tests, regression_owners
+
+    @staticmethod
+    def _is_editable_file(path, record, phase, test_targets):
+        is_test = path in test_targets or bool(record and record['kind'] == 'acceptance_test')
+        if phase == 'test_generation':
+            writable = path in test_targets
+        else:
+            writable = record is not None and (record['kind'] == 'source' or phase == 'repair' and is_test)
+        if phase in {'backend_implementation', 'frontend_implementation'}:
+            layer = phase.split('_')[0]
+            writable = writable and (path.startswith(layer + '/') or path.startswith('shared/'))
+        if phase == 'test_generation' and record and record['kind'] == 'test_support':
+            writable = False
+        return writable
+
+    def _ancestor_constraints(self, parent):
+        constraints = []
+        seen = set()
+        while parent in self.requirements['nodes'] and parent not in seen:
+            seen.add(parent)
+            node = self.requirements['nodes'][parent]
+            constraints.append({key: node.get(key) for key in ('id','name','description')})
+            parent = node.get('parent_id')
+        return list(reversed(constraints))
+
+    def build(self, rid, phase, session, test_targets, evidence):
+        direct = self.direct_files(rid)
+        source_paths = (direct | session.active) - session.released
+        if phase == 'backend_implementation':
+            source_paths = {path for path in source_paths
+                            if path.startswith('backend/') or path.startswith('shared/')}
+        elif phase == 'frontend_implementation':
+            source_paths = {path for path in source_paths
+                            if path.startswith('frontend/') or path.startswith('shared/')}
+            recovered_backend = self.recovery.get(rid, {}).get('backend')
+            if recovered_backend:
+                source_paths.update(recovered_backend['file_paths'])
+                source_paths.add('backend/src/app.ts')
+        failing_tests, regression_owners = self._failed_test_context(evidence)
+        editable = {}
+        readonly = {}
+        records = {}
         visible_tests = {path for path in set(test_targets) | failing_tests if self.phase_path(path, phase)}
         writable_paths = set()
         for path in sorted(source_paths | visible_tests):
             row = self.catalog.get(path)
-            is_test = path in test_targets or bool(row and row['kind'] == 'acceptance_test')
-            writable = (path in test_targets if phase == 'test_generation' else
-                        row is not None and (row['kind'] == 'source' or
-                                             phase == 'repair' and is_test))
-            if phase in {'backend_implementation', 'frontend_implementation'}:
-                layer = phase.split('_')[0]
-                writable = writable and (path.startswith(layer + '/') or path.startswith('shared/'))
-            if phase == 'test_generation' and row and row['kind'] == 'test_support':
-                writable = False
+            writable = self._is_editable_file(path, row, phase, test_targets)
             text = read_source(self.root, path)
             records[path] = {'content': text, 'exists': (self.root / path).is_file()}
             if writable:
                 writable_paths.add(path)
+        # Selection mutates the session; keep it after source reads and before discovery.
         records, context_state = session.select(records, visible_tests, direct)
         for path, record in records.items():
             section = 'editable_files' if path in writable_paths else 'read_only_files'
             record['context_location'] = section
-            (editable if path in writable_paths else readonly)[path] = record
+            if path in writable_paths:
+                editable[path] = record
+            else:
+                readonly[path] = record
         for result in context_state.get('last_operation', {}).get('results', []):
             if result['file'] in records:
                 result['content_ref'] = records[result['file']]['context_location'] + '[' + result['file'] + ']'
@@ -221,21 +247,17 @@ class FileContext:
         from utils.jsonio import read_json
         page_states = read_json(self.root / '.arc/design/frontend/page_states.json', [])
         visual_cache = read_json(self.root / '.arc/visual_cache.json', {})
+        file_index_exclusions = records
         for page in requirement.get('pages', []):
             state = next((row for row in page_states if row['name'] == page['name']), None)
-            records = state.get('references', []) if state else []
+            page_references = state.get('references', []) if state else []
+            # Preserve the existing file_index exclusions from the last page's references.
+            file_index_exclusions = page_references
             reference = str(page.get('reference', '')).replace('\\', '/')
-            if not reference and records:
-                reference = records[0]['reference']
+            if not reference and page_references:
+                reference = page_references[0]['reference']
             page['analysis'] = visual_cache.get(reference, {}).get('analysis')
-        constraints, parent = [], requirement.get('parent_id')
-        seen = set()
-        while parent in self.requirements['nodes'] and parent not in seen:
-            seen.add(parent)
-            node = self.requirements['nodes'][parent]
-            constraints.append({key: node.get(key) for key in ('id','name','description')})
-            parent = node.get('parent_id')
-        requirement['ancestor_constraints'] = list(reversed(constraints))
+        requirement['ancestor_constraints'] = self._ancestor_constraints(requirement.get('parent_id'))
         contracts = [copy.deepcopy(contract) for path in sorted(source_paths) if path in self.catalog
                      for contract in self.catalog[path]['contracts'] if rid in contract.get('reqs', []) or path in session.active]
         if phase == 'frontend_implementation':
@@ -256,7 +278,8 @@ class FileContext:
             name = pending.pop()
             if name in definitions:
                 for ref in refs(definitions[name]['schema']) - wanted_types:
-                    wanted_types.add(ref); pending.append(ref)
+                    wanted_types.add(ref)
+                    pending.append(ref)
         data_access = self.database.get('access', {}).get(rid, {'read': [], 'write': []})
         return {'current_task': {'requirement': requirement, 'phase': phase, 'data_access': data_access,
                                  **({'recovery': self.recovery[rid]} if rid in self.recovery else {})},
@@ -276,7 +299,7 @@ class FileContext:
                 'context_state': context_state,
                 'file_index': [{'file': path, 'symbols': row['symbol_ids'], 'kind': row['kind']}
                                for path, row in sorted(self.catalog.items())
-                               if path not in records and self.phase_path(path, phase)],
+                               if path not in file_index_exclusions and self.phase_path(path, phase)],
                 'always_loaded_files': sorted(direct & source_paths)}
 
 

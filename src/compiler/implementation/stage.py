@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from compiler.backend_design.validation import shape_errors
+from compiler.ir.shape_validation import shape_errors
 from compiler.preprocessing.traversal import children_by_id, postorder
 from compiler.lowering.planning import slug, token
 from model.client import describe_model_error
@@ -92,25 +92,11 @@ class NodeTDDOrchestrator:
             self._gate('BASELINE', 'compilation', baseline)
             self.log.warning('Baseline compilation needs repair; continuing with requirement recovery files.')
         baseline_needs_repair = not passed(baseline)
-        # Process leaf dependencies before dependents; never design/implement parent nodes.
-        pending, scheduled, active = set(order), [], set()
-        def visit(rid):
-            if rid not in pending:
-                return
-            if rid in active:
-                raise ValueError('Leaf implementation dependency cycle at ' + rid)
-            active.add(rid)
-            for dependency in requirements['nodes'][rid].get('dependencies', []):
-                dependencies = [key for key in order if key == dependency or self._descends(key, dependency, requirements)]
-                for key in dependencies:
-                    if key != rid:
-                        visit(key)
-            active.remove(rid)
-            pending.remove(rid)
-            scheduled.append(rid)
-        for rid in order:
-            visit(rid)
-        states, errors, warnings, completed_tests = {}, [], [], []
+        scheduled = self._implementation_order(requirements, order)
+        states = {}
+        errors = []
+        warnings = []
+        completed_tests = []
         self.test_manifest = {}
         skipped = set(skip_requirements)
         for rid in scheduled:
@@ -125,30 +111,43 @@ class NodeTDDOrchestrator:
                 warnings.append(f'{rid}: no associated lowered files; not treated as implemented')
                 self.log.warning(warnings[-1], node_id=rid)
                 continue
-            session, snapshots = WorkingContext(), {}
-            evidence, targets = [], []
+            session = WorkingContext()
+            snapshots = {}
+            evidence = []
+            targets = []
             repaired_baseline = False
             try:
                 if baseline_needs_repair:
+                    def check_baseline():
+                        return self.runner.compile()
+
                     self._model_patch('repair', rid, session, [], baseline, snapshots,
-                                      accept=lambda: self.runner.compile())
+                                      accept=check_baseline)
                     baseline_needs_repair = False
                     repaired_baseline = True
                 targets = self._targets(rid, backend, frontend, recovery=self.context.recovery.get(rid, {}))
+
+                # These gates read the current targets and completed tests when invoked.
+                def check_generated_tests():
+                    return self._test_generation_gate(targets)
+
+                def check_implementation():
+                    return self.runner.compile() + self.runner.check_tests(completed_tests + targets)
+
                 self.test_manifest[rid] = targets
                 for path in targets:
                     self.context.catalog[path] = {'file_path': path, 'symbol_ids': ['TEST.' + path],
                         'reqs': [rid], 'shared': False, 'summaries': [rid + ' requirement-based acceptance tests'],
                         'kind': 'acceptance_test', 'contracts': []}
                 self._model_patch('test_generation', rid, session, targets, evidence, snapshots,
-                                  accept=lambda: self._test_generation_gate(targets))
+                                  accept=check_generated_tests)
                 self.log.info('Acceptance tests compiled; implementing initial version before execution. Test corrections are permitted during repair.', node_id=rid)
                 direct = self.context.direct_files(rid)
                 for layer in ('backend', 'frontend'):
                     if not any(path.startswith(layer + '/') for path in direct):
                         continue
                     self._model_patch(layer + '_implementation', rid, session, targets, [], snapshots,
-                                      accept=lambda: self.runner.compile() + self.runner.check_tests(completed_tests + targets))
+                                      accept=check_implementation)
                 # Execute only this requirement; historical test sources remain
                 # covered by the compilation gates above and during repair.
                 evidence = self._run_tests(targets, rid, 'initial_implementation')
@@ -160,7 +159,7 @@ class NodeTDDOrchestrator:
                     if any(row.get('failure_kind') == 'infrastructure' for row in evidence if row['status'] != 'PASSED'):
                         raise EnvironmentBlocked('Test executor unavailable after retries; preserving accepted source: ' + str(evidence))
                     self._model_patch('repair', rid, session, targets, evidence, snapshots,
-                                      accept=lambda: self.runner.compile() + self.runner.check_tests(completed_tests + targets))
+                                      accept=check_implementation)
                     evidence = self._run_tests(targets, rid, f'repair_{iteration}')
                     self._gate(rid, f'repair_{iteration}', evidence)
                     if passed(evidence):
@@ -185,17 +184,7 @@ class NodeTDDOrchestrator:
                 # Runtime acceptance failure does not discard compilation-safe
                 # progress. Individual invalid proposals are still reverted by
                 # _model_patch before reaching this requirement boundary.
-                retained_tests = [path for path in targets if (self.root / path).is_file()]
-                try:
-                    compilation = self.runner.compile()
-                    test_sources = list(dict.fromkeys(completed_tests + retained_tests))
-                    if test_sources:
-                        compilation += self.runner.check_tests(test_sources)
-                    self._gate(rid, 'failure_compilation', compilation)
-                    keep_source = passed(compilation)
-                except Exception as compilation_exc:
-                    keep_source = False
-                    warnings.append(f'{rid}: could not verify compilation before retaining source: {compilation_exc}')
+                retained_tests, keep_source = self._check_retained_source(rid, targets, completed_tests, warnings)
                 if keep_source:
                     states[rid] = 'FAILED_RETAINED'
                     # Include retained tests in subsequent compilation gates;
@@ -220,6 +209,46 @@ class NodeTDDOrchestrator:
         if not passed(final):
             errors.append('Final compilation failed')
         return self._report(states, errors, warnings)
+
+    def _implementation_order(self, requirements, order):
+        # Process leaf dependencies before dependents; parents remain organizational.
+        pending = set(order)
+        scheduled = []
+        active = set()
+
+        def visit(rid):
+            if rid not in pending:
+                return
+            if rid in active:
+                raise ValueError('Leaf implementation dependency cycle at ' + rid)
+            active.add(rid)
+            for dependency in requirements['nodes'][rid].get('dependencies', []):
+                dependencies = [key for key in order if key == dependency or self._descends(key, dependency, requirements)]
+                for key in dependencies:
+                    if key != rid:
+                        visit(key)
+            active.remove(rid)
+            pending.remove(rid)
+            scheduled.append(rid)
+
+        for rid in order:
+            visit(rid)
+        return scheduled
+
+    def _check_retained_source(self, rid, targets, completed_tests, warnings):
+        # Acceptance can fail while the last accepted source remains compilation-safe.
+        retained_tests = [path for path in targets if (self.root / path).is_file()]
+        try:
+            compilation = self.runner.compile()
+            test_sources = list(dict.fromkeys(completed_tests + retained_tests))
+            if test_sources:
+                compilation += self.runner.check_tests(test_sources)
+            self._gate(rid, 'failure_compilation', compilation)
+            keep_source = passed(compilation)
+        except Exception as compilation_exc:
+            keep_source = False
+            warnings.append(f'{rid}: could not verify compilation before retaining source: {compilation_exc}')
+        return retained_tests, keep_source
 
     @staticmethod
     def _descends(rid, parent, requirements):
@@ -286,7 +315,9 @@ class NodeTDDOrchestrator:
         return bool(failures) and all(row.get('test_evidence', {}).get('behavior_failure', False) for row in failures)
 
     def _model_patch(self, phase, rid, session, targets, evidence, snapshots, accept):
-        feedback, rejected_files, requests = [], [], 0
+        feedback = []
+        rejected_files = []
+        requests = 0
         for attempt in range(self.attempts):
             self.log.info(f'{phase} attempt {attempt + 1}/{self.attempts}', node_id=rid)
             while True:
@@ -311,6 +342,7 @@ class NodeTDDOrchestrator:
                         raise ValueError('; '.join(validation))
                     if output['blocked_reason'].strip():
                         raise ValueError(output['blocked_reason'])
+                    # Context operations rebuild permissions before a later edit proposal.
                     if output['request_files'] or output.get('release_files'):
                         if output['edits']:
                             raise ValueError('Context read/release operations cannot be combined with edits')
@@ -342,6 +374,7 @@ class NodeTDDOrchestrator:
                                if row['status'] != 'PASSED'):
                             raise EnvironmentBlocked('Compilation executor unavailable; preserving previously accepted source: ' + str(gate))
                         raise ValueError('Compilation/test-source gate failed: ' + str(gate))
+                    # Commit snapshots only after the proposal passes its acceptance gate.
                     for path, content in patch_snapshot.items():
                         snapshots.setdefault(path, content)
                     session.touch(patch_snapshot)
@@ -357,8 +390,11 @@ class NodeTDDOrchestrator:
                         restore(self.root, patch_snapshot)
                     feedback = [describe_model_error(exc)]
                     edits = output.get('edits', []) if isinstance(output, dict) else []
-                    rejected_files = sorted({edit['file'] for edit in edits
-                                             if isinstance(edit, dict) and isinstance(edit.get('file'), str)}) if isinstance(edits, list) else []
+                    if isinstance(edits, list):
+                        rejected_files = sorted({edit['file'] for edit in edits
+                                                 if isinstance(edit, dict) and isinstance(edit.get('file'), str)})
+                    else:
+                        rejected_files = []
                     session.focus.update(path for path in rejected_files if path in payload['editable_files'])
                     self.log.warning(f'{phase} rejected: ' + '; '.join(feedback), node_id=rid)
                     break
