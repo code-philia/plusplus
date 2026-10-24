@@ -2,24 +2,32 @@
 from __future__ import annotations
 
 import inspect
-import uuid
+from functools import partial
+from contextvars import copy_context
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from .contracts import CompilationRequest, CompilationResult
+from .budgets import ExecutionBudgets
 from .run_report import CompilationRunReport
-from .preprocessing import RequirementPreprocessor
 from .preprocessing.queries import leaf_ids
+from .foundation import InitializationInput, PreprocessingStage, ProjectInitializationStage
+from .runtime import CompilationState, CompilerDependencies
+from .stages import StageRunner
 from utils.jsonio import read_json, write_json_atomic
-from utils.logging import SynchronousLog, set_run_id
+from utils.logging import SynchronousLog
 
 
-class Compiler:
-    def __init__(self, runtime: Any = None, log_cb: Any = None, model: Any = None) -> None:
-        self.log_cb = log_cb
-        self.model = model
+class _BusinessPipeline:
+    def __init__(self, request: CompilationRequest, state: CompilationState,
+                 dependencies: CompilerDependencies) -> None:
+        self.request = request
+        self.state = state
+        self.log_cb = dependencies.log_cb
+        self.model = dependencies.model
+        self.runner = StageRunner(state.stages)
 
     async def log(self, message, status=None):
         if self.log_cb:
@@ -29,32 +37,25 @@ class Compiler:
         else:
             self.logger.write(message, status=status, node_id=None)
 
-    async def compile(self, request: CompilationRequest) -> CompilationResult:
+    async def run(self) -> CompilationResult:
         # Stage: Preprocessing - validate requirements and workspace ===========================
-        if request.resume or request.start_from != 'zero':
-            raise ValueError('Checkpoint resume is not supported by the current IR; use the individual stage scripts.')
-        if not 1 <= request.web_port <= 65535:
-            raise ValueError('Port must be between 1 and 65535')
-        parsed = RequirementPreprocessor().compile(request.requirement_path)
-        if not parsed.ok:
-            raise ValueError('; '.join(parsed.errors))
-        output = request.output_dir.expanduser().resolve()
+        request = self.request
+        preprocessing = await PreprocessingStage(request, runner=self.runner).run()
+        parsed = preprocessing.value
+        output = parsed.output_root
         root = output / '.arc'
         self.logger = SynchronousLog('Compiler', workspace_root=output)
         requirements = parsed.requirement_ir
         leaves = leaf_ids(requirements)
-        states = {rid: 'PENDING' if rid in leaves else 'ORGANIZATIONAL' for rid in requirements['nodes']}
-        existing = read_json(root / 'preprocessing/requirement_ir.json', {})
-        if existing and existing.get('source') != requirements.get('source'):
-            raise ValueError('Requirements differ from the existing workspace; use a new output directory.')
-        write_json_atomic(root / 'preprocessing/requirement_ir.json', requirements)
-        write_json_atomic(root / 'preprocessing/dependency_graph.json', parsed.dependency_graph)
-        artifacts = {'requirements': str(root / 'preprocessing/requirement_ir.json')}
-        run_id = uuid.uuid4().hex
-        set_run_id(run_id)
+        states = self.state.states
+        states.update(parsed.states)
+        artifacts = self.state.artifacts
+        artifacts.update(parsed.artifacts)
+        run_id = self.state.run_id
         summary = root / 'workflow/report.json'
         artifacts['workflow'] = str(summary)
         run = CompilationRunReport(summary, run_id, states, artifacts)
+        self.state.report = run
 
         # Process: Record stage progress and recoverable failures ==============================
         async def begin(name):
@@ -96,7 +97,6 @@ class Compiler:
             from .database_design import DatabaseSchemaPass
             from .backend_design import BackendDesignPass
             from .frontend_design import FrontendDesignPass
-            from .project_initialization import ProjectInitializer
             from .database_lowering import DatabaseLoweringPass
             from .backend_lowering import BackendLoweringPass
             from .frontend_lowering import FrontendLoweringPass
@@ -108,16 +108,18 @@ class Compiler:
 
             from utils.environment import ensure_dotenv_loaded
             ensure_dotenv_loaded()
+            self.state.budgets = ExecutionBudgets.from_environment()
+            repair_gate = partial(repair_gate, budgets=self.state.budgets)
             # Stage: Project initialization ====================================================
             initialization_report = await begin('project_initialization')
 
-            def initialize_project():
-                ProjectInitializer(output, web_port=request.web_port).initialize()
-                return True
-
-            initialized = await run_guarded_stage(initialization_report, initialize_project)
-            if initialized:
-                await finish(initialization_report, root / 'project/report.json')
+            try:
+                initialized = await ProjectInitializationStage(
+                    InitializationInput(output, request.web_port), runner=self.runner).run()
+            except Exception as exc:
+                await stage_failed(initialization_report, exc)
+            else:
+                await finish(initialization_report, initialized.value.report_path)
 
             # Stage: Visual analysis - launch alongside database design ========================
             model = self.model if self.model is not None else Model.from_env()
@@ -142,7 +144,7 @@ class Compiler:
             # Separate thread: synchronous database design must not block image analysis.
             # One writer owns the visual cache; duplicate paths are analyzed once.
             visual_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='arc-visual')
-            visual_future = visual_executor.submit(analyze_images)
+            visual_future = visual_executor.submit(copy_context().run, analyze_images)
             await self.log('Visual analysis is running in the background alongside database design.')
 
             # Stage: Database design ===========================================================
@@ -326,7 +328,8 @@ class Compiler:
             if not request.stop_after_lowering:
                 implementation_report = await begin('implementation')
                 try:
-                    implementation = NodeTDDOrchestrator(model, output, port=request.web_port).compile(
+                    implementation = NodeTDDOrchestrator(
+                        model, output, port=request.web_port, budgets=self.state.budgets).compile(
                         requirements, database.er_model, backend.ir, frontend.ir,
                         backend_plan, frontend_plan, database_plan)
                     states.update(implementation.node_states)
@@ -397,13 +400,13 @@ class Compiler:
                 failed_nodes=run.failed_nodes, artifacts=artifacts, run_id=run_id)
         # Process: Settle background analysis and release run resources ========================
         finally:
-            try:
-                if visual_executor is not None:
-                    visual_executor.shutdown(wait=True, cancel_futures=True)
-                    if visual_future is not None and visual_report['status'] == 'RUNNING':
-                        error = visual_future.exception() if not visual_future.cancelled() else 'Cancelled'
-                        visual_report.update(status='FAILED' if error else 'COMPLETED',
-                                             errors=[str(error)] if error else [])
-                        run.save('COMPLETED_WITH_ERRORS' if run.errors or error else 'COMPLETED')
-            finally:
-                set_run_id(None)
+            if visual_executor is not None:
+                visual_executor.shutdown(wait=True, cancel_futures=True)
+                if visual_future is not None and visual_report['status'] == 'RUNNING':
+                    error = visual_future.exception() if not visual_future.cancelled() else 'Cancelled'
+                    visual_report.update(status='FAILED' if error else 'COMPLETED',
+                                         errors=[str(error)] if error else [])
+                    run.save('COMPLETED_WITH_ERRORS' if run.errors or error else 'COMPLETED')
+
+
+from .compiler import Compiler

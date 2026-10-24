@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path
@@ -39,6 +40,19 @@ def set_run_id(run_id: str | None) -> None:
     """Retain the compiler-run context without displaying it in log prefixes."""
 
     _current_run_id.set(str(run_id).strip() if run_id else None)
+
+
+def current_run_id() -> str | None:
+    return _current_run_id.get()
+
+
+@contextmanager
+def run_scope(run_id: str):
+    token = _current_run_id.set(run_id)
+    try:
+        yield
+    finally:
+        _current_run_id.reset(token)
 
 
 def format_terminal_log(

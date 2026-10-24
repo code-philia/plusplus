@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from compiler.budgets import positive_limit as budget
 from compiler.ir.backend import BackendIR
 from compiler.ir.database import ERModelIR
 from compiler.ir.frontend import FrontendIR
@@ -34,25 +35,20 @@ class TDDResult:
         return not self.errors
 
 
-def budget(name, default):
-    try:
-        return max(1, int(os.environ.get(name, str(default))))
-    except ValueError:
-        return default
-
-
 class EnvironmentBlocked(RuntimeError):
     """Executor failures preserve accepted edits and stop this implementation run."""
 
 
 class NodeTDDOrchestrator:
-    def __init__(self, model, output_root, *, runner=None, port=33100):
+    def __init__(self, model, output_root, *, runner=None, port=33100, budgets=None):
+        from compiler.budgets import ExecutionBudgets
+        self.budgets = budgets if budgets is not None else ExecutionBudgets.from_environment()
         self.model, self.root = model, Path(output_root).resolve()
         self.log = SynchronousLog('NodeTDDOrchestrator', workspace_root=self.root)
         self.artifact = self.root / '.arc/implementation'
-        self.attempts = budget('MODEL_ATTEMPT', 5)
-        self.iterations = budget('ARC_TDD_MAX_ITERATIONS', 5)
-        self.load_rounds = budget('ARC_TDD_LOAD_ROUNDS', 12)
+        self.attempts = self.budgets.model_attempts
+        self.iterations = self.budgets.tdd_iterations
+        self.load_rounds = self.budgets.load_rounds
         self.runner = runner or TestRunner(self.root)
         self.port, self.sequence = port, 0
         self.test_status = {}
@@ -273,7 +269,7 @@ class NodeTDDOrchestrator:
 
     def run_tests(self, targets, rid, phase, *, red=False):
         """Retry infrastructure without asking the model to rewrite valid tests."""
-        attempts = budget('ARC_TDD_RUN_ATTEMPTS', 2)
+        attempts = self.budgets.run_attempts
         for attempt in range(1, attempts + 1):
             results = self.runner.run(targets, port=self.port, red=red)
             self.gate(rid, f'{phase}_run_{attempt}', results)

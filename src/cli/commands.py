@@ -27,7 +27,7 @@ _locate_requirement_file = locate_requirement_file
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='ARC requirement compiler')
+    parser = argparse.ArgumentParser(prog='arc', description='ARC requirement compiler')
     parser.add_argument('--version', action='version', version='ARC 1.2.0')
     commands = parser.add_subparsers(dest='command', required=True)
     compile_parser = commands.add_parser('compile', help='Design, lower and implement an application')
@@ -43,7 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     configure_utf8_console()
-    args = build_parser().parse_args()
+    arguments = sys.argv[1:]
+    if not arguments or arguments[0] not in {'compile', 'config', 'doctor', '--version', '-h', '--help'}:
+        arguments = ['compile', *arguments]
+    args = build_parser().parse_args(arguments)
     try:
         if args.command == 'config':
             from cli.config import interactive_config_setup
@@ -61,7 +64,7 @@ def main() -> None:
             print_cli_banner()
             print_cli_startup(str(request.output_dir), str(request.requirement_path), False, request.web_port)
             started = time.monotonic()
-            result = asyncio.run(Compiler(log_cb=cli_log).compile(request))
+            result = asyncio.run(Compiler(request, log_cb=cli_log).compilation())
             print_compilation_summary(result.to_dict(), str(request.output_dir), time.monotonic() - started)
             code = 0 if result.completed else 1
     except (OSError, ValueError) as exc:

@@ -29,14 +29,13 @@ Return only request_files, edits and blocked_reason matching the response schema
 '''
 
 
-def repair_gate(model, output, stage, check, evidence, *, contracts=None):
+def repair_gate(model, output, stage, check, evidence, *, contracts=None, budgets=None):
     root = Path(output).resolve()
     log = SynchronousLog('StageRepair', workspace_root=root)
     artifact = root / '.arc/repairs' / stage
-    try:
-        attempts = max(1, int(os.getenv('MODEL_ATTEMPT', '5')))
-    except ValueError:
-        attempts = 5
+    from compiler.budgets import ExecutionBudgets
+    limits = budgets if budgets is not None else ExecutionBudgets.from_environment()
+    attempts = limits.model_attempts
     catalog = set()
     for layer in ('backend', 'frontend', 'shared'):
         for path in (root / layer / 'src').rglob('*'):
