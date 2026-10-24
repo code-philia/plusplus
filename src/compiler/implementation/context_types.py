@@ -1,7 +1,7 @@
 """Static descriptions of implementation context; no validation or conversion."""
 from typing import Any, Literal, NotRequired, TypedDict
 
-from compiler.ir.backend import BackendTypeDefinition
+from compiler.ir.type_contracts import TypeDefinition
 
 
 class SourceContextFile(TypedDict):
@@ -32,7 +32,7 @@ class FileIndexEntry(TypedDict):
 class ImplementationContext(TypedDict):
     current_task: CurrentTaskContext
     current_contracts: list[dict[str, Any]]
-    types: list[BackendTypeDefinition]
+    types: list[TypeDefinition]
     editable_files: dict[str, SourceContextFile]
     read_only_files: dict[str, SourceContextFile]
     shared_catalog: list[dict[str, Any]]

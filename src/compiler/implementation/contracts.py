@@ -1,6 +1,6 @@
 """Small load-or-patch model protocol for test generation, implementation and repair."""
 import json
-from compiler.backend_design.contracts import obj, STRING, STRINGS
+from model.schema import obj, STRING, STRINGS
 
 SCHEMA = obj({
     'request_files': STRINGS,

@@ -1,6 +1,6 @@
 """Framework-neutral UI tree, typed state and event-handler contracts."""
 from typing import Literal, TypedDict
-from .backend import BackendTypeDefinition
+from .type_contracts import TypeDefinition
 
 UIKind = Literal['app', 'page', 'region', 'form', 'list', 'item', 'input', 'button',
                  'text', 'image', 'dialog', 'navigation', 'other']
@@ -54,7 +54,7 @@ class FrontendIR(TypedDict):
     data: list[FrontendData]
     events: list[FrontendEvent]
     handlers: list[FrontendHandler]
-    types: list[BackendTypeDefinition]
+    types: list[TypeDefinition]
 
 
 class PageReferenceState(TypedDict):

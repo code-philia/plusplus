@@ -1,12 +1,6 @@
 """Small non-embedding retrieval and requirement-specific database context."""
-import json
-import re
 import copy
-
-
-def terms(value):
-    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', json.dumps(value, ensure_ascii=False))
-    return set(re.findall(r'[a-z0-9]+|[\u4e00-\u9fff]', text.lower()))
+from compiler.context.retrieval import terms, overlap
 
 
 def database_context(database, rid):
@@ -32,7 +26,7 @@ def retrieve(ir, kind, requirement, data, accesses, k=10):
         if row['kind'] != kind:
             continue
         score = max((scores.get(rid, 0) for rid in row['reqs']), default=0)
-        score += len(query & terms(row['name'] + ' ' + row['spec']))
+        score += overlap(query, row['name'] + ' ' + row['spec'])
         if row['shared']:
             score += 2
         if score:

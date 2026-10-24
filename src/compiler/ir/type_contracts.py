@@ -1,6 +1,34 @@
 """JSON Schema contracts shared by design passes and lowering."""
 import json
 import re
+from typing import TypedDict
+
+
+class TypeDefinition(TypedDict):
+    """Named JSON Schema stored as a JSON string, with #/types/Name references."""
+    name: str
+    schema: str
+
+
+def iter_refs(raw, *, named_only=False):
+    """Yield references in document order; named_only ignores non-type references."""
+    def visit(value):
+        if isinstance(value, dict):
+            if '$ref' in value:
+                reference = value['$ref']
+                if not named_only or isinstance(reference, str) and reference.startswith('#/types/'):
+                    yield reference[8:]
+            for item in value.values():
+                yield from visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from visit(item)
+    return visit(json.loads(raw))
+
+
+def refs(raw, *, named_only=False):
+    """Collect references, preserving legacy slicing/errors unless named_only is set."""
+    return set(iter_refs(raw, named_only=named_only))
 
 
 def normalize_contract(raw):

@@ -1,6 +1,8 @@
 """Small model deltas; compiler-owned identities and reciprocal links are omitted."""
 import json
-from compiler.backend_design.contracts import obj, STRING, STRINGS, TYPE
+from model.schema import obj, STRING, STRINGS
+
+TYPE = obj({'name': STRING, 'schema': STRING})
 
 KINDS = ['region', 'form', 'list', 'item', 'input', 'button', 'text', 'image', 'dialog', 'navigation', 'other']
 TRIGGERS = ['click', 'change', 'input', 'submit', 'load', 'focus', 'blur', 'keydown', 'select', 'toggle', 'close']

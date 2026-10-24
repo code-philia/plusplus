@@ -25,21 +25,6 @@ def contract(raw, definitions, interface=True, namespace="", *, payload=False):
     return ts_type(parse_contract(raw, 'lowering contract', definitions, interface=interface, payload=payload), namespace)
 
 
-def refs(raw):
-    found = set()
-    def visit(value):
-        if isinstance(value, dict):
-            if '$ref' in value:
-                found.add(value['$ref'][8:])
-            for item in value.values():
-                visit(item)
-        elif isinstance(value, list):
-            for item in value:
-                visit(item)
-    visit(json.loads(raw))
-    return found
-
-
 def type_file(definitions):
     mapping = {row['name']: row['schema'] for row in definitions}
     if len(mapping) != len(definitions):

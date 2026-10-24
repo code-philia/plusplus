@@ -1,10 +1,9 @@
 """Canonical backend symbol table; module identities and graph edges are compiler-owned."""
 from typing import Literal, TypedDict
+from .type_contracts import TypeDefinition
 
 
-class BackendTypeDefinition(TypedDict):
-    name: str
-    schema: str  # JSON Schema; references use #/types/Name.
+BackendTypeDefinition = TypeDefinition
 
 
 class ModuleBase(TypedDict):
@@ -38,5 +37,5 @@ class DatabaseModule(FunctionModule):
 
 class BackendIR(TypedDict):
     ir_kind: Literal['backend_design']
-    types: list[BackendTypeDefinition]
+    types: list[TypeDefinition]
     modules: list[APIModule | FunctionModule | DatabaseModule]

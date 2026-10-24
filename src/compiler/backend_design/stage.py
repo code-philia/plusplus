@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from compiler.preprocessing.traversal import postorder, children_by_id
+from compiler.preprocessing.queries import ancestor_ids, leaf_ids
 from model.client import describe_model_error
 from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
@@ -49,8 +49,7 @@ class BackendDesignPass:
         if database.get('ir_kind') != 'er_model' or database.get('status') != 'RESOLVED':
             raise ValueError('Backend design requires a RESOLVED er_model.json')
         ir = {'ir_kind': 'backend_design', 'types': [], 'modules': []}
-        children = children_by_id(requirements)
-        order = [rid for rid in postorder(requirements) if not children[rid]]
+        order = leaf_ids(requirements)
         states, warnings = {}, []
         # Process: Design each leaf on a transactional copy ====================================
         for rid in order:
@@ -125,13 +124,9 @@ class BackendDesignPass:
             normalized = str(reference or '').replace('\\', '/')
             record = cache.get(normalized, {})
             page['analysis'] = page.get('analysis', record.get('analysis') if isinstance(record, dict) else None)
-        ancestors, seen = [], set()
-        parent = node.get('parent_id')
-        while parent in nodes and parent not in seen:
-            seen.add(parent)
-            ancestors.append({key: nodes[parent].get(key, '') for key in ('id', 'name', 'description')})
-            parent = nodes[parent].get('parent_id')
-        result['ancestor_constraints'] = list(reversed(ancestors))
+        result['ancestor_constraints'] = [
+            {key: nodes[parent].get(key, '') for key in ('id', 'name', 'description')}
+            for parent in ancestor_ids(nodes, node.get('parent_id'))]
         return result
 
     def decision(self, kind, rid, base, upstream, payload, database):

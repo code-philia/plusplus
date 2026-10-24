@@ -6,7 +6,8 @@ from typing import Any
 from compiler.frontend_design.validation import ui_index
 from compiler.lowering.files import write_stage
 from compiler.lowering.planning import group_for, group_directory, unique_name, portable_stem, relative_import
-from compiler.lowering.types import contract, refs, type_file
+from compiler.ir.type_contracts import refs
+from compiler.lowering.types import contract, type_file
 
 
 @dataclass

@@ -4,16 +4,11 @@ from pathlib import Path
 
 from compiler.frontend_design.delta import make_ui
 from compiler.frontend_design.validation import ui_index
-from compiler.preprocessing.traversal import children_by_id, postorder
+from compiler.preprocessing.queries import leaf_ids
+from compiler.ir.type_registry import TypeRegistry
 from .files import write_stage, digest
 from utils.jsonio import read_json, write_json_atomic
 from .planning import slug, token
-from .types import refs
-
-
-def leaf_ids(requirements):
-    children = children_by_id(requirements)
-    return [rid for rid in postorder(requirements) if not children[rid]]
 
 
 def empty_design(stage):
@@ -26,15 +21,7 @@ def empty_design(stage):
 
 
 def used_types(definitions, contracts):
-    wanted = set().union(*(refs(raw) for raw in contracts))
-    registry = {row['name']: row for row in definitions}
-    pending = list(wanted)
-    while pending:
-        name = pending.pop()
-        if name in registry:
-            fresh = refs(registry[name]['schema']) - wanted
-            pending.extend(fresh)
-            wanted.update(fresh)
+    wanted = TypeRegistry(definitions).resolve(contracts).names
     return [copy.deepcopy(row) for row in definitions if row['name'] in wanted]
 
 

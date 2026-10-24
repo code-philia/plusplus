@@ -1,8 +1,10 @@
 """Page-local contexts, compact summaries and small contract reuse catalogs."""
 import copy
-import json
 import re
-from compiler.backend_design.context import database_context, retrieve, terms
+from itertools import chain
+from compiler.backend_design.context import database_context, retrieve
+from compiler.context.retrieval import terms, overlap
+from compiler.ir.type_registry import TypeRegistry
 from .validation import ui_index
 
 
@@ -49,27 +51,9 @@ def expand_api_context(backend, payload, output):
 
 
 def select_types(ir, apis, contracts=()):
-    definitions = {row['name']: row for row in ir['types']}
-    used = set()
-    def visit(value):
-        if isinstance(value, dict):
-            reference = value.get('$ref', '')
-            if isinstance(reference, str) and reference.startswith('#/types/'):
-                name = reference[8:]
-                if name in definitions and name not in used:
-                    used.add(name)
-                    visit(json.loads(definitions[name]['schema']))
-            for child in value.values():
-                visit(child)
-        elif isinstance(value, list):
-            for child in value:
-                visit(child)
-    for api in apis:
-        for field in ('payload', 'response'):
-            visit(json.loads(api[field]))
-    for raw in contracts:
-        visit(json.loads(raw))
-    return used
+    registry = TypeRegistry(ir['types'])
+    roots = chain((api[field] for api in apis for field in ('payload', 'response')), contracts)
+    return set(registry.resolve(roots, named_only=True).names)
 
 
 def state_context(ir, ids):
@@ -85,7 +69,7 @@ def handler_context(ir, ids, data, apis, requirement, k=10):
     for row in ir['handlers']:
         if set(row['read'] + row['write']) - available_data or set(row['apis']) - available_apis:
             continue
-        score = len(query & terms(row['name'] + ' ' + row['spec']))
+        score = overlap(query, row['name'] + ' ' + row['spec'])
         score += 5 * len(set(row['read'] + row['write']) & available_data)
         if row['id'] in direct or score:
             ranked.append((score, row))

@@ -11,7 +11,7 @@ from compiler.ir.backend import BackendIR
 from compiler.ir.database import ERModelIR
 from compiler.ir.frontend import FrontendIR
 from compiler.ir.shape_validation import shape_errors
-from compiler.preprocessing.traversal import children_by_id, postorder
+from compiler.preprocessing.queries import ancestor_ids, leaf_ids
 from compiler.lowering.planning import slug, token
 from model.client import describe_model_error
 from utils.jsonio import write_json_atomic
@@ -84,8 +84,7 @@ class NodeTDDOrchestrator:
         if missing:
             raise ValueError('Run database lowering before TDD: missing ' + ', '.join(missing))
         self.runner.prepare()
-        children = children_by_id(requirements)
-        order = [rid for rid in postorder(requirements) if not children[rid]]
+        order = leaf_ids(requirements)
         needs_browser = bool(frontend['ui']['children']) or any(
             'frontend' in layers for layers in self.context.recovery.values())
         environment = self.runner.check_environment(browser=needs_browser)
@@ -269,14 +268,8 @@ class NodeTDDOrchestrator:
 
     @staticmethod
     def descends(rid, parent, requirements):
-        current = requirements['nodes'][rid].get('parent_id')
-        seen = set()
-        while current in requirements['nodes'] and current not in seen:
-            if current == parent:
-                return True
-            seen.add(current)
-            current = requirements['nodes'][current].get('parent_id')
-        return False
+        nodes = requirements['nodes']
+        return parent in ancestor_ids(nodes, nodes[rid].get('parent_id'))
 
     def run_tests(self, targets, rid, phase, *, red=False):
         """Retry infrastructure without asking the model to rewrite valid tests."""

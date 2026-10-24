@@ -1,14 +1,8 @@
 """Separated system instructions and strict model delta formats."""
 import json
+from model.schema import obj, STRING, STRINGS
 
 
-def obj(properties, required=None):
-    return {'type': 'object', 'additionalProperties': False, 'properties': properties,
-            'required': list(properties) if required is None else required}
-
-
-STRING = {'type': 'string'}
-STRINGS = {'type': 'array', 'items': STRING}
 TYPE = obj({'name': STRING, 'schema': STRING})
 COMMON = {'name': STRING, 'spec': STRING, 'shared': {'type': 'boolean'}, 'shared_reason': STRING}
 DECLARATIONS = {

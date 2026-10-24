@@ -9,7 +9,7 @@ from typing import Any
 
 from compiler.backend_design.context import database_context, module_index
 from compiler.ir.shape_validation import shape_errors
-from compiler.preprocessing.traversal import children_by_id, postorder
+from compiler.preprocessing.queries import ancestor_ids, leaf_ids
 from model.client import describe_model_error
 from utils.jsonio import read_json, write_json_atomic
 from utils.logging import SynchronousLog
@@ -67,8 +67,7 @@ class FrontendDesignPass:
         if initial_errors:
             raise ValueError('Invalid imported backend types: ' + '; '.join(initial_errors))
         page_states, states, warnings = [], {}, []
-        children = children_by_id(requirements)
-        order = [rid for rid in postorder(requirements) if not children[rid]]
+        order = leaf_ids(requirements)
         # Process: Design each leaf on transactional UI and page copies ========================
         for rid in order:
             self.log.info('Leaf design: RUNNING', node_id=rid)
@@ -190,13 +189,9 @@ class FrontendDesignPass:
         for page in result.get('pages', []):
             if page.get('reference'):
                 page['reference'] = page['reference'].replace('\\', '/')
-        ancestors, seen = [], set()
-        parent = node.get('parent_id')
-        while parent in nodes and parent not in seen:
-            seen.add(parent)
-            ancestors.append({key: nodes[parent].get(key, '') for key in ('id', 'name', 'description')})
-            parent = nodes[parent].get('parent_id')
-        result['ancestor_constraints'] = list(reversed(ancestors))
+        result['ancestor_constraints'] = [
+            {key: nodes[parent].get(key, '') for key in ('id', 'name', 'description')}
+            for parent in ancestor_ids(nodes, node.get('parent_id'))]
         return result
 
     def types(self, ir, apis, data, handlers=()):

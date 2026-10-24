@@ -11,7 +11,7 @@ from typing import Any
 from .contracts import CompilationRequest, CompilationResult
 from .run_report import CompilationRunReport
 from .preprocessing import RequirementPreprocessor
-from .preprocessing.traversal import children_by_id, postorder
+from .preprocessing.queries import leaf_ids
 from utils.jsonio import read_json, write_json_atomic
 from utils.logging import SynchronousLog, set_run_id
 
@@ -42,8 +42,7 @@ class Compiler:
         root = output / '.arc'
         self.logger = SynchronousLog('Compiler', workspace_root=output)
         requirements = parsed.requirement_ir
-        children = children_by_id(requirements)
-        leaves = [rid for rid in postorder(requirements) if not children[rid]]
+        leaves = leaf_ids(requirements)
         states = {rid: 'PENDING' if rid in leaves else 'ORGANIZATIONAL' for rid in requirements['nodes']}
         existing = read_json(root / 'preprocessing/requirement_ir.json', {})
         if existing and existing.get('source') != requirements.get('source'):

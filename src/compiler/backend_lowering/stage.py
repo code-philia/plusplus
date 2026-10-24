@@ -3,7 +3,8 @@ import json
 import re
 from compiler.lowering.files import write_stage
 from compiler.lowering.planning import group_for, group_directory, portable_stem, relative_import
-from compiler.lowering.types import contract, refs, type_file
+from compiler.ir.type_contracts import refs
+from compiler.lowering.types import contract, type_file
 from compiler.backend_design.validation import graph_errors, route_key
 
 

@@ -8,9 +8,10 @@ from typing import Any
 from compiler.ir.backend import BackendIR
 from compiler.ir.database import ERModelIR
 from compiler.ir.frontend import FrontendIR
-from compiler.backend_design.context import terms
+from compiler.context.retrieval import terms, overlap
 from compiler.frontend_design.validation import ui_index
-from compiler.lowering.types import refs
+from compiler.ir.type_registry import TypeRegistry
+from compiler.preprocessing.queries import ancestor_ids
 from .patcher import read_source
 from .context_types import ImplementationContext
 from .working_context import WorkingContext
@@ -131,7 +132,7 @@ class FileContext:
                 continue
             if rid in row['reqs']:
                 continue
-            score = len(query & terms(row['summaries']))
+            score = overlap(query, row['summaries'])
             for other_rid in row['reqs']:
                 access = self.database.get('access', {}).get(other_rid, {})
                 other = set(access.get('read', [])) | set(access.get('write', []))
@@ -203,14 +204,9 @@ class FileContext:
         return writable
 
     def ancestor_constraints(self, parent):
-        constraints = []
-        seen = set()
-        while parent in self.requirements['nodes'] and parent not in seen:
-            seen.add(parent)
-            node = self.requirements['nodes'][parent]
-            constraints.append({key: node.get(key) for key in ('id','name','description')})
-            parent = node.get('parent_id')
-        return list(reversed(constraints))
+        nodes = self.requirements['nodes']
+        return [{key: nodes[parent].get(key) for key in ('id', 'name', 'description')}
+                for parent in ancestor_ids(nodes, parent)]
 
     def build(
         self, rid: str, phase: str, session: WorkingContext, test_targets: Collection[str],
@@ -282,23 +278,14 @@ class FileContext:
             contracts += [copy.deepcopy(row) for row in self.backend['modules']
                           if row['kind'] == 'API' and (rid in row['reqs'] or row['id'] in needed_apis)]
         contracts = list({json.dumps(row, sort_keys=True, ensure_ascii=False): row for row in contracts}.values())
-        wanted_types = set()
-        definitions = {row['name']: row for row in self.backend['types'] + self.frontend['types']}
-        for contract in contracts:
-            for field in ('input', 'output', 'payload', 'response', 'schema'):
-                if field in contract:
-                    wanted_types.update(refs(contract[field]))
-        pending = list(wanted_types)
-        while pending:
-            name = pending.pop()
-            if name in definitions:
-                for ref in refs(definitions[name]['schema']) - wanted_types:
-                    wanted_types.add(ref)
-                    pending.append(ref)
+        registry = TypeRegistry(self.backend['types'] + self.frontend['types'])
+        wanted_types = registry.resolve(
+            contract[field] for contract in contracts
+            for field in ('input', 'output', 'payload', 'response', 'schema') if field in contract).names
         data_access = self.database.get('access', {}).get(rid, {'read': [], 'write': []})
         return {'current_task': {'requirement': requirement, 'phase': phase, 'data_access': data_access,
                                  **({'recovery': self.recovery[rid]} if rid in self.recovery else {})},
-                'current_contracts': contracts, 'types': [definitions[key] for key in sorted(wanted_types) if key in definitions],
+                'current_contracts': contracts, 'types': [registry[key] for key in sorted(wanted_types)],
                 'editable_files': editable, 'read_only_files': readonly,
                 'shared_catalog': shared, 'related_catalog': related,
                 'test_targets': [path for path in test_targets if self.phase_path(path, phase)],
