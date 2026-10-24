@@ -9,8 +9,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 from utils.jsonio import write_json_atomic
 
-from .tools import (CONTEXT_FILES, PROPOSE_EDITS, IndeterminateToolCall, JsonActionAdapter,
-                    ToolCall, ToolRegistry)
+from .tools import (CONTEXT_FILES, PROPOSE_EDITS, ActionAdapter, IndeterminateToolCall, ToolRegistry)
 
 
 class RuntimeStatus(str, Enum):
@@ -20,6 +19,7 @@ class RuntimeStatus(str, Enum):
     CANCELLED = 'CANCELLED'
     FAILED = 'FAILED'
     INDETERMINATE = 'INDETERMINATE'
+    FINISHED = 'FINISHED'
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +53,7 @@ class AgentPolicy(Protocol):
     def begin_attempt(self, attempt: int) -> None: ...
     def prepare(self, feedback: list[str], rejected_files: list[str]) -> Any: ...
     def invoke(self, invocation: Any) -> Any: ...
+    def invoke_native(self, invocation: Any, *, tools: list[dict], messages: list[dict]) -> Any: ...
     def validate_context(self, invocation: Any, arguments: dict) -> None: ...
     def context(self, invocation: Any, arguments: dict) -> Any: ...
     def propose(self, invocation: Any, edits: list[dict], *, check_cancelled) -> Any: ...
@@ -60,7 +61,7 @@ class AgentPolicy(Protocol):
 
 
 class AgentRuntime:
-    def __init__(self, policy: AgentPolicy, *, adapter: JsonActionAdapter, budgets: RuntimeBudgets,
+    def __init__(self, policy: AgentPolicy, *, adapter: ActionAdapter, budgets: RuntimeBudgets,
                  cancelled=lambda: False):
         self.policy, self.adapter, self.budgets, self.cancelled = policy, adapter, budgets, cancelled
         self.result = RuntimeResult(RuntimeStatus.FAILED)
@@ -88,7 +89,8 @@ class AgentRuntime:
                 if self.budgets.context_per_attempt:
                     context_rounds = 0
                 while self.result.calls < self.budgets.max_calls:
-                    raw, action, event = None, None, None
+                    raw, action, event, turn = None, None, None, None
+                    results, turn_error = [], None
                     self.invocation = None
                     try:
                         self.check_cancelled()
@@ -97,32 +99,62 @@ class AgentRuntime:
                         call_id = f'{self.run_id}:{self.result.calls}'
                         event = {'call_id': call_id, 'attempt': attempt, 'status': 'RUNNING'}
                         self.result.trace.append(event)
-                        raw = self.policy.invoke(self.invocation)
-                        event['raw_response'] = raw
+                        raw = self.adapter.invoke(self.policy, self.invocation, self.registry.definitions)
+                        event['raw_response'] = self.adapter.trace_response(raw)
                         self.check_cancelled()
-                        action = self.adapter.parse(raw)
-                        event['action'] = {'kind': action.kind, 'arguments': action.arguments,
-                                           'blocked_reason': action.blocked_reason}
-                        if action.kind == 'blocked':
+                        turn = self.adapter.decode(raw, call_id)
+                        if turn.legacy_action is not None:
+                            action = turn.legacy_action
+                            event['action'] = {'kind': action.kind, 'arguments': action.arguments,
+                                               'blocked_reason': action.blocked_reason}
+                        else:
+                            event['actions'] = [{'call_id': call.call_id, 'name': call.name,
+                                                 'arguments': call.arguments} for call in turn.calls]
+                        if turn.terminal:
+                            self.result.status = RuntimeStatus.BLOCKED if turn.blocked_reason else RuntimeStatus.FINISHED
+                            self.result.value = turn.final_output
+                            self.result.feedback = [turn.blocked_reason or
+                                ('Model finished without an accepted file proposal: ' + (turn.final_output or ''))]
+                            event['status'] = self.result.status.value
+                            event['final_output'] = turn.final_output
+                            return self.result
+                        if turn.blocked_reason:
                             event['status'] = 'BLOCKED'
-                            raise ValueError(action.blocked_reason)
-                        if action.kind == 'context_files':
-                            self.policy.validate_context(self.invocation, action.arguments)
+                            raise ValueError(turn.blocked_reason)
+                        proposals = [call for call in turn.calls if call.name == 'propose_edits']
+                        if proposals and len(turn.calls) != 1:
+                            raise ValueError('Submit one coordinated proposal without other tool calls')
+                        if proposals and not proposals[0].arguments.get('edits'):
+                            raise ValueError('Provide a nonempty source edit proposal')
+                        contexts = [call for call in turn.calls if call.name == 'context_files']
+                        for call in turn.calls:
+                            self.registry.validate(call)
+                        for call in contexts:
+                            self.policy.validate_context(self.invocation, call.arguments)
+                        if contexts:
                             context_rounds += 1
                             if context_rounds > self.budgets.context_rounds:
                                 raise ValueError(self.policy.context_budget_message)
-                        self.check_cancelled()
-                        tool = self.registry.dispatch(ToolCall(call_id, action.kind, action.arguments))
-                        event['tool'] = {'state': tool.state.value, 'effects': tool.effects,
-                                         'value': tool.value,
-                                         'error': str(tool.error) if tool.error else None}
-                        value = tool.require_value()
-                        event['status'] = 'ACCEPTED' if action.kind == 'propose_edits' else 'CONTEXT_UPDATED'
-                        if action.kind == 'propose_edits':
+                        for call in turn.calls:
+                            self.check_cancelled()
+                            if call.name == 'context_files' and len(contexts) > 1:
+                                self.policy.validate_context(self.invocation, call.arguments)
+                            tool = self.registry.dispatch(call)
+                            results.append(tool)
+                            record = {'call_id': call.call_id, 'state': tool.state.value, 'effects': tool.effects,
+                                      'value': tool.value, 'error': str(tool.error) if tool.error else None}
+                            if turn.legacy_action is not None:
+                                event['tool'] = {key: value for key, value in record.items() if key != 'call_id'}
+                            else:
+                                event.setdefault('tools', []).append(record)
+                            value = tool.require_value()
+                        event['status'] = 'ACCEPTED' if proposals else 'CONTEXT_UPDATED'
+                        if proposals:
                             self.result.status, self.result.value = RuntimeStatus.ACCEPTED, value
                             self.result.feedback = feedback
                             return self.result
                     except Exception as error:
+                        turn_error = error
                         if event is not None:
                             if event['status'] != 'BLOCKED':
                                 event['status'] = 'REJECTED'
@@ -130,10 +162,17 @@ class AgentRuntime:
                         if isinstance(error, (IndeterminateToolCall, TypeError, AttributeError, NameError,
                                               KeyError, AssertionError, NotImplementedError)):
                             raise
-                        feedback = self.policy.reject(error, self.invocation, raw)
-                        rejected_files = self.rejected_files(raw)
+                        rejected = self.adapter.rejection_payload(raw)
+                        feedback = self.policy.reject(error, self.invocation, rejected)
+                        rejected_files = self.rejected_files(rejected)
                         self.result.feedback = feedback
                         break
+                    except BaseException as error:
+                        turn_error = error
+                        raise
+                    finally:
+                        if turn is not None:
+                            self.adapter.record_results(turn, results, turn_error)
             self.result.status = (RuntimeStatus.BLOCKED if self.result.trace and
                 self.result.trace[-1]['status'] == 'BLOCKED' else RuntimeStatus.EXHAUSTED)
             return self.result
@@ -152,7 +191,7 @@ class AgentRuntime:
             self.result.trace[-1]['status'] = status
 
     def report(self):
-        return {'run_id': self.run_id, 'status': self.result.status.value,
+        return {'run_id': self.run_id, 'protocol': self.adapter.protocol, 'status': self.result.status.value,
                 'attempts': self.result.attempts, 'model_calls': self.result.calls,
                 'max_model_calls': self.budgets.max_calls,
                 'feedback': self.result.feedback, 'trace': self.result.trace}

@@ -11,7 +11,7 @@ from model.logging import log_design_call, logged_completion
 from utils.logging import SynchronousLog
 
 
-from .contracts import StructuredModel
+from .contracts import StructuredModel, ModelToolCall, ModelToolTurn
 from .messages import system_instructions, user_messages
 
 
@@ -212,6 +212,36 @@ class Model:
         if not isinstance(parsed, dict):
             raise ValueError("Structured model response must be a JSON object.")
         return parsed
+
+    @log_design_call
+    def generate_tool_turn(self, *, schema_name: str, instructions: str,
+                           input_payload: dict[str, Any], tools: list[dict[str, Any]],
+                           messages: list[dict[str, Any]]) -> ModelToolTurn:
+        request = completion_request_kwargs(model=self.model, messages=[
+            {'role': 'system', 'content': system_instructions(instructions)},
+            *messages, *user_messages(input_payload, schema_name=schema_name)])
+        request.update(tools=tools, tool_choice='auto', parallel_tool_calls=True)
+        self._last_output_mode = 'native_tools'
+        response = logged_completion(self._client, **request)
+        self.record_usage(response, schema_name=schema_name, operation='generate_tool_turn')
+        if not response.choices:
+            raise ValueError('Native tool response has no choices')
+        choice = response.choices[0]
+        message = choice.message
+        calls = tuple(ModelToolCall(call.id, getattr(getattr(call, 'function', None), 'name', ''),
+            getattr(getattr(call, 'function', None), 'arguments', ''), call.type)
+            for call in message.tool_calls or [])
+        assistant = {'role': 'assistant', 'content': message.content}
+        if message.tool_calls:
+            assistant['tool_calls'] = [jsonable(call) for call in message.tool_calls]
+        refusal = getattr(message, 'refusal', None)
+        if refusal is not None:
+            assistant['refusal'] = refusal
+        reasoning = getattr(message, 'reasoning_content', None)
+        if reasoning is not None:
+            assistant['reasoning_content'] = reasoning
+        return ModelToolTurn(calls, assistant, jsonable(response), choice.finish_reason,
+                             message.content, refusal)
 
     def record_usage(self, response: Any, *, schema_name: str, operation: str) -> None:
         record_model_usage(self._usage_path, response, schema_name=schema_name,

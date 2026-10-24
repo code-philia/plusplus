@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent.files import FileInvocation, FileTransaction, read_source, source_versions
 from agent.tools import JSON_ACTION_SCHEMA
+from agent.native import native_instructions
 from compiler.context.model_calls import invoke_model
 from compiler.repair_presentation import repair_metadata
 
@@ -39,6 +40,11 @@ class GateRepairPolicy:
     def invoke(self, invocation):
         return invoke_model(self.model, repair_metadata(), schema_name='stage_repair',
             instructions=self.instructions, input_payload=invocation.payload, output_schema=JSON_ACTION_SCHEMA)
+
+    def invoke_native(self, invocation, *, tools, messages):
+        return invoke_model(self.model, repair_metadata(), method='generate_tool_turn',
+            schema_name='stage_repair', instructions=native_instructions(self.instructions),
+            input_payload=invocation.payload, tools=tools, messages=messages)
 
     def validate_context(self, invocation, arguments):
         if (set(arguments['request_files']) | set(arguments['release_files'])) - self.catalog - self.configs:

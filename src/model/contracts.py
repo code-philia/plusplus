@@ -1,7 +1,32 @@
 """Technology-independent model protocols; implementations live in client and vision."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol
+
+
+@dataclass(frozen=True, slots=True)
+class ModelToolCall:
+    call_id: str
+    name: str
+    arguments: str
+    kind: str = 'function'
+
+
+@dataclass(frozen=True, slots=True)
+class ModelToolTurn:
+    calls: tuple[ModelToolCall, ...]
+    assistant_message: dict[str, Any]
+    raw_response: dict[str, Any]
+    finish_reason: str
+    content: str | None = None
+    refusal: str | None = None
+
+
+class ToolModel(Protocol):
+    def generate_tool_turn(self, *, schema_name: str, instructions: str,
+                           input_payload: dict[str, Any], tools: list[dict[str, Any]],
+                           messages: list[dict[str, Any]]) -> ModelToolTurn: ...
 
 
 class StructuredModel(Protocol):

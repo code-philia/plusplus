@@ -20,6 +20,7 @@ from .working_context import WorkingContext
 from agent.files import read_source, restore
 from agent.runtime import AgentRuntime, RuntimeBudgets, RuntimeStatus
 from agent.tools import IndeterminateToolCall, JsonActionAdapter
+from agent.native import select_action_adapter
 from .agent_policy import ImplementationAgentPolicy
 from .test_runner import TestRunner, passed
 
@@ -330,7 +331,8 @@ class NodeTDDOrchestrator:
         adapter = JsonActionAdapter(transport_echo=True,
             on_echo=lambda: self.log.warning('Removed echoed type:json_object transport metadata', node_id=rid),
             empty_message='Provide implementation/test edits; no-op response cannot satisfy this task')
-        runtime = AgentRuntime(policy, adapter=adapter, budgets=RuntimeBudgets(self.attempts, self.load_rounds))
+        runtime = AgentRuntime(policy, adapter=select_action_adapter(self.model, json_adapter=adapter),
+                               budgets=RuntimeBudgets(self.attempts, self.load_rounds))
         try:
             result = runtime.run()
         finally:

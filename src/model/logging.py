@@ -54,6 +54,12 @@ def save(path: Path, record: dict[str, Any]) -> None:
                 if "output" in attempt:
                     handle.write(f"\n\n{prefix} MODEL_OUTPUT\n")
                     handle.write(attempt["output"] or "")
+                if 'tools' in attempt.get('request', {}):
+                    handle.write(f'\n\n{prefix} MODEL_NATIVE_REQUEST\n' +
+                                 json.dumps(attempt['request'], ensure_ascii=False, default=str))
+                if 'raw_response' in attempt:
+                    handle.write(f'\n\n{prefix} MODEL_RAW_RESPONSE\n' +
+                                 json.dumps(attempt['raw_response'], ensure_ascii=False, default=str))
                 if attempt.get('usage') is not None:
                     handle.write(f"\n\n{prefix} MODEL_USAGE " + json.dumps(attempt['usage'], ensure_ascii=False, default=str))
                 if attempt.get("reasoning") is not None:
@@ -125,6 +131,10 @@ def logged_completion(client: Any, **request: Any) -> Any:
         message = response.choices[0].message
         attempt.update(status="SUCCEEDED", output=message.content,
                        reasoning=getattr(message, "reasoning_content", None))
+        if getattr(message, 'tool_calls', None):
+            attempt['tool_calls'] = [call.model_dump() for call in message.tool_calls]
+        if request.get('tools'):
+            attempt['raw_response'] = response.model_dump()
         usage = getattr(response, 'usage', None)
         if usage is not None:
             attempt['usage'] = usage.model_dump() if hasattr(usage, 'model_dump') else usage

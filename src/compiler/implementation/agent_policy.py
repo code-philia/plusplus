@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from agent.files import FileInvocation, FileTransaction, source_versions
 from agent.runtime import AgentRuntime
+from agent.native import native_instructions
 from compiler.context.model_calls import invoke_model
 from model.client import describe_model_error
 from .contracts import PROMPTS, SCHEMA
@@ -36,6 +37,12 @@ class ImplementationAgentPolicy:
         self.call_number = self.call_started()
         return invoke_model(self.model, implementation_metadata(self.phase), schema_name='tdd_' + self.phase,
             instructions=PROMPTS[self.phase], input_payload=invocation.payload, output_schema=SCHEMA)
+
+    def invoke_native(self, invocation, *, tools, messages):
+        self.call_number = self.call_started()
+        return invoke_model(self.model, implementation_metadata(self.phase), method='generate_tool_turn',
+            schema_name='tdd_' + self.phase, instructions=native_instructions(PROMPTS[self.phase]),
+            input_payload=invocation.payload, tools=tools, messages=messages)
 
     def validate_context(self, invocation, arguments):
         self.reads = self.file_context.files.resolve_requests(arguments['request_files'], self.targets)

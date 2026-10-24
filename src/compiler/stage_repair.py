@@ -1,5 +1,6 @@
 """Gate-repair entrypoint; the shared runtime owns the only model/tool loop."""
 from pathlib import Path
+from agent.native import select_action_adapter
 
 from agent.runtime import AgentRuntime, RuntimeBudgets, RuntimeStatus
 from agent.tools import JsonActionAdapter, FILE_ACTION_INSTRUCTIONS
@@ -34,8 +35,8 @@ def repair_gate(model, output, stage, check, evidence, *, contracts=None, budget
     policy = GateRepairPolicy(model=model, root=root, stage=stage, check=check, evidence=evidence,
         contracts=contracts, instructions=INSTRUCTIONS, logger=SynchronousLog('StageRepair', workspace_root=root),
         attempts=limits.model_attempts)
-    runtime = AgentRuntime(policy, adapter=JsonActionAdapter(strip_blocked=False,
-        mixed_message='Read/release only catalog files without edits', empty_message='Provide a targeted source repair'),
+    runtime = AgentRuntime(policy, adapter=select_action_adapter(model, json_adapter=JsonActionAdapter(strip_blocked=False,
+        mixed_message='Read/release only catalog files without edits', empty_message='Provide a targeted source repair')),
         budgets=RuntimeBudgets(limits.model_attempts, 12, context_per_attempt=True))
     try:
         result = runtime.run()
