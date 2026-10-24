@@ -25,6 +25,8 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["src"]
 include = [
+  "agent",
+  "agent.*",
   "compiler",
   "compiler.*",
   "cli",

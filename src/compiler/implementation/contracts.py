@@ -1,13 +1,7 @@
 """Small load-or-patch model protocol for test generation, implementation and repair."""
 import json
-from model.schema import obj, STRING, STRINGS
+from agent.tools import JSON_ACTION_SCHEMA as SCHEMA, FILE_ACTION_INSTRUCTIONS
 
-SCHEMA = obj({
-    'request_files': STRINGS,
-    'release_files': STRINGS,
-    'edits': {'type': 'array', 'items': obj({'file': STRING, 'content': STRING})},
-    'blocked_reason': STRING,
-})
 BACKGROUND = '''## Background and role
 You implement ONE leaf requirement in a generated TypeScript Express/React application using TDD.
 The database, backend and frontend symbol tables and lowering plans supply exact contracts and file paths.
@@ -27,8 +21,7 @@ you can integrate actual routes even when design-stage API contracts were unavai
 editable_files contains current full text for the entire writable allowlist.
 always_loaded_files lists current requirement-associated module/UI files supplied in this invocation. Their
 FULL CONTENTS are already in editable_files or read_only_files, not merely available for discovery.
-Read those supplied contents directly. You can return edits on the FIRST invocation without a
-preliminary file request. Re-reading a supplied file is supported and returns its latest version.
+Read those supplied contents directly; a preliminary request is unnecessary when source is already supplied.
 Their editability depends on this phase: editable_files is the ONLY write allowlist; read_only_files
 remains read-only. Shared files not directly associated with the current requirement (including schema,
 connection, seed, server entrypoints and styles) are listed with paths/summaries in shared_catalog;
@@ -46,11 +39,9 @@ phases keep tests read-only. During repair, loaded current or regression accepta
 corrected when their assumptions, setup, selectors or assertions contradict the governing requirement.
 Never guess source.
 Do not request a dependency closure or every component. Load the few files required by actual imports,
-call chains, composition or observed errors. Any file request must have no edits in that same response.
+call chains, composition or observed errors.
 No recursive context dump; no automatic dependency source inclusion. Preserve public contracts and IDs.
-file_index lists discoverable paths/symbols outside the current working set. Read through request_files;
-optionally use release_files to drop unneeded full source from context (not from disk). Reads and
-releases may be combined, but not combined with edits. Current/failing tests stay pinned. The compiler
+file_index lists discoverable paths/symbols outside the current working set. Current/failing tests stay pinned. The compiler
 may release older optional files to fit the source budget; requested files are delivered whole, never
 truncated. Reload any released file before editing it. Permission rules remain phase-specific.
 context_state.last_operation pairs the latest read/release request with results and content_ref
@@ -64,7 +55,6 @@ Include all four fields. Use [] for unused arrays and "" for an empty blocked_re
 These are the only allowed top-level keys. Never emit type, json_object, response_format,
 schema, status or explanatory fields. JSON Schema's type and the API transport's json_object mode
 describe the format; they are NOT fields to copy into your response. Start with {"request_files": ...}.
-Each edit supplies only the file path and full replacement content for a loaded writable file.
 The compiler manages source versions internally and refreshes context if a file changed during the call.
 Do not include unchanged files, delete files or modify .arc artifacts. Edit only the supplied allowlist.
 validation_feedback describes the last failure. rejected_patch lists only the files proposed by
@@ -198,7 +188,7 @@ def phase_examples(phase):
     patch = {**PATCH_EXAMPLE, 'edits': [{**PATCH_EXAMPLE['edits'][0], 'file': edit_path}]}
     return json.dumps(load), json.dumps(patch)
 
-PROMPTS = {phase: BACKGROUND + task + '\n## Return format\n' + json.dumps(SCHEMA)
+PROMPTS = {phase: BACKGROUND + FILE_ACTION_INSTRUCTIONS + task + '\n## Return format\n' + json.dumps(SCHEMA)
            + '\n## Example: read a file when needed\n' + phase_examples(phase)[0]
            + '\n## Example: replace a changed file (use actual allowed paths and contents)\n' + phase_examples(phase)[1]
            for phase, task in TASKS.items()}

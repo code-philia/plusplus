@@ -2,29 +2,25 @@
 from __future__ import annotations
 
 import copy
-import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from compiler.context.model_calls import invoke_model
-from .presentation import implementation_metadata
-from compiler.budgets import positive_limit as budget
 from compiler.ir.backend import BackendIR
 from compiler.ir.database import ERModelIR
 from compiler.ir.frontend import FrontendIR
-from model.schema_validation import shape_errors
 from compiler.preprocessing.queries import ancestor_ids, leaf_ids
 from compiler.lowering.planning import slug, token
-from model.client import describe_model_error
 from utils.jsonio import write_json_atomic
 from utils.logging import SynchronousLog
-from .contracts import SCHEMA, PROMPTS
 from .file_context import FileContext
 from .working_context import WorkingContext
-from .patcher import apply_edits, read_source, restore, source_versions
+from agent.files import read_source, restore
+from agent.runtime import AgentRuntime, RuntimeBudgets, RuntimeStatus
+from agent.tools import JsonActionAdapter
+from .agent_policy import ImplementationAgentPolicy
 from .test_runner import TestRunner, passed
 
 
@@ -86,7 +82,7 @@ class NodeTDDOrchestrator:
         self.runner.prepare()
         order = leaf_ids(requirements)
         needs_browser = bool(frontend['ui']['children']) or any(
-            'frontend' in layers for layers in self.context.recovery.values())
+            'frontend' in layers for layers in self.context.files.recovery.values())
         environment = self.runner.check_environment(browser=needs_browser)
         self.gate('BASELINE', 'environment', environment)
         if not passed(environment):
@@ -95,9 +91,9 @@ class NodeTDDOrchestrator:
         # Freeze runner-owned support/config as read-only discoverable records.
         for path in self.runner.support.glob('*'):
             relative = path.relative_to(self.root).as_posix()
-            self.context.catalog[relative] = {'file_path': relative, 'symbol_ids': ['SYSTEM.TEST.' + path.name],
+            self.context.files.register(relative, {'file_path': relative, 'symbol_ids': ['SYSTEM.TEST.' + path.name],
                 'reqs': [], 'shared': True, 'summaries': [path.name + ': fixed TDD runner support'],
-                'kind': 'configuration', 'contracts': []}
+                'kind': 'configuration', 'contracts': []})
         # Process: Check baseline compilation before scheduling leaves =========================
         baseline = self.runner.compile()
         if not passed(baseline):
@@ -119,7 +115,7 @@ class NodeTDDOrchestrator:
                 self.log.warning(warnings[-1], node_id=rid)
                 continue
             self.log.info('Leaf TDD: RUNNING', node_id=rid)
-            if not self.context.direct_files(rid):
+            if not self.context.files.direct_files(rid):
                 states[rid] = 'SKIPPED_NO_DESIGN'
                 warnings.append(f'{rid}: no associated lowered files; not treated as implemented')
                 self.log.warning(warnings[-1], node_id=rid)
@@ -139,7 +135,7 @@ class NodeTDDOrchestrator:
                     baseline_needs_repair = False
                     repaired_baseline = True
                 # Process: Generate and compile requirement acceptance tests ===================
-                targets = self.targets(rid, backend, frontend, recovery=self.context.recovery.get(rid, {}))
+                targets = self.targets(rid, backend, frontend, recovery=self.context.files.recovery.get(rid, {}))
 
                 # These gates read the current targets and completed tests when invoked.
                 def check_generated_tests():
@@ -150,13 +146,13 @@ class NodeTDDOrchestrator:
 
                 self.test_manifest[rid] = targets
                 for path in targets:
-                    self.context.catalog[path] = {'file_path': path, 'symbol_ids': ['TEST.' + path],
+                    self.context.files.register(path, {'file_path': path, 'symbol_ids': ['TEST.' + path],
                         'reqs': [rid], 'shared': False, 'summaries': [rid + ' requirement-based acceptance tests'],
-                        'kind': 'acceptance_test', 'contracts': []}
+                        'kind': 'acceptance_test', 'contracts': []})
                 self.model_patch('test_generation', rid, session, targets, evidence, snapshots,
                                   accept=check_generated_tests)
                 self.log.info('Acceptance tests compiled; implementing initial version before execution. Test corrections are permitted during repair.', node_id=rid)
-                direct = self.context.direct_files(rid)
+                direct = self.context.files.direct_files(rid)
                 # Process: Implement requirement layers before runtime acceptance ==============
                 for layer in ('backend', 'frontend'):
                     if not any(path.startswith(layer + '/') for path in direct):
@@ -325,90 +321,24 @@ class NodeTDDOrchestrator:
         return bool(failures) and all(row.get('test_evidence', {}).get('behavior_failure', False) for row in failures)
 
     def model_patch(self, phase, rid, session, targets, evidence, snapshots, accept):
-        feedback = []
-        rejected_files = []
-        requests = 0
-        for attempt in range(self.attempts):
-            self.log.info(f'{phase} attempt {attempt + 1}/{self.attempts}', node_id=rid)
-            while True:
-                payload = self.context.build(rid, phase, session, targets, evidence)
-                expected_versions = source_versions(payload['editable_files'])
-                if feedback:
-                    payload['validation_feedback'] = feedback
-                    payload['rejected_patch'] = {'installed': False, 'files': rejected_files}
-                self.sequence += 1
-                patch_snapshot = {}
-                output = None
-                try:
-                    output = invoke_model(self.model, implementation_metadata(phase), schema_name='tdd_' + phase, instructions=PROMPTS[phase],
-                                                       input_payload=payload, output_schema=SCHEMA)
-                    # A known transport metadata echo carries no application semantics.
-                    # The raw response remains in model_logs; other fields remain errors.
-                    if isinstance(output, dict) and output.get('type') == 'json_object':
-                        output = {key: value for key, value in output.items() if key != 'type'}
-                        self.log.warning('Removed echoed type:json_object transport metadata', node_id=rid)
-                    validation = shape_errors(output, SCHEMA)
-                    if validation:
-                        raise ValueError('; '.join(validation))
-                    if output['blocked_reason'].strip():
-                        raise ValueError(output['blocked_reason'])
-                    # Context operations rebuild permissions before a later edit proposal.
-                    if output['request_files'] or output.get('release_files'):
-                        if output['edits']:
-                            raise ValueError('Context read/release operations cannot be combined with edits')
-                        paths = self.context.resolve_requests(output['request_files'], targets)
-                        releases = self.context.resolve_requests(output.get('release_files', []), targets)
-                        disallowed = {path for path in paths if not self.context.phase_path(path, phase)}
-                        if disallowed:
-                            raise ValueError(f'Files outside {phase} scope: {sorted(disallowed)}')
-                        requests += 1
-                        if requests > self.load_rounds:
-                            raise ValueError('File loading rounds exhausted; choose minimal necessary files')
-                        session.apply(output, paths, releases,
-                                      set(payload['context_state']['pinned_files']), self.sequence)
-                        self.log.info('Context read: ' + ', '.join(sorted(paths))
-                                      + '; release: ' + ', '.join(sorted(releases)), node_id=rid)
-                        continue
-                    if not output['edits']:
-                        raise ValueError('Provide implementation/test edits; no-op response cannot satisfy this task')
-                    patch_snapshot = apply_edits(self.root, output['edits'], set(payload['editable_files']),
-                                                 expected_versions=expected_versions,
-                                                 ignore_unchanged=phase == 'test_generation')
-                    changed_tests = [path for path in patch_snapshot
-                                     if self.context.catalog.get(path, {}).get('kind') == 'acceptance_test']
-                    if changed_tests:
-                        self.validate_test_sources(changed_tests)
-                    gate = accept()
-                    if not passed(gate):
-                        if any(row.get('failure_kind') == 'infrastructure' for row in gate
-                               if row['status'] != 'PASSED'):
-                            raise EnvironmentBlocked('Compilation executor unavailable; preserving previously accepted source: ' + str(gate))
-                        raise ValueError('Compilation/test-source gate failed: ' + str(gate))
-                    # Commit snapshots only after the proposal passes its acceptance gate.
-                    for path, content in patch_snapshot.items():
-                        snapshots.setdefault(path, content)
-                    session.touch(patch_snapshot)
-                    return
-                except EnvironmentBlocked:
-                    # This proposal has not passed its gate; retain earlier accepted
-                    # patches without installing the unvalidated proposal.
-                    if patch_snapshot:
-                        restore(self.root, patch_snapshot)
-                    raise
-                except Exception as exc:
-                    if patch_snapshot:
-                        restore(self.root, patch_snapshot)
-                    feedback = [describe_model_error(exc)]
-                    edits = output.get('edits', []) if isinstance(output, dict) else []
-                    if isinstance(edits, list):
-                        rejected_files = sorted({edit['file'] for edit in edits
-                                                 if isinstance(edit, dict) and isinstance(edit.get('file'), str)})
-                    else:
-                        rejected_files = []
-                    session.focus.update(path for path in rejected_files if path in payload['editable_files'])
-                    self.log.warning(f'{phase} rejected: ' + '; '.join(feedback), node_id=rid)
-                    break
-        raise ValueError(phase + ': exhausted correction attempts: ' + '; '.join(feedback))
+        policy = ImplementationAgentPolicy(model=self.model, root=self.root, context=self.context,
+            logger=self.log, phase=phase, requirement_id=rid, session=session, targets=targets,
+            evidence=evidence, snapshots=snapshots, gate=accept, call_started=self.count_call,
+            validate_tests=self.validate_test_sources, blocked_error=EnvironmentBlocked, attempts=self.attempts)
+        adapter = JsonActionAdapter(transport_echo=True,
+            on_echo=lambda: self.log.warning('Removed echoed type:json_object transport metadata', node_id=rid),
+            empty_message='Provide implementation/test edits; no-op response cannot satisfy this task')
+        runtime = AgentRuntime(policy, adapter=adapter, budgets=RuntimeBudgets(self.attempts, self.load_rounds))
+        try:
+            result = runtime.run()
+        finally:
+            runtime.save_trace(self.artifact / 'agent_traces' / (runtime.run_id + '.json'))
+        if result.status != RuntimeStatus.ACCEPTED:
+            raise ValueError(phase + ': exhausted correction attempts: ' + '; '.join(result.feedback))
+
+    def count_call(self):
+        self.sequence += 1
+        return self.sequence
 
     def gate(self, rid, phase, results):
         self.log.info(f'{phase}: ' + ('PASSED' if passed(results) else 'FAILED'), node_id=rid)
