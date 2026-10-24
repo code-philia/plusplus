@@ -58,7 +58,10 @@ class FrontendDesignPass:
             model.set_usage_path(self.artifact_root / 'model_usage.jsonl')
 
     def compile(self, requirements, database, backend):
-        # Stage: Frontend design - validate input contracts ====================================
+        # ======================================================================
+        #                            Frontend Design
+        # ======================================================================
+        # ====================== Validate input contracts ======================
         if database.get('ir_kind') != 'er_model' or database.get('status') != 'RESOLVED':
             raise ValueError('Frontend design requires a RESOLVED er_model.json')
         if backend.get('ir_kind') != 'backend_design':
@@ -71,7 +74,7 @@ class FrontendDesignPass:
             raise ValueError('Invalid imported backend types: ' + '; '.join(initial_errors))
         page_states, states, warnings = [], {}, []
         order = leaf_ids(requirements)
-        # Process: Design each leaf on transactional UI and page copies ========================
+        # ======== Design each leaf on transactional UI and page copies ========
         for rid in order:
             self.log.info('Leaf design: RUNNING', node_id=rid)
             trial, trial_pages = copy.deepcopy(ir), copy.deepcopy(page_states)
@@ -81,7 +84,7 @@ class FrontendDesignPass:
                     states[rid] = 'NO_FRONTEND'
                     self.log.info('No frontend page; skipping leaf.', node_id=rid)
                     continue
-                # Process: Collect visual evidence for the current leaf ========================
+                # ============ Collect visual evidence for the current leaf ============
                 evidence = {}
                 for page in requirement['pages']:
                     reference = page.get('reference')
@@ -101,15 +104,18 @@ class FrontendDesignPass:
                         known = next((row for row in trial_pages if row['name'] == page['name']), None)
                         page['analysis'] = self.page_analysis(known)
                 inputs = FrontendTaskInput(rid, requirement, trial, trial_pages, database, backend, evidence)
+                # ============================= UI Design ==============================
                 ui = UIDesignTask(self.design, self.page_analysis).run(inputs)
                 checkpoint(self.artifact_root.parent, 'frontend_design', node=rid, phase='ui',
                            payload={'candidate': ui.candidate, 'page_states': ui.page_states}, status='VALIDATED_CANDIDATE')
                 requirement = ui.requirement
                 inputs = FrontendTaskInput(rid, requirement, ui.candidate, ui.page_states, database, backend)
+                # ============================ Data Design =============================
                 data = DataDesignTask(self.design, self.types).run(inputs)
                 checkpoint(self.artifact_root.parent, 'frontend_design', node=rid, phase='data',
                            payload={'candidate': data.candidate, 'page_states': data.page_states}, status='VALIDATED_CANDIDATE')
                 inputs = FrontendTaskInput(rid, requirement, data.candidate, data.page_states, database, backend)
+                # ========================= Interaction Design =========================
                 interaction = InteractionDesignTask(self.design, self.types).run(inputs, data.context)
                 checkpoint(self.artifact_root.parent, 'frontend_design', node=rid, phase='interaction',
                            payload={'candidate': interaction.candidate, 'page_states': interaction.page_states}, status='VALIDATED_CANDIDATE')
@@ -126,7 +132,7 @@ class FrontendDesignPass:
                 checkpoint(self.artifact_root.parent, 'frontend_design', node=rid, phase='leaf_rollback',
                            payload={'reason': str(exc)}, status='ROLLED_BACK')
                 self.log.warning(warnings[-1], node_id=rid)
-        # Process: Publish frontend IR, page evidence, and the design report ===================
+        # ===== Publish frontend IR, page evidence, and the design report ======
         self.save(ir, page_states)
         write_json_atomic(self.root / 'report.json', {
             'status': 'GENERATED_WITH_WARNINGS' if warnings else 'GENERATED',

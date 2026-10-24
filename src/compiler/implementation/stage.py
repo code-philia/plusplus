@@ -74,7 +74,10 @@ class NodeTDDOrchestrator:
         frontend: FrontendIR, backend_plan: dict[str, Any], frontend_plan: dict[str, Any],
         database_plan: dict[str, Any], *, skip_requirements: Iterable[str] = (),
     ) -> TDDResult:
-        # Stage: Implementation - prepare context and verify the environment ===================
+        # ======================================================================
+        #                             Implementation
+        # ======================================================================
+        # ============= Prepare context and verify the environment =============
         self.context = FileContext(self.root, requirements, database, backend, frontend,
                                    backend_plan, frontend_plan, database_plan)
         required_shared = {'backend/src/db/seed.ts', 'backend/src/db/initialize.ts', 'backend/src/db/client.ts'}
@@ -96,7 +99,7 @@ class NodeTDDOrchestrator:
             self.context.files.register(relative, {'file_path': relative, 'symbol_ids': ['SYSTEM.TEST.' + path.name],
                 'reqs': [], 'shared': True, 'summaries': [path.name + ': fixed TDD runner support'],
                 'kind': 'configuration', 'contracts': []})
-        # Process: Check baseline compilation before scheduling leaves =========================
+        # ======== Check baseline compilation before scheduling leaves =========
         baseline = self.runner.compile()
         if not passed(baseline):
             self.gate('BASELINE', 'compilation', baseline)
@@ -109,7 +112,7 @@ class NodeTDDOrchestrator:
         completed_tests = []
         self.test_manifest = {}
         skipped = set(skip_requirements)
-        # Process: Implement leaf requirements in dependency order =============================
+        # ========== Implement leaf requirements in dependency order ===========
         for rid in scheduled:
             if rid in skipped:
                 states[rid] = 'SKIPPED_DESIGN_FAILED'
@@ -136,7 +139,7 @@ class NodeTDDOrchestrator:
                                       accept=check_baseline)
                     baseline_needs_repair = False
                     repaired_baseline = True
-                # Process: Generate and compile requirement acceptance tests ===================
+                # ========= Generate and compile requirement acceptance tests ==========
                 targets = self.targets(rid, backend, frontend, recovery=self.context.files.recovery.get(rid, {}))
 
                 # These gates read the current targets and completed tests when invoked.
@@ -155,7 +158,7 @@ class NodeTDDOrchestrator:
                                   accept=check_generated_tests)
                 self.log.info('Acceptance tests compiled; implementing initial version before execution. Test corrections are permitted during repair.', node_id=rid)
                 direct = self.context.files.direct_files(rid)
-                # Process: Implement requirement layers before runtime acceptance ==============
+                # ======= Implement requirement layers before runtime acceptance =======
                 for layer in ('backend', 'frontend'):
                     if not any(path.startswith(layer + '/') for path in direct):
                         continue
@@ -221,7 +224,7 @@ class NodeTDDOrchestrator:
             checkpoint(self.root, 'implementation_node', node=rid, phase='node_complete',
                        paths=sorted(snapshots), payload={'errors': errors, 'warnings': warnings}, status=states[rid])
             self.report(states, errors, warnings)
-        # Process: Check final compilation and collected test sources ==========================
+        # ========= Check final compilation and collected test sources =========
         final = self.runner.compile()
         if completed_tests:
             final += self.runner.check_tests(list(dict.fromkeys(completed_tests)))

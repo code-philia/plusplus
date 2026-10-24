@@ -59,7 +59,10 @@ class DatabaseSchemaPass:
         requirement_ir: dict[str, Any],
         dependency_graph: dict[str, Any] | None = None,
     ) -> DatabasePassResult:
-        # Stage: Database design - collect requirements in postorder ===========================
+        # ======================================================================
+        #                            Database Design
+        # ======================================================================
+        # ================= Collect requirements in postorder ==================
         nodes = requirement_ir.get("nodes", {})
         requirements = leaf_ids(requirement_ir)
         effective_dependencies = (dependency_graph or {}).get("requirement_dependencies", {})
@@ -69,6 +72,7 @@ class DatabaseSchemaPass:
         state = DatabaseSchemaState()
         for node_id in requirements:
             state.ensure_requirement(node_id)
+        # ================== Pass 1 / 2: Entities and Fields ===================
         passes = [
             ('pass1_entities', 'arc_database_entities', ENTITY_DECISION_SCHEMA, ENTITY_INSTRUCTIONS, 'apply_entities'),
             ('pass2_fields', 'arc_database_fields', FIELD_DECISION_SCHEMA, FIELD_INSTRUCTIONS, 'apply_fields'),
@@ -79,8 +83,10 @@ class DatabaseSchemaPass:
                 decide=self.run_unit, validate=validate_access_decision, trace=self.trace)
             output = task.run(DatabaseTaskInput(requirements, nodes, state, effective_dependencies, states, errors))
             state, states, errors = output.state, output.node_states, output.errors
+        # ======================= Pass 3: Relationships ========================
         output = RelationshipDiscoveryTask(self.relationship_context, self.run_unit, self.trace).run(
             DatabaseTaskInput(requirements, nodes, state, effective_dependencies, states, errors))
+        # ======================= Structural Refinement ========================
         refined = DatabaseRefinementTask().run(DatabaseTaskInput(requirements, nodes, output.state,
             effective_dependencies, output.node_states, output.errors))
         return DatabasePassResult(refined.schema, refined.node_states, refined.er_model,

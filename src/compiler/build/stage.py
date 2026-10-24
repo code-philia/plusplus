@@ -28,7 +28,10 @@ class ProjectBuilder:
         self.environment = dict(os.environ if environment is None else environment)
 
     def build(self) -> ProjectBuildResult:
-        # Stage: Build - validate the workspace and command environment ========================
+        # ======================================================================
+        #                                 Build
+        # ======================================================================
+        # =========== Validate the workspace and command environment ===========
         package_path = self.output_root / "package.json"
         if not package_path.is_file():
             return ProjectBuildResult(
@@ -48,7 +51,7 @@ class ProjectBuilder:
                 ],
             )
 
-        # Process: Run the production build and classify its result ============================
+        # ========== Run the production build and classify its result ==========
         command = [executable, "run", "build"]
         try:
             completed = run_command(

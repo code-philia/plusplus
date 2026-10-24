@@ -67,6 +67,7 @@ class LoweringWorkflow:
         leaves = leaf_ids(inputs.requirements)
         effective = inputs.design
         reasons = {}
+        # ===================== Render and Isolate Design ======================
         try:
             plan = policy.render(effective)
         except Exception as exc:
@@ -77,6 +78,7 @@ class LoweringWorkflow:
             except Exception as isolation_error:
                 reasons.update({rid: str(isolation_error)[:1000] for rid in leaves})
                 plan, effective = policy.minimal()
+        # ======================= Compilation and Repair =======================
         evidence = self.check()
         if not evidence['ok']:
             try:
@@ -88,8 +90,10 @@ class LoweringWorkflow:
                 self.log.warning(f'{name}: lowering repair unavailable; using recovery scaffolding: {exc}')
         if not evidence['ok']:
             reasons.update({rid: str(evidence)[:1000] for rid in leaves})
+            # ===================== Minimal Recovery Scaffold ======================
             plan, effective = policy.minimal()
             evidence = self.check()
+        # ===================== Publish Lowering Artifacts =====================
         path = root / 'lowering' / name / 'plan.json'
         errors = ()
         if evidence['ok']:

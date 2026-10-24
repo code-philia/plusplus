@@ -149,10 +149,10 @@ export default defineConfig({
     def run_tests_in_artifact(self, files, *, port, red, artifact):
         self.prepare()
         results = []
-        # Process: Partition acceptance tests into unit and browser runs =======================
+        # ======= Partition acceptance tests into unit and browser runs ========
         unit = [path for path in files if not path.startswith('tests/e2e/')]
         browser = [path for path in files if path.startswith('tests/e2e/')]
-        # Process: Run unit tests and read their structured report =============================
+        # ========== Run unit tests and read their structured report ===========
         if unit:
             report = artifact / ('vitest-' + uuid.uuid4().hex + '.json')
             result = self.execute(['node', self.tool('vitest', 'vitest.mjs'), 'run', '--config',
@@ -161,7 +161,7 @@ export default defineConfig({
             self.test_report(result, report, 'vitest', len(unit))
             result['test_files'] = unit
             results.append(result)
-        # Process: Build the application before browser acceptance =============================
+        # ========== Build the application before browser acceptance ===========
         if browser:
             for command in (['node', self.tool('typescript', 'bin/tsc'), '-p', 'backend/tsconfig.json'],
                             ['node', self.tool('vite', 'bin/vite.js'), 'build']):
@@ -177,7 +177,7 @@ export default defineConfig({
         return results
 
     def browser_run(self, browser, port, db_path, report, red):
-        # Process: Own application startup, browser execution, and cleanup =====================
+        # ====== Own application startup, browser execution, and cleanup =======
         # Own the server directly: Playwright webServer may start a detached process group.
         # Never kill a preexisting listener belonging to another compilation/application.
         try:

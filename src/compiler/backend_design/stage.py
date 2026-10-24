@@ -51,13 +51,16 @@ class BackendDesignPass:
             model.set_usage_path(self.artifact_root / 'model_usage.jsonl')
 
     def compile(self, requirements, database):
-        # Stage: Backend design - validate input contracts =====================================
+        # ======================================================================
+        #                             Backend Design
+        # ======================================================================
+        # ====================== Validate input contracts ======================
         if database.get('ir_kind') != 'er_model' or database.get('status') != 'RESOLVED':
             raise ValueError('Backend design requires a RESOLVED er_model.json')
         ir = {'ir_kind': 'backend_design', 'types': [], 'modules': []}
         order = leaf_ids(requirements)
         states, warnings = {}, []
-        # Process: Design each leaf on a transactional copy ====================================
+        # ============== Design each leaf on a transactional copy ==============
         for rid in order:
             self.log.info('Leaf design: RUNNING', node_id=rid)
             trial = copy.deepcopy(ir)
@@ -66,7 +69,7 @@ class BackendDesignPass:
                 node = requirements['nodes'][rid]
                 requirement = self.requirement(node, requirements['nodes'])
                 data = database_context(database, rid)
-                # Process: Design API, function, then database access contracts ================
+                # ======== Design API, function, then database access contracts ========
                 for task_type in (APIDesignTask, FunctionDesignTask, DatabaseAccessDesignTask):
                     if task_type is not APIDesignTask and not selected:
                         break
@@ -75,7 +78,7 @@ class BackendDesignPass:
                     trial, selected = outcome.candidate, outcome.selected
                     checkpoint(self.artifact_root.parent, 'backend_design', node=rid, phase=task.kind,
                                payload={'candidate': trial, 'selected': selected}, status='VALIDATED_CANDIDATE')
-                # Process: Validate the complete leaf before committing its design =============
+                # ====== Validate the complete leaf before committing its design =======
                 errors = validate_ir(trial, database)
                 if errors:
                     raise ValueError('; '.join(errors))
@@ -91,7 +94,7 @@ class BackendDesignPass:
                 checkpoint(self.artifact_root.parent, 'backend_design', node=rid, phase='leaf_rollback',
                            payload={'reason': str(exc)}, status='ROLLED_BACK')
                 self.log.warning(warnings[-1], node_id=rid)
-        # Process: Publish backend IR and the design report ====================================
+        # ============== Publish backend IR and the design report ==============
         result = BackendDesignResult(ir, states, warnings=warnings)
         write_json_atomic(self.root / 'backend_ir.json', ir)
         write_json_atomic(self.root / 'report.json', {'status': 'GENERATED_WITH_WARNINGS' if warnings else 'GENERATED',

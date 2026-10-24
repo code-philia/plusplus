@@ -29,6 +29,9 @@ class CompilerPipeline:
     async def run(self) -> CompilationResult:
         request, state = self.request, self.state
         runner = StageRunner(state.stages)
+        # ======================================================================
+        #                       Requirement Preprocessing
+        # ======================================================================
         parsed = (await PreprocessingStage(request, runner=runner).run()).require_value()
         progress = CompilationProgress(state, parsed, self.dependencies.log_cb)
         runner.observer = progress
@@ -38,44 +41,83 @@ class CompilerPipeline:
         requirements = parsed.requirement_ir
         try:
             state.budgets = self.dependencies.load_budgets()
+            # ======================================================================
+            #                         Project Initialization
+            # ======================================================================
             await ProjectInitializationStage(InitializationInput(output, request.web_port),
                 runner=runner, continue_on_error=True).run()
+            # =========================== Model Session ============================
             model = self.dependencies.model_client()
             if callable(getattr(model, 'set_usage_path', None)):
                 model.set_usage_path(root / 'model_usage.jsonl')
+            # ======================================================================
+            #                      Visual Analysis (Background)
+            # ======================================================================
             visual_stage = VisualAnalysisStage(VisualAnalysisInput(requirements, root,
                 request.requirement_path.resolve().parent), runner=runner)
             async with visual_stage.background():
+                # ======================================================================
+                #                            Database Design
+                # ======================================================================
                 database = (await DatabaseDesignStage(DatabaseDesignInput(
                     requirements, parsed.dependency_graph, root), model, runner=runner).run()).require_value()
+                # ======================================================================
+                #                           Database Lowering
+                # ======================================================================
                 database_lowering = (await DatabaseLoweringStage(DatabaseLoweringInput(
                     requirements, database.schema, output), model, state.budgets, runner=runner).run()).require_value()
+                # ======================= Settle Visual Evidence =======================
                 await progress.message('Waiting for visual evidence before backend design.')
                 visual = (await visual_stage.join()).require_value()
+                # ======================================================================
+                #                             Backend Design
+                # ======================================================================
                 backend = (await BackendDesignStage(BackendDesignInput(
                     requirements, database.er_model, visual, root), model, runner=runner).run()).require_value()
+                # ======================================================================
+                #                            Backend Lowering
+                # ======================================================================
                 backend_lowering = (await BackendLoweringStage(BackendLoweringInput(
                     requirements, backend.ir, output), model, state.budgets, runner=runner).run()).require_value()
+                # ======================================================================
+                #                            Frontend Design
+                # ======================================================================
                 frontend = (await FrontendDesignStage(FrontendDesignInput(requirements, database.er_model,
                     backend_lowering.effective_design, visual, root), model, runner=runner).run()).require_value()
+                # ======================================================================
+                #                           Frontend Lowering
+                # ======================================================================
                 frontend_lowering = (await FrontendLoweringStage(FrontendLoweringInput(
                     requirements, frontend.ir, output), model, state.budgets, runner=runner).run()).require_value()
+            # ======================================================================
+            #                       Implementation Preparation
+            # ======================================================================
             prepared = (await ImplementationPreparationStage(PreparationInput(requirements, output,
                 database, backend, frontend, database_lowering, backend_lowering, frontend_lowering),
                 runner=runner).run()).require_value()
             state.states.update(prepared.node_states)
             if not request.stop_after_lowering:
+                # ======================================================================
+                #                       Requirement Implementation
+                # ======================================================================
                 implementation = (await ImplementationStage(ImplementationInput(prepared, output,
                     request.web_port), model, state.budgets, runner=runner).run()).require_value()
                 state.states.update(implementation.node_states)
                 progress.report.failed_nodes.extend(implementation.failed_nodes)
+            # ======================================================================
+            #                            Production Build
+            # ======================================================================
             build = (await BuildStage(output, model, state.budgets, runner=runner).run()).require_value()
             if request.prepare_validation and not request.stop_after_lowering and build.ok:
+                # ======================================================================
+                #                         Validation Preparation
+                # ======================================================================
                 await ValidationPreparationStage(ValidationPreparationInput(requirements, output,
                     request.web_port), model, runner=runner).run()
             elif request.prepare_validation and not build.ok:
                 progress.report.skip('validation_preparation',
                     ['Build unavailable; validation artifacts cannot be prepared.'])
+            # ======================== Finalize Compilation ========================
             return progress.finish(stopped=request.stop_after_lowering)
         except asyncio.CancelledError:
             progress.cancel()

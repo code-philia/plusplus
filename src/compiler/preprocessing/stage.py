@@ -26,7 +26,10 @@ class RequirementPreprocessor:
     """Parse, normalize, validate, and schedule an ARC requirement document."""
 
     def compile(self, requirement_path: Path) -> PreprocessingResult:
-        # Stage: Preprocessing - parse the requirement document ================================
+        # ======================================================================
+        #                             Preprocessing
+        # ======================================================================
+        # =================== Parse the requirement document ===================
         source_path = requirement_path.expanduser().resolve()
         errors: list[str] = []
         try:
@@ -47,7 +50,7 @@ class RequirementPreprocessor:
             errors.append(format_error("ARC1002", "Requirement document root must be a mapping.", source=str(source_path)))
             return PreprocessingResult({}, {}, errors)
 
-        # Process: Normalize nodes and validate dependencies ===================================
+        # ============= Normalize nodes and validate dependencies ==============
         nodes: dict[str, dict[str, Any]] = {}
         node_order: list[str] = []
         root_id = self.normalize_node(
@@ -61,7 +64,7 @@ class RequirementPreprocessor:
         )
         self.validate_dependencies(nodes, errors)
 
-        # Process: Compute dependency graphs and scheduling waves ==============================
+        # =========== Compute dependency graphs and scheduling waves ===========
         atomic_ids = sorted(node_id for node_id, node in nodes.items() if node["type"] == "ATOMIC")
         folder_ids = sorted(node_id for node_id, node in nodes.items() if node["type"] == "FOLDER")
         effective_dependencies = self.effective_atomic_dependencies(nodes, atomic_ids, errors)
@@ -76,7 +79,7 @@ class RequirementPreprocessor:
         )
         errors.extend(error for error in atomic_wave_errors if error not in errors)
 
-        # Process: Assemble requirement IR and dependency artifacts ============================
+        # ========== Assemble requirement IR and dependency artifacts ==========
         requirement_ir = {
             "source": {
                 "document": source_path.name,

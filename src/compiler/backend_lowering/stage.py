@@ -10,7 +10,10 @@ from compiler.backend_design.validation import graph_errors, route_key
 
 class BackendLoweringPass:
     def compile(self, requirements, backend, output_dir, *, dry_run=False):
-        # Stage: Backend lowering - validate the module graph ==================================
+        # ======================================================================
+        #                            Backend Lowering
+        # ======================================================================
+        # ===================== Validate the module graph ======================
         if backend.get('ir_kind') != 'backend_design':
             raise ValueError('Expected backend_design IR')
         modules = backend['modules']
@@ -21,7 +24,7 @@ class BackendLoweringPass:
         errors = graph_errors(backend)
         if errors:
             raise ValueError('; '.join(errors))
-        # Process: Emit shared types and deterministic module skeletons ========================
+        # ======== Emit shared types and deterministic module skeletons ========
         definitions = {row['name']: row['schema'] for row in backend['types']}
         types_path = 'backend/src/types/contracts.ts'
         files = {types_path: type_file(backend['types'])}
@@ -52,7 +55,7 @@ class BackendLoweringPass:
                     raise ValueError(f'Duplicate or invalid route: {key}')
                 seen_routes.add(key)
                 routes.append({'module_id': row['id'], 'method': row['method'], 'path': row['path'], 'file_path': path})
-        # Process: Emit application routing and the server entrypoint ==========================
+        # ========= Emit application routing and the server entrypoint =========
         app_path = 'backend/src/app.ts'
         # The route contracts are registered, but no business flow is invoked yet.
         route_lines = [f'  app.{row["method"].lower()}({json.dumps(row["path"])}, (_request, response) => {{\n'
@@ -89,7 +92,7 @@ class BackendLoweringPass:
             + '  client.close(); process.exitCode = 1;\n});\n'
             + 'server.on("close", () => client.close());\n'
             + 'process.once("SIGTERM", () => server.close());\nprocess.once("SIGINT", () => server.close());\n')
-        # Process: Assemble the lowering plan and publish owned files ==========================
+        # ========= Assemble the lowering plan and publish owned files =========
         plan = {'ir_kind': 'backend_lowering', 'strategy': 'deterministic_parent_groups',
                 'entrypoint': 'backend/src/server.ts', 'modules': records, 'routes': routes,
                 'types': [{'name': row['name'], 'file_path': types_path, 'export': row['name']} for row in backend['types']]}

@@ -34,19 +34,22 @@ class FrontendLoweringPass:
         self.component_depth, self.min_nodes = component_depth, min_nodes
 
     def compile(self, requirements, frontend, output_dir, *, dry_run=False):
-        # Stage: Frontend lowering - validate and index the design =============================
+        # ======================================================================
+        #                           Frontend Lowering
+        # ======================================================================
+        # =================== Validate and index the design ====================
         if frontend.get('ir_kind') != 'frontend_design':
             raise ValueError('Expected frontend_design IR')
         nodes, parents = ui_index(frontend['ui'])
         definitions = {row['name']: row['schema'] for row in frontend['types']}
         types_path = 'frontend/src/types/contracts.ts'
         files = {types_path: type_file(frontend['types'])}
-        # Process: Select component ownership and render shared state ==========================
+        # ========= Select component ownership and render shared state =========
         # Resolve ownership before rendering so source generation only reads the layout.
         layout = self.select_components(requirements, frontend, nodes)
         state_layout = self.collect_state(frontend, layout)
         files.update(self.render_components(frontend, layout, state_layout, definitions, types_path))
-        # Process: Emit handler contracts and bind UI events ===================================
+        # ============= Emit handler contracts and bind UI events ==============
         handlers = []
         for row in frontend['handlers']:
             if not re.fullmatch(r'[A-Z][A-Za-z0-9]*', row['name']):
@@ -66,7 +69,7 @@ class FrontendLoweringPass:
         events = [{'id': row['id'], 'ui_id': row['ui'], 'handler_id': row['handler'],
                    'component_file_path': layout.by_ui[layout.ownership[row['ui']]]['file_path'],
                    'handler_file_path': handler_paths[row['handler']], 'wired': False} for row in frontend['events']]
-        # Process: Assemble the lowering plan and publish owned files ==========================
+        # ========= Assemble the lowering plan and publish owned files =========
         plan = {'ir_kind': 'frontend_lowering', 'strategy': 'shallow_structural_subtrees',
                 'component_depth': self.component_depth, 'min_nodes': self.min_nodes,
                 'entrypoint': 'frontend/src/main.tsx', 'app_file_path': layout.app_path,
