@@ -57,13 +57,16 @@ class GateRepairPolicy:
 
     def propose(self, invocation, edits, *, check_cancelled):
         with FileTransaction(self.root) as transaction:
-            transaction.apply(edits, self.loaded & self.catalog, expected_versions=invocation.versions)
+            changed = transaction.apply(edits, self.loaded & self.catalog, expected_versions=invocation.versions)
             result = self.check()
             if not result['ok']:
                 self.evidence = result
                 raise ValueError('Repaired source still fails the gate')
             check_cancelled()
             transaction.accept()
+        from utils.git import checkpoint
+        checkpoint(self.root, 'gate_repair', phase=self.stage, paths=sorted(changed),
+                   payload=result, status='GATE_ACCEPTED')
         return result
 
     def reject(self, error, invocation, raw):

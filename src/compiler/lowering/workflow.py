@@ -103,5 +103,12 @@ class LoweringWorkflow:
         if reasons or policy.persist_effective:
             write_json_atomic(root / 'design' / name / policy.design_filename, effective)
         result = output_type(plan, effective, reasons, evidence, inputs.design)
+        from utils.git import checkpoint
+        manifest_path = root / 'lowering' / name / 'manifest.json'
+        manifest = read_json(manifest_path, {})
+        paths = [relative.relative_to(output).as_posix() for relative in (path, manifest_path) if relative.is_file()]
+        checkpoint(output, 'lowering', phase=name, paths=[*paths, *manifest.get('files', {})],
+                   payload={'evidence': evidence, 'recovery_reasons': reasons},
+                   status='GATE_ACCEPTED' if evidence['ok'] else 'DEGRADED')
         return StageResult(StageStatus.DEGRADED if reasons or errors else StageStatus.SUCCEEDED,
                            result, errors=errors, artifact=path if not errors else None)

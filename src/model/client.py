@@ -8,6 +8,7 @@ from typing import Any
 from utils.environment import ensure_dotenv_loaded
 from openai import OpenAI
 from model.logging import log_design_call, logged_completion
+from model.usage import record_usage
 from utils.logging import SynchronousLog
 
 
@@ -111,7 +112,7 @@ class Model:
         return getattr(self, "_last_output_mode", self._structured_output_mode)
 
     def set_usage_path(self, path: Path | None) -> None:
-        """Route provider usage records to a project-owned JSONL file."""
+        """Persist actual usage here and locate project-owned model logs alongside it."""
         self._usage_path = path.expanduser().resolve() if path is not None else None
 
     @classmethod
@@ -256,7 +257,7 @@ def record_model_usage(
     operation: str,
     model: str | None = None,
 ) -> None:
-    """Print usage; persistent provider usage lives alongside its reply in model_logs."""
+    """Record actual provider usage independently of output parsing or task acceptance."""
     if path is None:
         return
     usage = getattr(response, "usage", None)
@@ -264,6 +265,8 @@ def record_model_usage(
         return
     summary = jsonable(usage)
     if isinstance(summary, dict):
+        record_usage(path, model or str(getattr(response, 'model', 'unknown')), summary,
+                     schema_name=schema_name, operation=operation)
         SynchronousLog('Model', workspace_root=path.parent.parent).info("MODEL_USAGE " + json.dumps({"schema_name": schema_name,
               "operation": operation, "prompt_tokens": summary.get("prompt_tokens"),
               "completion_tokens": summary.get("completion_tokens"),

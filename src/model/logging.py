@@ -12,6 +12,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 from utils.logging import SynchronousLog
+from utils.trace import full_payload_logging_enabled, format_payload_trace
 from .call_context import current_call
 
 _active_log: ContextVar[tuple[Path, dict[str, Any]] | None] = ContextVar("design_model_log", default=None)
@@ -118,30 +119,40 @@ def log_design_call(method: Callable[..., Any]) -> Callable[..., Any]:
 
 def logged_completion(client: Any, **request: Any) -> Any:
     """Capture actual messages and raw output even when JSON parsing later fails."""
+    from .client import jsonable
     active = _active_log.get()
-    if active is None:
-        return client.chat.completions.create(**request)
-    path, record = active
+    logger = SynchronousLog('Model', workspace_root=active[0].parent.parent.parent if active else None)
+    debug = full_payload_logging_enabled()
+    trace_id = uuid.uuid4().hex
+    if debug:
+        logger.info(f'MODEL_FULL_INPUT call={trace_id}\n' + format_payload_trace(request))
+    path, record = active if active else (None, None)
     attempt: dict[str, Any] = {"started_at": now(), "status": "RUNNING", "request": request}
-    record["attempts"].append(attempt)
-    save(path, record)
+    if record is not None:
+        record["attempts"].append(attempt)
+        save(path, record)
     started = time.monotonic()
     try:
         response = client.chat.completions.create(**request)
-        message = response.choices[0].message
-        attempt.update(status="SUCCEEDED", output=message.content,
+        if debug:
+            logger.info(f'MODEL_FULL_OUTPUT call={trace_id}\n' + format_payload_trace(jsonable(response)))
+        message = response.choices[0].message if response.choices else None
+        attempt.update(status="SUCCEEDED", output=getattr(message, 'content', None),
                        reasoning=getattr(message, "reasoning_content", None))
         if getattr(message, 'tool_calls', None):
             attempt['tool_calls'] = [call.model_dump() for call in message.tool_calls]
-        if request.get('tools'):
-            attempt['raw_response'] = response.model_dump()
+        if request.get('tools') or debug:
+            attempt['raw_response'] = jsonable(response)
         usage = getattr(response, 'usage', None)
         if usage is not None:
             attempt['usage'] = usage.model_dump() if hasattr(usage, 'model_dump') else usage
         return response
     except Exception as exc:
         attempt.update(status="FAILED", error={"type": type(exc).__name__, "message": str(exc)})
+        if debug:
+            logger.warning(f'MODEL_FULL_ERROR call={trace_id} {type(exc).__name__}: {exc}')
         raise
     finally:
         attempt.update(finished_at=now(), duration_ms=int((time.monotonic() - started) * 1000))
-        save(path, record)
+        if record is not None:
+            save(path, record)

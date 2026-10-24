@@ -4,6 +4,7 @@ import copy
 import json
 from agent.files import read_source
 from compiler.ir.type_registry import TypeRegistry
+from .context_types import ImplementationContext
 
 
 class ContextAssembler:
@@ -18,7 +19,7 @@ class ContextAssembler:
 
     def assemble(self, *, rid, phase, session, test_targets, evidence, records, writable_paths,
                  context_state, source_paths, visible_tests, direct, shared, related,
-                 failing_tests, regression_owners):
+                 failing_tests, regression_owners) -> ImplementationContext:
         editable, readonly = {}, {}
         for path, record in records.items():
             section = 'editable_files' if path in writable_paths else 'read_only_files'

@@ -17,7 +17,6 @@ from compiler.preprocessing.queries import leaf_ids
 from ..ir.database import ERModelIR, SchemaIR
 from model.contracts import StructuredModel
 from utils.trace import format_payload_trace
-from .common import format_error
 from .contracts import (
     ENTITY_DECISION_SCHEMA,
     ENTITY_INSTRUCTIONS,
@@ -158,8 +157,12 @@ class DatabaseSchemaPass:
         validate: Callable[[dict[str, Any]], list[str]] | None = None,
     ) -> dict[str, Any] | None:
         inputs = DatabaseDecisionInput(phase, schema_name, output_schema, instructions, node_id, context)
-        return DatabaseDecisionTask(inputs, model=self._model, attempts=self._attempts,
+        result = DatabaseDecisionTask(inputs, model=self._model, attempts=self._attempts,
             prepare=self.prepare_decision_request, trace=self.trace, errors=errors, validate=validate).run()
+        from utils.git import checkpoint
+        checkpoint(self._artifact_root.parent, 'database_design', node=node_id, phase=phase,
+                   payload=result, status='VALIDATED_CANDIDATE' if result is not None else 'REJECTED')
+        return result
 
     def prepare_decision_request(
         self, *, phase: str, schema_name: str, output_schema: dict[str, Any],

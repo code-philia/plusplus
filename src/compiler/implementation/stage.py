@@ -14,6 +14,7 @@ from compiler.ir.frontend import FrontendIR
 from compiler.preprocessing.queries import ancestor_ids, leaf_ids
 from compiler.lowering.planning import slug, token
 from utils.jsonio import write_json_atomic
+from utils.git import checkpoint
 from utils.logging import SynchronousLog
 from .file_context import FileContext
 from .working_context import WorkingContext
@@ -193,6 +194,8 @@ class NodeTDDOrchestrator:
                     states.setdefault(remaining, 'BLOCKED_ENVIRONMENT')
                 errors.append(f'{rid}: {exc}')
                 self.log.error(errors[-1], node_id=rid)
+                checkpoint(self.root, 'implementation_node', node=rid, phase='node_complete',
+                           paths=sorted(snapshots), payload={'errors': errors}, status=states[rid])
                 return self.report(states, errors, warnings)
             except Exception as exc:
                 # Runtime acceptance failure does not discard compilation-safe
@@ -215,6 +218,8 @@ class NodeTDDOrchestrator:
                     states[rid] = 'FAILED_ROLLED_BACK'
                 errors.append(f'{rid}: {exc}')
                 self.log.error(errors[-1], node_id=rid)
+            checkpoint(self.root, 'implementation_node', node=rid, phase='node_complete',
+                       paths=sorted(snapshots), payload={'errors': errors, 'warnings': warnings}, status=states[rid])
             self.report(states, errors, warnings)
         # Process: Check final compilation and collected test sources ==========================
         final = self.runner.compile()
@@ -317,12 +322,6 @@ class NodeTDDOrchestrator:
                     or re.search(r'\.expect\s*\(\s*501\s*\)', content)):
                 raise ValueError(f'{path}: assert the requirement\'s implemented behavior, not Not implemented errors or placeholder HTTP 501')
 
-    @staticmethod
-    def behavior_failure(results):
-        # Compiler failures cannot become RED just because their log mentions an assertion.
-        failures = [row for row in results if row['status'] != 'PASSED']
-        return bool(failures) and all(row.get('test_evidence', {}).get('behavior_failure', False) for row in failures)
-
     def model_patch(self, phase, rid, session, targets, evidence, snapshots, accept):
         policy = ImplementationAgentPolicy(model=self.model, root=self.root, context=self.context,
             logger=self.log, phase=phase, requirement_id=rid, session=session, targets=targets,
@@ -354,6 +353,9 @@ class NodeTDDOrchestrator:
                                              for test in row['test_evidence'].get('failed_tests', [])]}}
                if 'test_evidence' in row else {}) for row in results]}
         write_json_atomic(self.artifact / 'test_status.json', self.test_status)
+        checkpoint(self.root, 'test_gate', node=rid, phase=phase,
+                   paths=['.arc/implementation/test_status.json'], payload=results,
+                   status='PASSED' if passed(results) else 'FAILED')
 
     def report(self, states, errors, warnings):
         errors = [message[:1500] for message in errors]

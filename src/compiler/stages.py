@@ -1,4 +1,4 @@
-"""Stage execution mechanics without business recovery or persistence policy."""
+"""Stage lifecycle and workspace checkpoint reporting without business recovery policy."""
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from threading import Event
 from typing import Generic, TypeVar
+from utils.git import checkpoint
 
 
 Payload = TypeVar('Payload')
@@ -59,9 +60,10 @@ class StageRecord:
 
 
 class StageRunner:
-    def __init__(self, records: list[StageRecord] | None = None, *, observer=None) -> None:
+    def __init__(self, records: list[StageRecord] | None = None, *, observer=None, checkpoint_root: Path | None = None) -> None:
         self.records = records if records is not None else []
         self.observer = observer
+        self.checkpoint_root = checkpoint_root
 
     async def run(self, stage: Stage[Payload]) -> StageResult[Payload]:
         if stage._started:
@@ -95,6 +97,15 @@ class StageRunner:
             record.duration_ms = int((time.monotonic() - started) * 1000)
             if self.observer is not None:
                 await self.observer.finished(stage, record, result, failure)
+            root = self.checkpoint_root
+            artifact = result.artifact.resolve() if result is not None and result.artifact is not None else None
+            if root is None and artifact is not None:
+                root = next((parent.parent for parent in artifact.parents if parent.name == '.arc'), None)
+            if root is not None:
+                root = Path(root).resolve()
+                paths = [artifact.relative_to(root).as_posix()] if artifact is not None and artifact.is_relative_to(root) else []
+                checkpoint(root, 'stage', phase=stage.name, status=record.status.value, paths=paths,
+                           payload={'diagnostics': record.diagnostics, 'duration_ms': record.duration_ms})
 
 
 class Stage(ABC, Generic[Payload]):

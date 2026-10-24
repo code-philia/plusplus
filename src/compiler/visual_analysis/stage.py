@@ -76,6 +76,9 @@ class VisualAnalyzer:
                   'analysis': analysis}
         self.cache[reference] = record
         write_json_atomic(self.path, self.cache)
+        from utils.git import checkpoint
+        checkpoint(self.root.parent, 'visual_analysis', node=rid, phase='reference',
+                   paths=[self.path.relative_to(self.root.parent).as_posix()], payload=record, status='PUBLISHED')
         self.log.info(f'Analysis completed: {name} ({reference})', node_id=rid)
         return copy.deepcopy(record)
 

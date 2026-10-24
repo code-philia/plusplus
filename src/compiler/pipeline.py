@@ -33,6 +33,7 @@ class CompilerPipeline:
         progress = CompilationProgress(state, parsed, self.dependencies.log_cb)
         runner.observer = progress
         output = parsed.output_root
+        runner.checkpoint_root = output
         root = output / '.arc'
         requirements = parsed.requirement_ir
         try:
@@ -40,6 +41,8 @@ class CompilerPipeline:
             await ProjectInitializationStage(InitializationInput(output, request.web_port),
                 runner=runner, continue_on_error=True).run()
             model = self.dependencies.model_client()
+            if callable(getattr(model, 'set_usage_path', None)):
+                model.set_usage_path(root / 'model_usage.jsonl')
             visual_stage = VisualAnalysisStage(VisualAnalysisInput(requirements, root,
                 request.requirement_path.resolve().parent), runner=runner)
             async with visual_stage.background():

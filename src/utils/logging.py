@@ -36,12 +36,6 @@ def append_debug_log(text: str, *, workspace_root: str | os.PathLike[str] | None
             handle.write(re.sub(r'\x1b\[[0-9;]*m', '', text) + '\n')
 
 
-def set_run_id(run_id: str | None) -> None:
-    """Retain the compiler-run context without displaying it in log prefixes."""
-
-    _current_run_id.set(str(run_id).strip() if run_id else None)
-
-
 def current_run_id() -> str | None:
     return _current_run_id.get()
 

@@ -8,12 +8,8 @@ from typing import Any
 def full_payload_logging_enabled() -> bool:
     """Return whether full model payloads should be written to the debug log."""
 
-    return os.getenv("ARC_DEBUG_FULL_PAYLOAD", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return any(os.getenv(name, '').strip().lower() in {'1', 'true', 'yes', 'on'}
+               for name in ('ARC_DEBUG_FULL_PAYLOAD', 'ARC_DEBUG', 'DEBUG'))
 
 
 def format_payload_trace(payload: Any) -> str:

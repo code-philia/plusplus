@@ -73,27 +73,6 @@ await import("../server.js");
         "TIMEZONE", "process.env.TZ = " + json.dumps(environment["timezone"]) + ";" if environment.get("timezone") else "")
 
 
-def disable_validation_startup(root: Path) -> None:
-    """Detach an earlier opt-in hook without deleting any persisted database."""
-    marker = root / MARKER
-    if not marker.is_file():
-        return
-    state = json.loads(marker.read_text(encoding="utf-8-sig"))
-    backend = root / "backend/package.json"
-    package = json.loads(backend.read_text(encoding="utf-8-sig"))
-    if package.get("scripts", {}).get("start") == START_COMMAND:
-        package["scripts"]["start"] = state["original_backend_start"]
-        write_json_atomic(backend, package)
-    for relative in ("frontend/index.html", "frontend/dist/index.html"):
-        html = root / relative
-        if html.is_file():
-            content = html.read_text(encoding="utf-8")
-            if HTML_TAG in content:
-                html.write_text(content.replace(HTML_TAG, ""), encoding="utf-8")
-    state["enabled"] = False
-    write_json_atomic(marker, state)
-
-
 class ValidationPreparationPass:
     """Deterministically configure validation time without generating or inserting data."""
 

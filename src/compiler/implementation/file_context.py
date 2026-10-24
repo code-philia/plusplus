@@ -3,6 +3,7 @@ from __future__ import annotations
 from .file_catalog import FileCatalog
 from .edit_policy import EditPolicy
 from .context_assembler import ContextAssembler
+from .context_types import ImplementationContext
 
 
 class FileContext:
@@ -13,7 +14,7 @@ class FileContext:
         self.policy = EditPolicy()
         self.assembler = ContextAssembler(self.files, self.policy)
 
-    def build(self, rid, phase, session, test_targets, evidence):
+    def build(self, rid, phase, session, test_targets, evidence) -> ImplementationContext:
         direct = self.files.direct_files(rid)
         source_paths = self.policy.source_paths(direct, session.active, session.released,
                                                self.files.recovery.get(rid, {}), phase)

@@ -12,6 +12,7 @@ from .presentation import frontend_metadata
 from compiler.context.structured import DesignDecision
 from compiler.preprocessing.queries import ancestor_ids, leaf_ids
 from utils.jsonio import read_json, write_json_atomic
+from utils.git import checkpoint
 from utils.logging import SynchronousLog
 from .context import select_types, expand_api_context
 from .tasks import FrontendTaskInput, UIDesignTask, DataDesignTask, InteractionDesignTask
@@ -101,19 +102,29 @@ class FrontendDesignPass:
                         page['analysis'] = self.page_analysis(known)
                 inputs = FrontendTaskInput(rid, requirement, trial, trial_pages, database, backend, evidence)
                 ui = UIDesignTask(self.design, self.page_analysis).run(inputs)
+                checkpoint(self.artifact_root.parent, 'frontend_design', node=rid, phase='ui',
+                           payload={'candidate': ui.candidate, 'page_states': ui.page_states}, status='VALIDATED_CANDIDATE')
                 requirement = ui.requirement
                 inputs = FrontendTaskInput(rid, requirement, ui.candidate, ui.page_states, database, backend)
                 data = DataDesignTask(self.design, self.types).run(inputs)
+                checkpoint(self.artifact_root.parent, 'frontend_design', node=rid, phase='data',
+                           payload={'candidate': data.candidate, 'page_states': data.page_states}, status='VALIDATED_CANDIDATE')
                 inputs = FrontendTaskInput(rid, requirement, data.candidate, data.page_states, database, backend)
                 interaction = InteractionDesignTask(self.design, self.types).run(inputs, data.context)
+                checkpoint(self.artifact_root.parent, 'frontend_design', node=rid, phase='interaction',
+                           payload={'candidate': interaction.candidate, 'page_states': interaction.page_states}, status='VALIDATED_CANDIDATE')
                 trial, trial_pages = interaction.candidate, interaction.page_states
                 self.save(trial, trial_pages)
                 ir, page_states = trial, trial_pages
                 states[rid] = 'DESIGNED'
+                checkpoint(self.artifact_root.parent, 'frontend_design', node=rid, phase='leaf_publish',
+                           paths=['.arc/design/frontend/frontend_ir.json', '.arc/design/frontend/page_states.json'], status='PUBLISHED')
                 self.log.info('Leaf design: COMPLETED', node_id=rid)
             except Exception as exc:
                 states[rid] = 'SKIPPED'
                 warnings.append(f'{rid}: rolled back frontend leaf design: {exc}')
+                checkpoint(self.artifact_root.parent, 'frontend_design', node=rid, phase='leaf_rollback',
+                           payload={'reason': str(exc)}, status='ROLLED_BACK')
                 self.log.warning(warnings[-1], node_id=rid)
         # Process: Publish frontend IR, page evidence, and the design report ===================
         self.save(ir, page_states)
@@ -159,14 +170,7 @@ class FrontendDesignPass:
             return candidate
         return self.invoke(phase, rid, payload, accept)
 
-    def invoke(self, phase, rid, payload, accept, image_data_url=None):
-        if phase == 'visual':
-            analyzer = self.legacy_visual()
-            before = analyzer.sequence
-            try:
-                return analyzer.invoke(rid, payload, accept, image_data_url)
-            finally:
-                self.sequence += analyzer.sequence - before
+    def invoke(self, phase, rid, payload, accept):
         return DesignDecision(attempts=self.attempts, schema=SCHEMAS[phase], model=self.model,
             metadata=frontend_metadata(phase), instructions=PROMPTS[phase], payload=payload,
             accept=accept, logger=self.log, requirement_id=rid, label=phase,
@@ -184,14 +188,14 @@ class FrontendDesignPass:
             if normalized not in self.visual_cache:
                 raise ValueError(f'Visual evidence unavailable: {reference}')
             return copy.deepcopy(self.visual_cache[normalized])
-        analyzer = self.legacy_visual()
+        analyzer = self.visual_analyzer()
         before = analyzer.sequence
         try:
             return analyzer.analyze(name, reference, rid)
         finally:
             self.sequence += analyzer.sequence - before
 
-    def legacy_visual(self):
+    def visual_analyzer(self):
         if self._visual_analyzer is None:
             from compiler.visual_analysis import VisualAnalyzer
             self._visual_analyzer = VisualAnalyzer(self.artifact_root, self.reference_root, self.visual_model)

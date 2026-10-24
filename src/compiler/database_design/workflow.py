@@ -42,6 +42,11 @@ class DatabaseDesignStage(Stage[DatabasePassResult]):
             write_json_atomic(path.parent / 'er_model.json', result.er_model)
             write_json_atomic(path.parent / 'report.json', {'status': result.schema['status'],
                 'node_states': result.node_states, 'errors': result.errors, 'warnings': result.warnings})
+            from utils.git import checkpoint
+            checkpoint(inputs.artifact_root.parent, 'database_design', phase='refinement_publish',
+                       paths=[relative.relative_to(inputs.artifact_root.parent).as_posix()
+                              for relative in (path, path.parent / 'er_model.json', path.parent / 'report.json')],
+                       status=result.schema['status'])
         except Exception as exc:
             errors.append(str(exc))
         artifact = None if errors else path

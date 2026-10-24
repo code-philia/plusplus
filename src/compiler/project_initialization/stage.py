@@ -116,4 +116,7 @@ class ProjectInitializer:
             raise ValueError(str(exc)) from exc
         report['status'] = 'PROJECT_INITIALIZED'
         write_json_atomic(report_path, report)
+        from utils.git import checkpoint
+        checkpoint(self.root, 'project_initialization', phase='scaffold', status='PUBLISHED',
+                   paths=[*sources, *text_sources, '.arc/project/report.json'], payload=report)
         return report

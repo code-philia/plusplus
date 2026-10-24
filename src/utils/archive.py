@@ -1,43 +1,42 @@
-"""Create bounded workspace archives outside the source directory."""
+"""Threshold snapshots of generated workspaces, excluding credentials and path aliases."""
 from __future__ import annotations
 
 import re
-import zipfile
-from threading import RLock
+import os
 from pathlib import Path
-from utils.logging import SynchronousLog
+from threading import RLock
+from zipfile import ZIP_DEFLATED, ZipFile
+
+from .logging import SynchronousLog
 
 _archive_lock = RLock()
 
 
-def snapshot_workspace(root: Path, trigger: str) -> None:
+def snapshot_workspace(root, trigger):
+    root = Path(root).resolve()
+    safe = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(trigger)).strip('._') or 'checkpoint'
+    directory = root.parent / (root.name + '_trace')
     with _archive_lock:
-        write_workspace_archive(root, trigger)
-
-
-def write_workspace_archive(root: Path, trigger: str) -> None:
-    parent = root.parent
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(trigger)).strip("._") or "checkpoint"
-    # Keep trace archives beside, not inside, the generated workspace. This
-    # prevents snapshots from becoming part of the next snapshot and gives
-    # each run a stable sibling trace directory.
-    trace_dir = parent / f"{root.name}_trace"
-    archive = trace_dir / f"{root.name}_{safe}.zip"
-    if archive.exists():
-        return
-    try:
-        trace_dir.mkdir(parents=True, exist_ok=True)
+        archive = directory / f'{root.name}_{safe}.zip'
+        if archive.exists():
+            return archive
+        directory.mkdir(parents=True, exist_ok=True)
         temporary = archive.with_suffix('.zip.tmp')
-        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as output:
-            for path in root.rglob("*"):
-                if not path.is_file() or path.is_symlink() or "node_modules" in path.parts:
-                    continue
-                try:
-                    output.write(path, path.relative_to(root.parent))
-                except FileNotFoundError:
-                    continue
-        temporary.replace(archive)
+        try:
+            with ZipFile(temporary, 'w', compression=ZIP_DEFLATED) as output:
+                def excluded(path):
+                    name = path.name.lower()
+                    return (name in {'.git', 'node_modules', '.venv', '.env'} or name.startswith('.env.')
+                            or path.is_symlink() or getattr(path, 'is_junction', lambda: False)())
+                for directory, directories, filenames in os.walk(root, followlinks=False):
+                    current = Path(directory)
+                    directories[:] = [name for name in directories if not excluded(current / name)]
+                    for name in filenames:
+                        path = current / name
+                        if not excluded(path) and path.is_file() and path.resolve().is_relative_to(root):
+                            output.write(path, Path(root.name) / path.relative_to(root))
+            temporary.replace(archive)
+        finally:
+            temporary.unlink(missing_ok=True)
         SynchronousLog('Snapshot', workspace_root=root).info(f'SNAPSHOT trigger={trigger} path={archive}')
-    except OSError as exc:
-        SynchronousLog('Snapshot', workspace_root=root).warning(f'Snapshot failed: {trigger}: {exc}')
-
+        return archive

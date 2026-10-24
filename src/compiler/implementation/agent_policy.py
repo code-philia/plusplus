@@ -76,6 +76,9 @@ class ImplementationAgentPolicy:
                 self.snapshots.setdefault(path, content)
             self.session.touch(changed)
             transaction.accept()
+        from utils.git import checkpoint
+        checkpoint(self.root, 'implementation', node=self.rid, phase=self.phase, paths=sorted(changed),
+                   payload={'gate': gate, 'call': self.call_number}, status='COMPILATION_SAFE')
         return None
 
     def reject(self, error, invocation, raw):

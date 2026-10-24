@@ -17,21 +17,6 @@ def compact_properties(raw: Any) -> dict[str, Any]:
     }
 
 
-def merge_properties(
-    existing: dict[str, Any],
-    incoming: dict[str, Any],
-    entity: str,
-    field_name: str,
-    requirement_id: str,
-    errors: list[str],
-) -> None:
-    for key, value in compact_properties(incoming).items():
-        if key in existing and existing[key] != value:
-            errors.append(format_error("ARC2228", f"Conflicting field property: {entity}.{field_name}.{key}.", node_id=requirement_id))
-        else:
-            existing[key] = copy.deepcopy(value)
-
-
 def normalize_identifier(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
 

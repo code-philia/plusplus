@@ -12,6 +12,7 @@ from .presentation import backend_metadata
 
 from compiler.preprocessing.queries import ancestor_ids, leaf_ids
 from utils.jsonio import write_json_atomic
+from utils.git import checkpoint
 from utils.logging import SynchronousLog
 from .contracts import PROMPTS, SCHEMAS
 from .context import database_context, expand_module_context
@@ -72,6 +73,8 @@ class BackendDesignPass:
                     task = task_type(BackendTaskInput(rid, trial, selected, requirement, data, database), self.decision)
                     outcome = task.run()
                     trial, selected = outcome.candidate, outcome.selected
+                    checkpoint(self.artifact_root.parent, 'backend_design', node=rid, phase=task.kind,
+                               payload={'candidate': trial, 'selected': selected}, status='VALIDATED_CANDIDATE')
                 # Process: Validate the complete leaf before committing its design =============
                 errors = validate_ir(trial, database)
                 if errors:
@@ -80,9 +83,13 @@ class BackendDesignPass:
                 states[rid] = 'DESIGNED'
                 self.log.info('Leaf design: COMPLETED', node_id=rid)
                 write_json_atomic(self.root / 'backend_ir.json', ir)
+                checkpoint(self.artifact_root.parent, 'backend_design', node=rid, phase='leaf_publish',
+                           paths=['.arc/design/backend/backend_ir.json'], status='PUBLISHED')
             except Exception as exc:
                 states[rid] = 'SKIPPED'
                 warnings.append(f'{rid}: rolled back leaf design after failed attempts: {exc}')
+                checkpoint(self.artifact_root.parent, 'backend_design', node=rid, phase='leaf_rollback',
+                           payload={'reason': str(exc)}, status='ROLLED_BACK')
                 self.log.warning(warnings[-1], node_id=rid)
         # Process: Publish backend IR and the design report ====================================
         result = BackendDesignResult(ir, states, warnings=warnings)

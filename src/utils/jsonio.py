@@ -6,12 +6,6 @@ from pathlib import Path
 from typing import Any
 
 
-def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as output:
-        output.write(json.dumps(payload, ensure_ascii=False) + "\n")
-
-
 def write_json_atomic(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(f"{path.suffix}.tmp")

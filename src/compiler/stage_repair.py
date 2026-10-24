@@ -30,6 +30,8 @@ Return only request_files, edits and blocked_reason matching the response schema
 
 def repair_gate(model, output, stage, check, evidence, *, contracts=None, budgets=None):
     root = Path(output).resolve()
+    if callable(getattr(model, 'set_usage_path', None)):
+        model.set_usage_path(root / '.arc/model_usage.jsonl')
     artifact = root / '.arc/repairs' / stage
     limits = budgets if budgets is not None else ExecutionBudgets.from_environment()
     policy = GateRepairPolicy(model=model, root=root, stage=stage, check=check, evidence=evidence,

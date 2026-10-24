@@ -10,9 +10,7 @@ from typing import Any
 from ..ir.database import ERModelIR
 from .common import (
     append_unique,
-    compact_properties,
     format_error,
-    merge_properties,
     normalize_identifier,
     make_relationship_id,
 )

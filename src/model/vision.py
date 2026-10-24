@@ -8,7 +8,8 @@ from typing import Any
 from utils.environment import ensure_dotenv_loaded
 from openai import OpenAI
 from .logging import log_design_call, logged_completion
-from .client import completion_request_kwargs, record_model_usage, response_format_unavailable
+from .client import (completion_request_kwargs, nonnegative_env_int, positive_env_float,
+                     record_model_usage, response_format_unavailable)
 
 
 class VisualModelConfigurationError(RuntimeError):
@@ -186,18 +187,3 @@ def visual_messages(
             ],
         },
     ]
-
-
-def positive_env_float(name: str, default: float) -> float:
-    try:
-        value = float(os.environ.get(name, str(default)))
-    except ValueError:
-        return default
-    return value if value > 0 else default
-
-
-def nonnegative_env_int(name: str, default: int) -> int:
-    try:
-        return max(0, int(os.environ.get(name, str(default))))
-    except ValueError:
-        return default
