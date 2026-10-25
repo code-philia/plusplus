@@ -9,7 +9,7 @@ from utils.jsonio import read_json, write_json_atomic
 
 from .contracts import CompilationRequest
 from .preprocessing import RequirementPreprocessor
-from .preprocessing.queries import leaf_ids
+from .preprocessing.queries import unit_ids
 from .stages import Stage, StageResult, StageRunner, StageStatus
 
 
@@ -34,7 +34,7 @@ class PreprocessingStage(Stage[PreprocessingOutput]):
         output = self.request.output_dir.expanduser().resolve()
         root = output / '.arc'
         requirements = parsed.requirement_ir
-        leaves = leaf_ids(requirements)
+        leaves = unit_ids(requirements)
         states = {rid: 'PENDING' if rid in leaves else 'ORGANIZATIONAL' for rid in requirements['nodes']}
         existing = read_json(root / 'preprocessing/requirement_ir.json', {})
         if existing and existing.get('source') != requirements.get('source'):

@@ -10,12 +10,13 @@ from typing import Any
 from .presentation import frontend_metadata
 
 from compiler.context.structured import DesignDecision
-from compiler.preprocessing.queries import ancestor_ids, leaf_ids
+from compiler.preprocessing.queries import ancestor_ids, unit_ids
+from compiler.preprocessing.context import requirement_evidence
 from utils.jsonio import read_json, write_json_atomic
 from utils.git import checkpoint
 from utils.logging import SynchronousLog
 from .context import select_types, expand_api_context
-from .tasks import FrontendTaskInput, UIDesignTask, DataDesignTask, InteractionDesignTask
+from .tasks import FrontendTaskInput, PageBindingTask, UIDesignTask, DataDesignTask, InteractionDesignTask
 from .contracts import PROMPTS, SCHEMAS
 from .delta import apply_ui, apply_data, apply_interaction, make_ui
 from .validation import validate_ir
@@ -73,17 +74,13 @@ class FrontendDesignPass:
         if initial_errors:
             raise ValueError('Invalid imported backend types: ' + '; '.join(initial_errors))
         page_states, states, warnings = [], {}, []
-        order = leaf_ids(requirements)
+        order = unit_ids(requirements)
         # ======== Design each leaf on transactional UI and page copies ========
         for rid in order:
             self.log.info('Leaf design: RUNNING', node_id=rid)
             trial, trial_pages = copy.deepcopy(ir), copy.deepcopy(page_states)
             try:
                 requirement = self.requirement(requirements['nodes'][rid], requirements['nodes'])
-                if not requirement.get('pages'):
-                    states[rid] = 'NO_FRONTEND'
-                    self.log.info('No frontend page; skipping leaf.', node_id=rid)
-                    continue
                 # ============ Collect visual evidence for the current leaf ============
                 evidence = {}
                 for page in requirement['pages']:
@@ -92,7 +89,7 @@ class FrontendDesignPass:
                         try:
                             if reference in self.visual_failures:
                                 raise ValueError(self.visual_failures[reference])
-                            record = self.analyze(page['name'], reference, rid)
+                            record = self.analyze(page.get('name') or page.get('image_id'), reference, rid)
                             evidence[reference] = record
                             page['analysis'] = record['analysis']
                         except Exception as exc:
@@ -103,6 +100,18 @@ class FrontendDesignPass:
                     else:
                         known = next((row for row in trial_pages if row['name'] == page['name']), None)
                         page['analysis'] = self.page_analysis(known)
+                # ======================= Bind Images to Pages =========================
+                needs_page_binding = (not requirement['pages'] and isinstance(requirement.get('description'), dict)
+                                      or any(not page.get('name') for page in requirement['pages']))
+                requirement = PageBindingTask(lambda payload, accept:
+                    self.invoke('pages', rid, payload, accept)).run(requirement, trial_pages, trial['ui'])
+                if needs_page_binding:
+                    checkpoint(self.artifact_root.parent, 'frontend_design', node=rid, phase='page_binding',
+                               payload={'pages': requirement['pages']}, status='VALIDATED_CANDIDATE')
+                if not requirement['pages']:
+                    states[rid] = 'NO_FRONTEND'
+                    self.log.info('No frontend behavior; skipping UI design.', node_id=rid)
+                    continue
                 inputs = FrontendTaskInput(rid, requirement, trial, trial_pages, database, backend, evidence)
                 # ============================= UI Design ==============================
                 ui = UIDesignTask(self.design, self.page_analysis).run(inputs)
@@ -142,7 +151,7 @@ class FrontendDesignPass:
 
     @staticmethod
     def requirement(node, nodes):
-        result = {key: copy.deepcopy(node[key]) for key in ('id', 'name', 'description', 'scenarios', 'pages') if key in node}
+        result = requirement_evidence(node)
         for page in result.get('pages', []):
             if page.get('reference'):
                 page['reference'] = page['reference'].replace('\\', '/')

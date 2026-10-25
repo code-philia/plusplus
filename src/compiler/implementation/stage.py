@@ -11,7 +11,7 @@ from typing import Any
 from compiler.ir.backend import BackendIR
 from compiler.ir.database import ERModelIR
 from compiler.ir.frontend import FrontendIR
-from compiler.preprocessing.queries import ancestor_ids, leaf_ids
+from compiler.preprocessing.queries import ancestor_ids, unit_ids
 from compiler.lowering.planning import slug, token
 from utils.jsonio import write_json_atomic
 from utils.git import checkpoint
@@ -85,7 +85,7 @@ class NodeTDDOrchestrator:
         if missing:
             raise ValueError('Run database lowering before TDD: missing ' + ', '.join(missing))
         self.runner.prepare()
-        order = leaf_ids(requirements)
+        order = unit_ids(requirements)
         needs_browser = bool(frontend['ui']['children']) or any(
             'frontend' in layers for layers in self.context.files.recovery.values())
         environment = self.runner.check_environment(browser=needs_browser)

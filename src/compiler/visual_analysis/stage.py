@@ -15,7 +15,7 @@ from model.call_context import CallMetadata
 from compiler.frontend_design.contracts import PROMPTS, SCHEMAS, VISUAL_FIELDS, VISUAL_ANALYSIS_VERSION
 from compiler.frontend_design.visual import image_evidence
 from compiler.context.structured import DesignDecision
-from compiler.preprocessing.queries import leaf_ids
+from compiler.preprocessing.queries import unit_ids
 from compiler.budgets import positive_limit
 from compiler.stages import BackgroundStage, StageResult, StageStatus
 from utils.jsonio import read_json, write_json_atomic
@@ -115,7 +115,7 @@ class VisualAnalysisStage(BackgroundStage[VisualAnalysisOutput]):
                 VisualAnalysisOutput({}, {'background_analysis': str(exc)}),
                 warnings=('background_analysis: ' + str(exc),), artifact=self.inputs.artifact_root / 'visual_cache.json')
         failures, seen = {}, set()
-        for rid in leaf_ids(self.inputs.requirements):
+        for rid in unit_ids(self.inputs.requirements):
             for page in self.inputs.requirements['nodes'][rid].get('pages', []):
                 if self.stop.is_set():
                     break
@@ -123,7 +123,7 @@ class VisualAnalysisStage(BackgroundStage[VisualAnalysisOutput]):
                 if reference and reference not in seen:
                     seen.add(reference)
                     try:
-                        analyzer.analyze(page['name'], reference, rid)
+                        analyzer.analyze(page.get('name') or page.get('image_id'), reference, rid)
                     except Exception as exc:
                         failures[reference] = str(exc)
                         analyzer.log.warning(f'Skipping {reference}: {exc}', node_id=rid)

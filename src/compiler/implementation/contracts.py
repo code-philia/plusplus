@@ -5,8 +5,12 @@ from agent.tools import JSON_ACTION_SCHEMA, FILE_ACTION_INSTRUCTIONS
 SCHEMA = JSON_ACTION_SCHEMA
 
 BACKGROUND = '''## Background and role
-You implement ONE leaf requirement in a generated TypeScript Express/React application using TDD.
+You implement ONE requirement unit in a generated TypeScript Express/React application using TDD.
 The database, backend and frontend symbol tables and lowering plans supply exact contracts and file paths.
+Requirement description.text contains prose and description.image contains resolved image declarations.
+Scenarios contain ordered steps with id, Given, When, Then and typed references. Empty behavioral
+fields do not copy earlier or referenced text. reference_context is explicit referenced evidence,
+not additional implementation tasks or authorization to expand this requirement's scope.
 Parent descriptions constrain behavior; dependency requirements are not additional implementation tasks.
 Preserve previously implemented behavior, especially when files/components are shared.
 When current_task.recovery is present, design or lowering could not supply complete contracts.

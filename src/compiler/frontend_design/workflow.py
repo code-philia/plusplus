@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from compiler.preprocessing.queries import leaf_ids
+from compiler.preprocessing.queries import unit_ids
 from compiler.stages import Stage, StageResult, StageStatus
 from compiler.visual_analysis import VisualAnalysisOutput
 from .delta import make_ui
@@ -33,7 +33,7 @@ class FrontendDesignStage(Stage[FrontendDesignResult]):
             empty = {'ir_kind': 'frontend_design',
                 'ui': make_ui('UI_APP', 'Application', 'app', 'Application root.'),
                 'types': [], 'data': [], 'events': [], 'handlers': []}
-            result = FrontendDesignResult(empty, [], {rid: 'SKIPPED' for rid in leaf_ids(inputs.requirements)},
+            result = FrontendDesignResult(empty, [], {rid: 'SKIPPED' for rid in unit_ids(inputs.requirements)},
                                           errors=['Frontend design unavailable'])
             return StageResult(StageStatus.DEGRADED, result, errors=(str(exc),))
         return StageResult(StageStatus.SUCCEEDED if result.ok else StageStatus.DEGRADED, result,

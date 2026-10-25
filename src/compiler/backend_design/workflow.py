@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from compiler.preprocessing.queries import leaf_ids
+from compiler.preprocessing.queries import unit_ids
 from compiler.stages import Stage, StageResult, StageStatus
 from compiler.visual_analysis import VisualAnalysisOutput
 from .stage import BackendDesignPass, BackendDesignResult
@@ -29,7 +29,7 @@ class BackendDesignStage(Stage[BackendDesignResult]):
                 inputs.requirements, inputs.database)
         except Exception as exc:
             result = BackendDesignResult({'ir_kind': 'backend_design', 'types': [], 'modules': []},
-                {rid: 'SKIPPED' for rid in leaf_ids(inputs.requirements)}, errors=['Backend design unavailable'])
+                {rid: 'SKIPPED' for rid in unit_ids(inputs.requirements)}, errors=['Backend design unavailable'])
             return StageResult(StageStatus.DEGRADED, result, errors=(str(exc),))
         return StageResult(StageStatus.SUCCEEDED if result.ok else StageStatus.DEGRADED, result,
             errors=() if result.ok else ('; '.join(result.errors),),

@@ -156,7 +156,10 @@ Valid empty output example:
 """
 
 
-ER_SCOPE = """Scope: design the initial schema for a brand-new SQLite project, not migrations, existing data,
+ER_SCOPE = """Requirement descriptions contain text and image declarations; behavioral prose is description.text.
+Scenario steps carry id, Given, When, Then and typed references. Empty fields do not inherit earlier
+or referenced text. reference_context supplies exact referenced evidence, not extra requirements.
+Scope: design the initial schema for a brand-new SQLite project, not migrations, existing data,
 fixtures, query/index tuning, or inferred implementation optimizations. ER contains persistent domain
 entities, logical attributes, semantic relationships, and explicitly requirement-backed storage invariants.
 Entity names beginning with arc_ or sqlite_ are reserved for the compiler/database.

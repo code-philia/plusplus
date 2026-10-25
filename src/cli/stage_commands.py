@@ -8,7 +8,7 @@ from agent.tools import IndeterminateToolCall
 from compiler.budgets import ExecutionBudgets
 from compiler.implementation.workflow import ImplementationInput, ImplementationStage, PreparedImplementation
 from compiler.lowering.standalone import StandaloneLoweringInput, StandaloneLoweringStage
-from compiler.preprocessing.queries import leaf_ids
+from compiler.preprocessing.queries import unit_ids
 from compiler.stages import StageStatus
 from compiler.validation_preparation.workflow import ValidationPreparationInput, ValidationPreparationStage
 from model.client import Model, ModelConfigurationError
@@ -69,7 +69,7 @@ def implement_main(argv=None):
             backend_plan=read_json_object(arc / 'lowering/backend/plan.json'),
             frontend_plan=read_json_object(arc / 'lowering/frontend/plan.json'),
             database_plan=read_json_object(arc / 'lowering/database/plan.json'),
-            node_states={rid: 'LOWERED' for rid in leaf_ids(requirements)})
+            node_states={rid: 'LOWERED' for rid in unit_ids(requirements)})
         result = asyncio.run(ImplementationStage(ImplementationInput(prepared, output, args.port),
             Model.from_env(), ExecutionBudgets.from_environment()).run())
         print_diagnostics(result)

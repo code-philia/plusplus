@@ -4,7 +4,7 @@ from pathlib import Path
 
 from compiler.frontend_design.delta import make_ui
 from compiler.frontend_design.validation import ui_index
-from compiler.preprocessing.queries import leaf_ids
+from compiler.preprocessing.queries import unit_ids
 from compiler.ir.type_registry import TypeRegistry
 from .files import write_stage, digest
 from utils.jsonio import read_json, write_json_atomic
@@ -70,7 +70,7 @@ def isolate_design(stage, lowerer, requirements, design, output):
     accepted, rejected = [], {}
     candidate = empty_design(stage)
     if stage == 'backend':
-        units = leaf_ids(requirements)
+        units = unit_ids(requirements)
     else:
         units = design.get('tables', []) if stage == 'database' else design.get('ui', {}).get('children', [])
     for unit in units:
@@ -93,7 +93,7 @@ def isolate_design(stage, lowerer, requirements, design, output):
             else:
                 owners = [rid for rid, node in requirements['nodes'].items()
                           if any(page['name'] == unit.get('name') for page in node.get('pages', []))]
-            for rid in owners or leaf_ids(requirements):
+            for rid in owners or unit_ids(requirements):
                 rejected[rid] = str(exc)[:1000]
     args = (candidate,) if stage == 'database' else (requirements, candidate)
     plan = lowerer.compile(*args, output)

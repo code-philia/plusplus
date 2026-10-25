@@ -79,7 +79,7 @@ def main(stage, argv=None):
     configure_utf8_console()
     parser = argparse.ArgumentParser(description=f'Design {stage} contracts for leaf requirements')
     parser.add_argument('requirement_path', **({} if stage == 'database' else {'nargs': '?'}),
-                        help='Requirements directory or YAML file')
+                        help='Requirements directory, YAML file, or Markdown with one YAML block')
     parser.add_argument('-o', '--output-dir', required=True)
     if stage == 'frontend':
         parser.add_argument('--reference-root', help='Image path base directory')

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 from agent.tools import IndeterminateToolCall
 
-from compiler.preprocessing.queries import leaf_ids
+from compiler.preprocessing.queries import unit_ids
 from compiler.stages import StageResult, StageStatus
 from compiler.stage_repair import repair_gate
 from utils.jsonio import read_json, write_json_atomic
@@ -64,7 +64,7 @@ class LoweringWorkflow:
         inputs, policy = self.inputs, self.policy
         output, name = inputs.output_root, policy.key
         root = output / '.arc'
-        leaves = leaf_ids(inputs.requirements)
+        leaves = unit_ids(inputs.requirements)
         effective = inputs.design
         reasons = {}
         # ===================== Render and Isolate Design ======================

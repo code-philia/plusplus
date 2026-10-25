@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600" role="img" aria-labelledby="title desc">
+  <title id="title">Notes page reference</title>
+  <desc id="desc">A notes page with a search field, a New note button, and two note cards with Delete buttons.</desc>
+  <rect width="960" height="600" fill="#f5f7fb"/>
+  <rect width="960" height="88" fill="#ffffff"/>
+  <path d="M0 88H960" stroke="#dce3ed"/>
+  <g font-family="Arial, sans-serif" fill="#17243b">
+    <text x="48" y="54" font-size="28" font-weight="700">Notes</text>
+    <rect x="250" y="25" width="420" height="40" rx="8" fill="#f5f7fb" stroke="#dce3ed"/>
+    <text x="268" y="51" font-size="15" fill="#69788f">Search notes</text>
+    <rect x="760" y="25" width="152" height="40" rx="8" fill="#2557d6"/>
+    <text x="794" y="51" font-size="15" fill="#ffffff">New note</text>
+    <text x="48" y="145" font-size="20" font-weight="700">My notes</text>
+    <text x="48" y="174" font-size="14" fill="#69788f">2 notes</text>
+    <rect x="48" y="205" width="412" height="225" rx="12" fill="#ffffff" stroke="#dce3ed"/>
+    <text x="72" y="248" font-size="20" font-weight="700">Shopping list</text>
+    <text x="72" y="287" font-size="16">Milk, bread, apples</text>
+    <path d="M72 354H436" stroke="#e8edf5"/>
+    <rect x="348" y="371" width="88" height="36" rx="6" fill="#fff3f1"/>
+    <text x="371" y="395" font-size="14" fill="#b6382b">Delete</text>
+    <rect x="492" y="205" width="420" height="225" rx="12" fill="#ffffff" stroke="#dce3ed"/>
+    <text x="516" y="248" font-size="20" font-weight="700">Weekend plan</text>
+    <text x="516" y="287" font-size="16">Visit the library</text>
+    <path d="M516 354H888" stroke="#e8edf5"/>
+    <rect x="800" y="371" width="88" height="36" rx="6" fill="#fff3f1"/>
+    <text x="823" y="395" font-size="14" fill="#b6382b">Delete</text>
+    <text x="48" y="548" font-size="14" fill="#69788f">Illustrative visual reference. Behavior is specified in requirements.yaml.</text>
+  </g>
+</svg>

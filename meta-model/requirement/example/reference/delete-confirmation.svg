@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600" role="img" aria-labelledby="title desc">
+  <title id="title">Delete note confirmation reference</title>
+  <desc id="desc">The notes page with a confirmation dialog for deleting Shopping list, including Cancel and Delete buttons.</desc>
+  <rect width="960" height="600" fill="#f5f7fb"/>
+  <rect width="960" height="88" fill="#ffffff"/>
+  <g font-family="Arial, sans-serif">
+    <text x="48" y="54" font-size="28" font-weight="700" fill="#17243b">Notes</text>
+    <rect x="48" y="205" width="412" height="225" rx="12" fill="#ffffff" stroke="#dce3ed"/>
+    <rect x="492" y="205" width="420" height="225" rx="12" fill="#ffffff" stroke="#dce3ed"/>
+    <text x="72" y="248" font-size="20" fill="#17243b">Shopping list</text>
+    <text x="516" y="248" font-size="20" fill="#17243b">Weekend plan</text>
+    <rect width="960" height="600" fill="#17243b" fill-opacity="0.36"/>
+    <rect x="240" y="183" width="480" height="234" rx="14" fill="#ffffff"/>
+    <text x="272" y="231" font-size="23" font-weight="700" fill="#17243b">Delete note?</text>
+    <text x="272" y="274" font-size="16" fill="#475872">Delete “Shopping list”?</text>
+    <text x="272" y="303" font-size="15" fill="#69788f">This action cannot be undone.</text>
+    <rect x="464" y="346" width="100" height="40" rx="7" fill="#ffffff" stroke="#cdd6e4"/>
+    <text x="490" y="372" font-size="15" fill="#17243b">Cancel</text>
+    <rect x="580" y="346" width="108" height="40" rx="7" fill="#b6382b"/>
+    <text x="610" y="372" font-size="15" fill="#ffffff">Delete</text>
+  </g>
+</svg>

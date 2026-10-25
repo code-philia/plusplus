@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from compiler.preprocessing.queries import leaf_ids
+from compiler.preprocessing.queries import unit_ids
 from compiler.stages import Stage, StageResult, StageStatus
 from utils.jsonio import write_json_atomic
 from .stage import DatabaseSchemaPass, DatabasePassResult
@@ -25,7 +25,7 @@ class DatabaseDesignStage(Stage[DatabasePassResult]):
 
     async def _execute(self):
         inputs = self.inputs
-        leaves = leaf_ids(inputs.requirements)
+        leaves = unit_ids(inputs.requirements)
         empty = DatabaseSchemaState().to_er_model()
         fallback = DatabasePassResult(refine_er_model(empty, requirement_ids=set(leaves)).schema,
             {rid: 'FAILED' for rid in leaves}, empty, errors=['Database design unavailable'])

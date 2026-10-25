@@ -30,6 +30,46 @@ class FrontendTaskOutput:
     context: dict[str, Any] = field(default_factory=dict)
 
 
+class PageBindingTask:
+    def __init__(self, decide):
+        self.decide = decide
+
+    def run(self, requirement, page_states, tree):
+        requirement = copy.deepcopy(requirement)
+        pending = {}
+        for page in requirement['pages']:
+            if page.get('name'):
+                continue
+            matched = [state for state in page_states if any(
+                reference.get('image_id') == page.get('image_id')
+                if reference.get('image_id') else reference.get('reference') == page.get('reference')
+                for reference in state['references'])]
+            if len(matched) == 1:
+                page['name'] = matched[0]['name']
+            else:
+                pending[page['image_id']] = page
+        if not pending and (requirement['pages'] or not isinstance(requirement.get('description'), dict)):
+            return requirement
+        def accept(output):
+            bindings = output['bindings']
+            identities = [row['image_id'] for row in bindings]
+            if len(identities) != len(set(identities)) or set(identities) != set(pending):
+                raise ValueError('Bind every unassigned image exactly once; do not override explicit page identifiers')
+            if any(not row['page'].strip() for row in bindings):
+                raise ValueError('Inferred page identifiers must be nonempty')
+            text_pages = output.get('text_pages', [])
+            if any(not page.strip() for page in text_pages) or len(set(text_pages)) != len(text_pages):
+                raise ValueError('Text-derived pages must have unique nonempty identifiers')
+            return {'bindings': {row['image_id']: row['page'] for row in bindings}, 'text_pages': text_pages}
+        bindings = self.decide({'current_task': {'requirement': requirement},
+            'unassigned_images': list(pending.values()), 'ui_tree_summary': tree_summary(tree)}, accept)
+        for identity, page in pending.items():
+            page['name'] = bindings['bindings'][identity]
+        existing = {page['name'] for page in requirement['pages']}
+        requirement['pages'].extend({'name': name} for name in bindings['text_pages'] if name not in existing)
+        return requirement
+
+
 class UIDesignTask:
     def __init__(self, design, page_analysis):
         self.design, self.page_analysis = design, page_analysis
@@ -72,9 +112,12 @@ class UIDesignTask:
             if record:
                 old = next((index for index, row in enumerate(state['references']) if row['reference'] == reference), None)
                 if old is None:
-                    state['references'].append({key: record[key] for key in ('reference', 'sha256')})
+                    state['references'].append({key: record[key] for key in ('reference', 'sha256')}
+                        | ({'image_id': page['image_id']} if page.get('image_id') else {}))
                 else:
                     state['references'][old] = {key: record[key] for key in ('reference', 'sha256')}
+                    if page.get('image_id'):
+                        state['references'][old]['image_id'] = page['image_id']
         return FrontendTaskOutput(trial, trial_pages, requirement)
 
 

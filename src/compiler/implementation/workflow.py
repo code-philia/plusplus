@@ -10,7 +10,7 @@ from compiler.frontend_design.stage import FrontendDesignResult
 from compiler.frontend_design.validation import ui_index
 from compiler.lowering.workflow import LoweringOutput
 from compiler.lowering.recovery import bind_recovery
-from compiler.preprocessing.queries import leaf_ids
+from compiler.preprocessing.queries import unit_ids
 from compiler.stages import Stage, StageResult, StageStatus
 from .stage import NodeTDDOrchestrator
 
@@ -48,7 +48,7 @@ class ImplementationPreparationStage(Stage[PreparedImplementation]):
     async def _execute(self):
         inputs = self.inputs
         requirements = inputs.requirements
-        leaves = leaf_ids(requirements)
+        leaves = unit_ids(requirements)
         for lowered in (inputs.database_lowering, inputs.backend_lowering, inputs.frontend_lowering):
             if not isinstance(lowered.plan, dict):
                 raise ValueError('Implementation preparation requires a lowering plan')
@@ -60,18 +60,21 @@ class ImplementationPreparationStage(Stage[PreparedImplementation]):
         backend_owners = {rid for row in backend_ir['modules'] for rid in row['reqs']}
         ui_owners = {rid for row in ui_nodes.values() for rid in row['reqs']}
         for rid in leaves:
+            frontend_failed = inputs.frontend.node_states.get(rid) in {'SKIPPED', 'FAILED'}
+            needs_frontend = (bool(requirements['nodes'][rid].get('pages')) or frontend_failed
+                              and isinstance(requirements['nodes'][rid].get('description'), dict))
             if inputs.backend.node_states.get(rid) in {'SKIPPED', 'FAILED'}:
                 backend_recovery[rid] = 'Backend design unavailable; implement from the requirement.'
             if (inputs.database.node_states.get(rid) in {'FAILED', 'SKIPPED'}
                     or rid in inputs.database_lowering.recovery_reasons):
                 backend_recovery[rid] = 'Database design/lowering incomplete; repair shared initialization as needed.'
-            if inputs.frontend.node_states.get(rid) in {'SKIPPED', 'FAILED'} and requirements['nodes'][rid].get('pages'):
+            if frontend_failed and needs_frontend:
                 frontend_recovery[rid] = 'Frontend design unavailable; implement the declared pages from the requirement.'
-            if requirements['nodes'][rid].get('pages') and rid not in ui_owners:
+            if needs_frontend and rid not in ui_owners:
                 frontend_recovery.setdefault(rid, 'No UI files bound; implement the declared pages from the requirement.')
             if rid not in backend_owners and rid not in ui_owners and rid not in frontend_recovery:
                 backend_recovery.setdefault(rid, 'No source files bound; implement from the requirement.')
-            if rid in backend_recovery and requirements['nodes'][rid].get('pages'):
+            if rid in backend_recovery and needs_frontend:
                 frontend_recovery.setdefault(rid, 'Integrate the recovered backend behavior with the declared pages.')
         backend_plan = bind_recovery(inputs.output_root, 'backend', inputs.backend_lowering.plan, backend_recovery)
         frontend_plan = bind_recovery(inputs.output_root, 'frontend', inputs.frontend_lowering.plan, frontend_recovery)
@@ -116,7 +119,7 @@ class ImplementationStage(Stage[ImplementationOutput]):
                 prepared.frontend_plan, prepared.database_plan)
             states.update(result.node_states)
             effective_states = {**prepared.node_states, **states}
-            failed = tuple(sorted(rid for rid in leaf_ids(prepared.requirements)
+            failed = tuple(sorted(rid for rid in unit_ids(prepared.requirements)
                                   if effective_states[rid] not in {'IMPLEMENTED', 'ALREADY_PASSED'}))
             if not result.ok or failed:
                 raise ValueError('; '.join(result.errors) or 'Requirements not implemented: ' + ', '.join(failed))

@@ -1,0 +1,99 @@
+id: REQ-NOTES
+name: Note management
+description:
+  text: |-
+    Users can view notes, initiate deletion from the list, and confirm or cancel it in a dialog.
+    The list and confirmation dialog are different states of the same page.
+    This example demonstrates a requirement tree, scenario steps, image reuse, and typed references.
+  image:
+    - id: IMG-NOTES
+      reference: reference/notes.svg
+      page: notes
+scenarios: []
+children:
+  - id: REQ-VIEW
+    name: View the notes list
+    description:
+      text: |-
+        The page displays the title and body of each existing note. Each card includes a Delete button.
+        The list image is already declared in the root requirement, so only its ID is provided here.
+      image:
+        - id: IMG-NOTES
+    scenarios:
+      - id: SCN-VIEW
+        name: View existing notes
+        steps:
+          - id: STEP-VIEW-LIST
+            Given: |-
+              Two notes exist: Shopping list with the body Milk, bread, apples;
+              and Weekend plan with the body Visit the library.
+            When: The user opens the notes list.
+            Then: The page displays both note cards, each with its own Delete button.
+            references:
+              - '\ref[image](IMG-NOTES)'
+    children: []
+
+  - id: REQ-DELETE
+    name: Delete a note
+    description:
+      text: |-
+        Clicking Delete on a card opens a confirmation dialog titled Delete note?.
+        The dialog displays the selected note's title and provides Cancel and Delete buttons.
+        The note is deleted only after clicking Delete in the dialog; deletion persists after reload.
+      image:
+        - id: IMG-NOTES
+          reference: reference/notes.svg
+        - id: IMG-DELETE-CONFIRMATION
+          reference: reference/delete-confirmation.svg
+          page: notes
+    scenarios:
+      - id: SCN-DELETE
+        name: Confirm deletion of the selected note
+        steps:
+          - id: STEP-DELETE-OPEN
+            Given: |-
+              The user is on the notes list, where Shopping list and Weekend plan both exist.
+            When: The user clicks Delete on the Shopping list card.
+            Then: |-
+              The Delete note? dialog appears and its message includes Shopping list.
+              Both notes still exist. The dialog provides Cancel and Delete buttons.
+            references:
+              - '\ref[image](IMG-NOTES)'
+              - '\ref[image](IMG-DELETE-CONFIRMATION)'
+          - id: STEP-DELETE-CONFIRM
+            Given: ''
+            When: The user clicks Delete in the dialog and then reloads the page.
+            Then: |-
+              The dialog is closed, Shopping list is absent, and Weekend plan remains.
+            references:
+              - '\ref[step](STEP-DELETE-OPEN)'
+              - '\ref[requirement](REQ-DELETE)'
+    children:
+      - id: REQ-CANCEL-DELETE
+        name: Cancel deletion
+        description:
+          text: |-
+            Clicking Cancel in the deletion confirmation dialog closes it and preserves the note.
+            This requirement uses the same list and confirmation dialog as the deletion operation.
+          image:
+            - id: IMG-DELETE-CONFIRMATION
+        scenarios:
+          - id: SCN-CANCEL-DELETE
+            name: Preserve the note after cancellation
+            steps:
+              - id: STEP-CANCEL-ACTION
+                Given: |-
+                  The user has opened the Delete note? dialog for Shopping list.
+                  Shopping list and Weekend plan both still exist.
+                When: The user clicks Cancel in the dialog.
+                Then: null
+                references:
+                  - '\ref[image](IMG-DELETE-CONFIRMATION)'
+                  - '\ref[requirement](REQ-DELETE)'
+                  - '\ref[scenario](SCN-DELETE)'
+                  - '\ref[step](STEP-DELETE-OPEN)'
+              - id: STEP-CANCEL-RESULT
+                Given: null
+                When: ''
+                Then: The dialog is closed. Both notes are unchanged and remain after reload.
+        children: []

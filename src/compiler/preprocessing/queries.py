@@ -10,6 +10,13 @@ def leaf_ids(requirements: dict[str, Any]) -> list[str]:
     return [rid for rid in postorder(requirements) if not children[rid]]
 
 
+def unit_ids(requirements: dict[str, Any]) -> list[str]:
+    """Include behavioral parents as well as leaves, with children before parents."""
+    children = children_by_id(requirements)
+    return [rid for rid in postorder(requirements)
+            if not children[rid] or requirements['nodes'][rid].get('scenarios')]
+
+
 def ancestor_ids(nodes: dict[str, Any], parent: str | None) -> list[str]:
     """Follow parents once each and return their IDs from root to nearest parent."""
     ancestors, seen = [], set()

@@ -39,6 +39,13 @@ class ContextAssembler:
         visual_cache = read_json(self.root / '.arc/visual_cache.json', {})
         file_index_exclusions = set(records)
         for page in requirement.get('pages', []):
+            if not page.get('name'):
+                matches = [row for row in page_states if any(
+                    reference.get('image_id') == page.get('image_id')
+                    if reference.get('image_id') else reference.get('reference') == page.get('reference')
+                    for reference in row['references'])]
+                if len(matches) == 1:
+                    page['name'] = matches[0]['name']
             state = next((row for row in page_states if row['name'] == page['name']), None)
             page_references = state.get('references', []) if state else []
             reference = str(page.get('reference', '')).replace('\\', '/')

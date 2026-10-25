@@ -12,7 +12,8 @@ from typing import Any, Callable
 
 from utils.logging import SynchronousLog
 
-from compiler.preprocessing.queries import leaf_ids
+from compiler.preprocessing.queries import unit_ids
+from compiler.preprocessing.context import description_text
 
 from ..ir.database import ERModelIR, SchemaIR
 from model.contracts import StructuredModel
@@ -64,7 +65,7 @@ class DatabaseSchemaPass:
         # ======================================================================
         # ================= Collect requirements in postorder ==================
         nodes = requirement_ir.get("nodes", {})
-        requirements = leaf_ids(requirement_ir)
+        requirements = unit_ids(requirement_ir)
         effective_dependencies = (dependency_graph or {}).get("requirement_dependencies", {})
         self.trace(f"DESIGN_ORDER traversal=depth_first_postorder requirements={requirements}")
         states = {node_id: "DISCOVERED" for node_id in requirements}
@@ -143,8 +144,8 @@ class DatabaseSchemaPass:
             },
             "requirement_catalog": [
                 {"id": rid, "name": nodes[rid].get("name", ""),
-                 "description_excerpt": str(nodes[rid].get("description", ""))[:excerpt_limit],
-                 "description_truncated": len(str(nodes[rid].get("description", ""))) > excerpt_limit}
+                 "description_excerpt": description_text(nodes[rid])[:excerpt_limit],
+                 "description_truncated": len(description_text(nodes[rid])) > excerpt_limit}
                 for rid in sorted(state.requirement_entity_links) if isinstance(nodes.get(rid), dict)
             ],
         }
@@ -253,7 +254,7 @@ def node_context(
     nodes: dict[str, Any],
     effective_dependencies: Any,
 ) -> dict[str, Any]:
-    ancestors: list[dict[str, str]] = []
+    ancestors: list[dict[str, Any]] = []
     parent_id = node.get("parent_id")
     while isinstance(parent_id, str) and parent_id:
         parent = nodes.get(parent_id)
@@ -262,18 +263,19 @@ def node_context(
         ancestors.append({
             "id": parent_id,
             "name": str(parent.get("name", "")),
-            "description": str(parent.get("description", "")),
+            "description": copy.deepcopy(parent.get("description", "")),
         })
         parent_id = parent.get("parent_id")
     ancestors.reverse()
     return {
         "requirement_id": str(node.get("id", "")),
         "name": str(node.get("name", "")),
-        "description": str(node.get("description", "")),
+        "description": copy.deepcopy(node.get("description", "")),
         "scenarios": copy.deepcopy(node.get("scenarios", [])),
         "pages": copy.deepcopy(node.get("pages", [])),
         "dependencies": copy.deepcopy(effective_dependencies),
         "ancestors": ancestors,
+        **({'reference_context': copy.deepcopy(node['reference_context'])} if 'reference_context' in node else {}),
     }
 
 

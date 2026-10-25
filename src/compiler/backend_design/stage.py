@@ -1,6 +1,8 @@
 """Atomic, leaf-only API -> FUNC -> DB design with validated repair attempts."""
 from __future__ import annotations
 
+from compiler.preprocessing.context import requirement_evidence
+
 import copy
 import json
 import os
@@ -10,7 +12,7 @@ from typing import Any
 
 from .presentation import backend_metadata
 
-from compiler.preprocessing.queries import ancestor_ids, leaf_ids
+from compiler.preprocessing.queries import ancestor_ids, unit_ids
 from utils.jsonio import write_json_atomic
 from utils.git import checkpoint
 from utils.logging import SynchronousLog
@@ -58,7 +60,7 @@ class BackendDesignPass:
         if database.get('ir_kind') != 'er_model' or database.get('status') != 'RESOLVED':
             raise ValueError('Backend design requires a RESOLVED er_model.json')
         ir = {'ir_kind': 'backend_design', 'types': [], 'modules': []}
-        order = leaf_ids(requirements)
+        order = unit_ids(requirements)
         states, warnings = {}, []
         # ============== Design each leaf on a transactional copy ==============
         for rid in order:
@@ -103,7 +105,7 @@ class BackendDesignPass:
         return result
 
     def requirement(self, node, nodes):
-        result = {key: copy.deepcopy(node[key]) for key in ('id', 'name', 'description', 'scenarios', 'pages') if key in node}
+        result = requirement_evidence(node)
         # Visual stage stores analysis separately; attach only this leaf's reference evidence.
         cache_path = self.artifact_root / 'visual_cache.json'
         cache = self.visual_cache

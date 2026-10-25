@@ -35,9 +35,14 @@ SCHEMAS = {
 }
 
 COMMON = '''## Background and role
-You are a frontend architect designing one leaf requirement in an existing application.
+You are a frontend architect designing one requirement unit in an existing application.
 Produce framework-neutral contracts, not React components, source code, CSS, tests or SQL.
 Requirements and scenario steps define behavior. Images define visible structure and states;
+description.text is behavioral prose; description.image contains resolved reusable image declarations.
+Each ordered scenario step has its own id, Given, When, Then and typed references. An empty field
+does not inherit text from an earlier step or referenced object. reference_context supplies exact
+referenced evidence, not extra tasks. Images sharing an explicit page identify one containing page,
+even when they show different states or components; preserve case-sensitive page identifiers.
 image evidence must not invent authentication policies, persistence or server capabilities.
 Requirements may also specify controls and interaction states not shown in an image.
 Ancestor descriptions constrain the leaf; do not implement parent or unrelated requirements.
@@ -220,3 +225,18 @@ PROMPTS = {phase: (VISUAL_ROLE if phase == 'visual' else COMMON) + (TYPES if pha
            + '\n## Return format\n' + json.dumps(SCHEMAS[phase], ensure_ascii=False)
            + '\n## Example (IDs are illustrative; use supplied IDs)\n' + json.dumps(EXAMPLES[phase], ensure_ascii=False)
            for phase in SCHEMAS}
+
+SCHEMAS['pages'] = obj({'bindings': {'type': 'array', 'items': obj({'image_id': STRING, 'page': STRING})},
+                      'text_pages': STRINGS})
+PROMPTS['pages'] = '''You identify this requirement's frontend pages and assign ungrouped images.
+Use requirement descriptions, ordered Given/When/Then steps, image analysis and the existing UI tree.
+An image can show a whole page, another state, or a component. Images of the same page must bind to
+one page identifier and one UI tree; do not create a page per image. Reuse existing page names when
+appropriate. Different explicit page identifiers are distinct and must never be merged or renamed.
+Return exactly one binding for each unassigned_images image_id, with a nonempty page identifier.
+Do not add or change bindings for explicitly assigned images. text_pages lists any additional page
+identifiers required by the text or scenarios even when no image is supplied. Reuse existing page
+identifiers when appropriate. Return an empty text_pages list for purely backend behavior; do not
+invent a UI for backend-only requirements. Empty unassigned_images requires empty bindings.
+Return only the declared JSON object, including bindings and text_pages.
+'''

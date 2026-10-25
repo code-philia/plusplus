@@ -7,7 +7,7 @@ import inspect
 from utils.logging import SynchronousLog
 
 from .contracts import CompilationResult
-from .preprocessing.queries import leaf_ids
+from .preprocessing.queries import unit_ids
 from .run_report import CompilationRunReport
 from .stages import StageStatus
 
@@ -16,7 +16,7 @@ class CompilationProgress:
     def __init__(self, state, parsed, log_cb=None):
         self.state = state
         self.requirements = parsed.requirement_ir
-        self.leaves = leaf_ids(self.requirements)
+        self.leaves = unit_ids(self.requirements)
         self.log_cb = log_cb
         self.log = SynchronousLog('Compiler', workspace_root=parsed.output_root)
         state.states.update(parsed.states)

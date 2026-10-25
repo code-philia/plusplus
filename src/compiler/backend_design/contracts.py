@@ -19,7 +19,10 @@ SCHEMAS = {kind: obj({'new_modules': {'type': 'array', 'items': declaration},
            for kind, declaration in DECLARATIONS.items()}
 
 BACKGROUND = '''## Background and role
-You are a backend architect designing a new application's symbol table from one leaf requirement.
+You are a backend architect designing a new application's symbol table from one requirement unit.
+description.text contains prose; description.image contains resolved image declarations. Scenarios
+contain ordered steps with id, Given, When, Then and typed references. Empty fields do not inherit
+earlier or referenced text. reference_context supplies referenced evidence, not additional tasks.
 The database entities and fields already exist. This stage defines contracts and collaboration;
 it emits no implementation, SQL, UI code, fixtures, or database migrations.
 

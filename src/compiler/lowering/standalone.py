@@ -5,7 +5,7 @@ from pathlib import Path
 from compiler.backend_lowering.workflow import BackendLoweringInput, BackendLoweringStage
 from compiler.database_lowering.workflow import DatabaseLoweringInput, DatabaseLoweringStage
 from compiler.frontend_lowering.workflow import FrontendLoweringInput, FrontendLoweringStage
-from compiler.preprocessing.queries import leaf_ids
+from compiler.preprocessing.queries import unit_ids
 from compiler.stages import Stage, StageResult, StageStatus
 from utils.jsonio import read_json, read_json_object, write_json_atomic
 from .recovery import bind_recovery
@@ -58,7 +58,7 @@ class StandaloneLoweringStage(Stage[LoweringOutput]):
             if layer == 'backend':
                 reasons.update(read_json(arc / 'lowering/database/plan.json', {}).get('recovery_requirements', {}))
             states = read_json(arc / 'design' / layer / 'report.json', {}).get('node_states', {})
-            for rid in leaf_ids(requirements):
+            for rid in unit_ids(requirements):
                 if states.get(rid) in {'FAILED', 'SKIPPED'} and (layer == 'backend' or requirements['nodes'][rid].get('pages')):
                     reasons[rid] = f'{layer} design incomplete; implement from the requirement.'
             plan = bind_recovery(output, layer, lowered.plan, reasons)
