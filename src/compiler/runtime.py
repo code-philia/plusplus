@@ -45,9 +45,11 @@ class CompilerDependencies:
         return ExecutionBudgets.from_environment()
 
     def model_client(self):
-        if self.model is not None:
-            return self.model
         from model.client import Model
+        if self.model is not None:
+            if isinstance(self.model, Model):
+                return self.model.new_session()
+            return self.model
         return Model.from_env()
 
 

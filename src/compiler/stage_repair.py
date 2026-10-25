@@ -23,8 +23,7 @@ type checking, remove build commands, change dependency versions or modify tests
 validation_feedback describes the failure; rejected_patch lists the proposed files with installed:false.
 The rejected reply's edits were all rolled back. Only the supplied current file contents reflect
 installed code; earlier accepted changes remain installed. Submit coordinated fixes together.
-If the cause cannot be repaired in the permitted source scope, explain it in blocked_reason.
-Return only request_files, edits and blocked_reason matching the response schema.
+If the cause cannot be repaired in the permitted source scope, report the blocker using the selected protocol.
 ''' + FILE_ACTION_INSTRUCTIONS
 
 

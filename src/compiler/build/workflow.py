@@ -1,5 +1,5 @@
 """Production build and bounded repair belong to the build stage."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from agent.tools import IndeterminateToolCall
@@ -33,7 +33,7 @@ class BuildStage(Stage[BuildOutput]):
         if not evidence['ok']:
             try:
                 evidence = repair_gate(self.model, self.output_root, 'build', self.check, evidence,
-                                       budgets=self.budgets)
+                                       budgets=replace(self.budgets, model_attempts=1))
             except IndeterminateToolCall:
                 raise
             except Exception as exc:

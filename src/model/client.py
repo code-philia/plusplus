@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -114,6 +115,14 @@ class Model:
     def set_usage_path(self, path: Path | None) -> None:
         """Persist actual usage here and locate project-owned model logs alongside it."""
         self._usage_path = path.expanduser().resolve() if path is not None else None
+
+    def new_session(self) -> Model:
+        """Share the provider transport, never compilation-owned usage or negotiation state."""
+        session = copy.copy(self)
+        session._usage_path = None
+        session._structured_output_mode = "json_schema"
+        session.__dict__.pop('_last_output_mode', None)
+        return session
 
     @classmethod
     def from_env(cls) -> "Model":

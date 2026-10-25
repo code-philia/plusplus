@@ -6,7 +6,7 @@ from agent.runtime import AgentRuntime
 from agent.native import native_instructions
 from compiler.context.model_calls import invoke_model
 from model.client import describe_model_error
-from .contracts import PROMPTS, SCHEMA
+from .contracts import NATIVE_PROMPTS, PROMPTS, SCHEMA
 from .presentation import implementation_metadata
 from .test_runner import passed
 
@@ -41,7 +41,7 @@ class ImplementationAgentPolicy:
     def invoke_native(self, invocation, *, tools, messages):
         self.call_number = self.call_started()
         return invoke_model(self.model, implementation_metadata(self.phase), method='generate_tool_turn',
-            schema_name='tdd_' + self.phase, instructions=native_instructions(PROMPTS[self.phase]),
+            schema_name='tdd_' + self.phase, instructions=native_instructions(NATIVE_PROMPTS[self.phase]),
             input_payload=invocation.payload, tools=tools, messages=messages)
 
     def validate_context(self, invocation, arguments):

@@ -37,11 +37,10 @@ class ContextAssembler:
         from utils.jsonio import read_json
         page_states = read_json(self.root / '.arc/design/frontend/page_states.json', [])
         visual_cache = read_json(self.root / '.arc/visual_cache.json', {})
-        file_index_exclusions = records
+        file_index_exclusions = set(records)
         for page in requirement.get('pages', []):
             state = next((row for row in page_states if row['name'] == page['name']), None)
             page_references = state.get('references', []) if state else []
-            file_index_exclusions = page_references
             reference = str(page.get('reference', '')).replace('\\', '/')
             if not reference and page_references:
                 reference = page_references[0]['reference']

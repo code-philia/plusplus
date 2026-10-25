@@ -109,8 +109,9 @@ class ImplementationStage(Stage[ImplementationOutput]):
         states, failed, warnings = {}, (), ()
         path = inputs.output_root / '.arc/implementation/report.json'
         try:
-            result = NodeTDDOrchestrator(self.model, inputs.output_root, port=inputs.web_port,
-                budgets=self.budgets).compile(prepared.requirements, prepared.er_model,
+            engine = NodeTDDOrchestrator(self.model, inputs.output_root, port=inputs.web_port,
+                                         budgets=self.budgets)
+            result = engine.compile(prepared.requirements, prepared.er_model,
                 prepared.backend_ir, prepared.frontend_ir, prepared.backend_plan,
                 prepared.frontend_plan, prepared.database_plan)
             states.update(result.node_states)

@@ -1,6 +1,8 @@
 """Small load-or-patch model protocol for test generation, implementation and repair."""
 import json
-from agent.tools import JSON_ACTION_SCHEMA as SCHEMA, FILE_ACTION_INSTRUCTIONS
+from agent.tools import JSON_ACTION_SCHEMA, FILE_ACTION_INSTRUCTIONS
+
+SCHEMA = JSON_ACTION_SCHEMA
 
 BACKGROUND = '''## Background and role
 You implement ONE leaf requirement in a generated TypeScript Express/React application using TDD.
@@ -50,11 +52,6 @@ Every invocation refreshes source from disk; old source versions and full histor
 not in this prompt. Context requests do not install rejected edits.
 
 ## Patch protocol and corrections
-Return exactly the JSON schema: request_files, release_files, edits, blocked_reason, no Markdown.
-Include all four fields. Use [] for unused arrays and "" for an empty blocked_reason.
-These are the only allowed top-level keys. Never emit type, json_object, response_format,
-schema, status or explanatory fields. JSON Schema's type and the API transport's json_object mode
-describe the format; they are NOT fields to copy into your response. Start with {"request_files": ...}.
 The compiler manages source versions internally and refreshes context if a file changed during the call.
 Do not include unchanged files, delete files or modify .arc artifacts. Edit only the supplied allowlist.
 validation_feedback describes the last failure. rejected_patch lists only the files proposed by
@@ -62,7 +59,7 @@ the rejected reply: installed:false means NONE of that reply's edits are install
 contents are deliberately omitted. Use the freshly supplied editable_files/read_only_files as the
 actual source state; earlier accepted patches remain installed. If the failed proposal coordinated
 several files, inspect their actual contents and submit all necessary changes together.
-blocked_reason is empty unless a real design/dependency gap prevents implementation. Do not claim success
+Report a blockage only when a real design/dependency gap prevents implementation. Do not claim success
 from reasoning: the compiler runs compilation and tests. Test edits must preserve scenario coverage
 and the intended acceptance behavior; never weaken tests merely to match a faulty implementation.
 
@@ -82,7 +79,7 @@ Requirements, scenarios and ancestor constraints define acceptance behavior. IR 
 seams and paths; visual analysis describes presentation. Neither implementation placeholders nor IR
 details may create new acceptance requirements. Do not test every visible control merely because the
 UI pass discovered the complete screenshot; test behavior covered by this leaf. If evidence is genuinely
-contradictory, explain it in blocked_reason instead of inventing policy, fixture data or exact outcomes.
+contradictory, report the blocker using the selected protocol instead of inventing policy, fixture data or exact outcomes.
 Do not edit application source yet, nor import seed to insert data inside tests. Assert real behavior,
 not placeholders, snapshots of generated skeletons, or the fact that an implementation throws.
 Write assertions for the FINISHED product even though current source is a scaffold: successful actions
@@ -135,8 +132,8 @@ or API usage misrepresent the intended finished behavior. Preserve every valid a
 including prior regression coverage. Do not delete scenarios, skip/focus checks, reduce assertions,
 mock the behavior under test or adopt broken implementation output as the expected result.
 Correct source when the test is valid; do not rewrite a correct assertion to avoid fixing the product.
-For each test edit use blocked_reason only for real blockers; put the requirement-grounded rationale
-in a short code comment beside the corrected setup/assertion, without adding response fields.
+For each test edit put the requirement-grounded rationale in a short code comment beside the
+corrected setup/assertion. Report real blockers separately using the selected protocol.
 Previous accepted patches are installed; rejected proposals are not. Return the minimal coordinated
 source changes, including shared source if the failure requires it.
 ''',
@@ -170,7 +167,8 @@ omitted; use the supplied backend API contracts for integration. Acceptance test
 Preserve contracts and earlier UI
 behavior. Wire the required interactions instead of leaving lowering's event.wired=false as completion.
 After this phase the compiler executes only the current requirement's acceptance tests, then repairs.
-Historical test sources are checked for compilation only; no runtime regression suite is executed.
+After all requirements, the compiler checks the final build and attempts at most one build repair.
+Earlier acceptance tests are not rerun as a full historical regression suite.
 '''
 EXAMPLE = {'request_files': ['backend/src/db/seed.ts'], 'release_files': [], 'edits': [], 'blocked_reason': ''}
 PATCH_EXAMPLE = {'request_files': [], 'release_files': [], 'edits': [{'file': 'tests/unit/example.test.ts',
@@ -188,7 +186,16 @@ def phase_examples(phase):
     patch = {**PATCH_EXAMPLE, 'edits': [{**PATCH_EXAMPLE['edits'][0], 'file': edit_path}]}
     return json.dumps(load), json.dumps(patch)
 
-PROMPTS = {phase: BACKGROUND + FILE_ACTION_INSTRUCTIONS + task + '\n## Return format\n' + json.dumps(SCHEMA)
+JSON_PROTOCOL = '''\n## JSON action protocol
+Return exactly one JSON object containing request_files, release_files, edits and blocked_reason.
+Include all four fields. Use [] for unused arrays and "" for an empty blocked_reason.
+Never emit Markdown, type, json_object, response_format, schema, status or explanatory fields.
+Start with {"request_files": ...}; blocked_reason is only for real blockers.
+'''
+
+PROMPTS = {phase: BACKGROUND + FILE_ACTION_INSTRUCTIONS + task + JSON_PROTOCOL
            + '\n## Example: read a file when needed\n' + phase_examples(phase)[0]
            + '\n## Example: replace a changed file (use actual allowed paths and contents)\n' + phase_examples(phase)[1]
            for phase, task in TASKS.items()}
+
+NATIVE_PROMPTS = {phase: BACKGROUND + task for phase, task in TASKS.items()}
