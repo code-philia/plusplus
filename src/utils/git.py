@@ -1,4 +1,4 @@
-"""Workspace-only checkpoints on a private ref, without touching HEAD or the user's index."""
+"""Workspace checkpoints on main, without committing unrelated staged changes."""
 from __future__ import annotations
 
 import hashlib
@@ -65,6 +65,41 @@ def checked_path(root, value):
     return path.as_posix()
 
 
+def reference_commit(root, reference):
+    commits = run_git(root, ['for-each-ref', '--format=%(objectname)', reference]).splitlines()
+    return commits[0] if commits else None
+
+
+def ensure_main_history(root):
+    root = Path(root).resolve()
+    with _checkpoint_lock:
+        if root == Path(__file__).resolve().parents[2]:
+            raise ValueError('Refusing to checkpoint the compiler source repository')
+        root.mkdir(parents=True, exist_ok=True)
+        if not (root / '.git').exists():
+            run_git(root, ['init', '--quiet', '--initial-branch=main'])
+        if (root / '.git').is_symlink() or getattr(root / '.git', 'is_junction', lambda: False)():
+            raise ValueError('Checkpoint repository metadata must not be an alias')
+        if Path(run_git(root, ['rev-parse', '--show-toplevel'])).resolve() != root:
+            raise ValueError('Checkpoint repository must belong to this workspace, not an ancestor')
+        reference = 'refs/heads/main'
+        current = run_git(root, ['symbolic-ref', '--quiet', 'HEAD'])
+        parent = reference_commit(root, reference)
+        if current != reference and (parent or reference_commit(root, current)):
+            raise ValueError('Checkpoints require main to be checked out; existing branches are not switched automatically')
+        if parent is None:
+            legacy = 'refs/arc/checkpoints/' + hashlib.sha256(str(root).encode('utf-8')).hexdigest()[:16]
+            parent = reference_commit(root, legacy)
+            if parent:
+                if run_git(root, ['diff', '--cached', '--name-only']):
+                    raise ValueError('Cannot migrate legacy checkpoints with staged changes; preserve or unstage them first')
+                run_git(root, ['read-tree', parent])
+                run_git(root, ['update-ref', '--create-reflog', reference, parent, '0' * len(parent)])
+        if current != reference:
+            run_git(root, ['symbolic-ref', 'HEAD', reference])
+        return reference, parent
+
+
 def checkpoint(root, event, *, node=None, phase=None, payload=None, paths=(), status='ACCEPTED'):
     if not enabled():
         return None
@@ -75,6 +110,10 @@ def checkpoint(root, event, *, node=None, phase=None, payload=None, paths=(), st
             if root == Path(__file__).resolve().parents[2]:
                 raise ValueError('Refusing to checkpoint the compiler source repository')
             selected = [checked_path(root, path) for path in paths]
+            reference, parent = ensure_main_history(root)
+            staged = set(run_git(root, ['diff', '--cached', '--name-only', '-z']).split('\0'))
+            if staged.intersection(selected):
+                raise ValueError('Checkpoint would overwrite staged changes in selected paths; preserve or unstage them first')
             identity = uuid4().hex
             record = {'id': identity, 'run_id': current_run_id(), 'event': event, 'node': node,
                 'phase': phase, 'status': status, 'timestamp': datetime.now(timezone.utc).isoformat(),
@@ -82,15 +121,6 @@ def checkpoint(root, event, *, node=None, phase=None, payload=None, paths=(), st
             metadata = f'.arc/checkpoints/{identity}.json'
             checked_path(root, metadata)
             write_json_atomic(root / metadata, record)
-            if not (root / '.git').exists():
-                run_git(root, ['init', '--quiet'])
-            if (root / '.git').is_symlink() or getattr(root / '.git', 'is_junction', lambda: False)():
-                raise ValueError('Checkpoint repository metadata must not be an alias')
-            if Path(run_git(root, ['rev-parse', '--show-toplevel'])).resolve() != root:
-                raise ValueError('Checkpoint repository must belong to this workspace, not an ancestor')
-            reference = 'refs/arc/checkpoints/' + hashlib.sha256(str(root).encode('utf-8')).hexdigest()[:16]
-            references = run_git(root, ['for-each-ref', '--format=%(objectname)', reference]).splitlines()
-            parent = references[0] if references else None
             with TemporaryDirectory(prefix='arc-git-index-') as directory:
                 environment = {key: value for key, value in os.environ.items() if not key.upper().startswith('GIT_')}
                 environment['GIT_INDEX_FILE'] = str(Path(directory) / 'index')
@@ -109,6 +139,7 @@ def checkpoint(root, event, *, node=None, phase=None, payload=None, paths=(), st
                 message = f'ARC {event}: {node or "workspace"} / {phase or "checkpoint"} [{status}]'
                 commit = git(['commit-tree', tree, *(['-p', parent] if parent else []), '-m', message])
                 git(['update-ref', '--create-reflog', reference, commit, parent or '0' * len(commit)])
+            run_git(root, ['reset', '--quiet', commit, '--', *selected, metadata])
             receipt = {**record, 'commit': commit, 'ref': reference, 'metadata': metadata}
             receipt.pop('payload')
             journal = root / '.arc/git_checkpoints.jsonl'
