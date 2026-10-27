@@ -128,6 +128,7 @@ Use these files to assess completion:
 - `.arc/workflow/report.json`: overall status, stage errors, and `failed_nodes`.
 - `.arc/implementation/report.json`: individual requirement states and errors.
 - `.arc/implementation/test_status.json`: recorded test and compilation status.
+- Finalization checks the production build and makes at most one repair attempt if needed; no full historical acceptance regression is run.
 - `.arc/debug.log`: progress and failure details; enable `ARC_DEBUG` for the corresponding model inputs and outputs.
 
 ARC may retain compilable source and continue building after individual requirements fail. A completed command or successful build alone does not establish that every requirement passed.
@@ -138,7 +139,7 @@ Use a new output directory for each experiment or changed requirement document, 
 
 ## 5. Prepare your own requirements
 
-The input can be a directory containing `requirements.yaml`, or a YAML file directly. Use UTF-8. Image paths are relative to that file and use `/` separators.
+The input can be a directory containing `requirements.yaml`, a YAML file directly, or a Markdown file containing exactly one fenced YAML block. Use UTF-8. Image paths are relative to that file and use `/` separators.
 
 ```yaml
 id: REQ-HOME
@@ -164,3 +165,34 @@ scenarios:
 Descriptions contain text and images. Scenarios contain ordered `Given`/`When`/`Then` steps. Images are reused by ID. An image's optional `page` identifies the page containing its full view, alternate state, or component. Equal `page` values share one page UI tree; ownership is inferred when the field is absent.
 
 See the [requirement metamodel](meta-model/requirement/README.md) for field definitions, image reuse, and typed references.
+
+Do not supply `type`, `dependencies`, or `pages`: the compiler derives structural roles and page evidence. References select evidence rather than create execution dependencies or copy empty Given/When/Then fields. A node with its own scenarios is a behavioral unit even when it also has children; those scenarios are designed and implemented as well. Requirement, scenario and step IDs are unique within their respective kinds. Image IDs may be reused only with the same exact path and consistent page identifier.
+
+Run `python scripts/check_requirement_format.py` for offline document and processing acceptance, including parent behavior and multiple images sharing one page tree. `example/smoke-smoke/requirements.yaml` is also migrated when present; its directory remains covered by the existing Git ignore rule.
+
+## 6. Architecture and standalone stages
+
+`arc`, `python -m cli`, and the compatible `python src/main.py` entry all dispatch through `cli.commands`. Python callers can construct `Compiler(CompilationRequest(...))` and await `compilation()`; each compiler instance represents one run.
+
+Standalone commands reuse the same stage `run()` implementations as the full pipeline:
+
+```bash
+python scripts/design_database.py requirements.yaml -o workspace/demo
+python scripts/design_backend.py -o workspace/demo
+python scripts/design_frontend.py requirements.yaml -o workspace/demo
+python scripts/lower_database.py -o workspace/demo
+python scripts/lower_backend.py -o workspace/demo
+python scripts/lower_frontend.py -o workspace/demo
+python scripts/implement.py -o workspace/demo --port 33100
+python scripts/prepare_validation.py -o workspace/demo --port 3000
+```
+
+These are targeted workspace operations, not checkpoint resume: initialize the project and install its TypeScript dependencies before lowering; provide prerequisite IR/plan files before later commands. Frontend reference images require the requirement path or `--reference-root`. Standalone lowering does not configure a model client; unavailable compilation still fails rather than silently succeeding.
+
+Configuration loading is shared by the CLI, execution budgets, and both model clients: explicit `ARC_ENV_FILE`, otherwise the current directory's `.env`, with the repository `.env` as a source-checkout fallback. Existing process environment values take precedence. `arc config` continues to write `.env` in the current directory.
+
+See [the architecture and extension guide](docs/architecture.md) for ownership, compatibility imports, new stages/tasks/tools, and artifact locations. Run the offline core acceptance suite with `python scripts/check_m5.py --all`; it does not call a model service, npm, or a browser. Offline build checks require local setuptools, pip, runtime dependencies, and the fixed baseline Git history; no dependencies are downloaded. Real end-to-end and native-tool verification remain separate from this offline result.
+
+File-action agents default to `ARC_AGENT_PROTOCOL=json`. Set it explicitly to `native` to use function tools on the configured Chat Completions endpoint; implementation and repair share the same runtime, permissions, transactions, and gates. Structured design output stays unchanged. There is no automatic protocol/provider fallback and no MCP integration. Run `python scripts/check_m6.py --all` for offline protocol acceptance; `python scripts/check_native_tools.py --live` separately allows at most two small billable requests using synthetic files in a new isolated directory. See the architecture guide for limits and artifacts.
+
+Run `python scripts/check_observability.py --all` for enabled token/cost totals, real temporary Git checkpoints, full DEBUG transport logs, cleanup guards and M1–M6 offline acceptance. Usage is accumulated in `.arc/cost_stack.json`; each node's design passes, accepted test/source proposals and test results get ordinary commits on the generated project's checked-out `main` branch, visible through `git log`. Only declared paths are committed; unrelated staging is preserved, while staged conflicts and existing non-main branches are refused. Unborn legacy workspaces can promote their private checkpoint chain to `main` without changing working files. `ARC_DEBUG_FULL_PAYLOAD=1` (also `ARC_DEBUG=1` or `DEBUG=1`) prints complete model input/output, including tools and images: treat these logs as sensitive. Configure `ARC_MODEL_PRICING_JSON` for your billing rates; built-in legacy rates are estimates, not current provider prices. See `refactor-stage-5-observability.md` for configuration and artifact semantics. Real business/toolchain/browser end-to-end acceptance is still separate.
